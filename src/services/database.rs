@@ -2,8 +2,7 @@ use std::fmt::Debug;
 use std::time::Duration;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
-use surrealdb::sql::Thing;
-use surrealdb::{Surreal, Response};
+use surrealdb::{RecordId, Surreal};
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
@@ -36,7 +35,7 @@ impl Database {
     }
 
     async fn try_connect(config: &Config) -> Result<Self> {
-        debug!("Connecting to database");
+        debug!("Connecting to database url={}", config.database_url);
         
         // 设置连接超时
         let client = tokio::time::timeout(
@@ -79,19 +78,18 @@ impl Database {
 
     pub async fn create_record<T>(&self, table: &str, record: &T) -> Result<T>
     where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug + 'static,
     {
         debug!("Creating record in table {}: {:?}", table, record);
-        
-        let created: Vec<T> = self.client
+
+        let created: Option<T> = self
+            .client
             .create(table)
-            .content(record)
+            .content(record.clone())
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to create record: {}", e)))?;
-            
-        created.into_iter()
-            .next()
-            .ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()))
+
+        created.ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()))
     }
 
     pub async fn find_record_by_field<T>(&self, table: &str, field: &str, value: &str) -> Result<Option<T>>
@@ -109,9 +107,10 @@ impl Database {
         debug!("执行查询: {}", query);
         debug!("查询参数: value = {}", value);
         
-        let mut result = self.client
+        let mut result = self
+            .client
             .query(&query)
-            .bind(("value", value))
+            .bind(("value", value.to_owned()))
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {}", e)))?;
         
@@ -125,18 +124,23 @@ impl Database {
         Ok(records.into_iter().next())
     }
 
-    pub async fn update_record<T>(&self, table: &str, thing: &Thing, record: &T) -> Result<T>
+    pub async fn update_record<T>(&self, table: &str, id: &str, record: &T) -> Result<T>
     where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug + 'static,
     {
-        debug!("Updating record in table {} with thing {:?}: {:?}", table, thing, record);
-        
-        let updated = self.client
-            .update(thing.clone())
-            .content(record)
+        debug!(
+            "Updating record in table {} with id {}: {:?}",
+            table, id, record
+        );
+
+        let rid = RecordId::from((table.to_string(), id.to_string()));
+        let updated = self
+            .client
+            .update(rid)
+            .content(record.clone())
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?;
-            
+
         updated.ok_or_else(|| AuthError::DatabaseError("Record not found".into()))
     }
 
@@ -146,14 +150,13 @@ impl Database {
     {
         debug!("Deleting record from table {} with id {}", table, id);
         
-        let thing: Thing = format!("{}:{}", table, id).parse()
-            .map_err(|_| AuthError::DatabaseError("Invalid record ID format".into()))?;
-            
-        let deleted = self.client
-            .delete(thing)
+        let rid = RecordId::from((table.to_string(), id.to_string()));
+        let deleted = self
+            .client
+            .delete(rid)
             .await
-            .map_err(|_| AuthError::DatabaseError("Failed to delete record".into()))?;
-            
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete record: {}", e)))?;
+
         Ok(deleted)
     }
 
@@ -161,7 +164,7 @@ impl Database {
         let query = "DELETE session WHERE token = $token";
         self.client
             .query(query)
-            .bind(("token", token))
+            .bind(("token", token.to_owned()))
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())
@@ -189,7 +192,8 @@ impl Database {
         } else {
             format!("user:{}", user_id)
         };
-        let mut result = self.client
+        let mut result = self
+            .client
             .query(query)
             .bind(("user_id", user_thing_str))
             .await

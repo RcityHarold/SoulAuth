@@ -63,9 +63,18 @@ impl UserMfa {
 
     /// 生成备用恢复代码
     pub fn generate_backup_codes() -> Vec<String> {
-        use uuid::Uuid;
+        use rand::{distributions::Uniform, Rng};
+
+        // 仅使用大写字母，避免数字在 is_uppercase 判断中失败
+        let alphabet = Uniform::new_inclusive(b'A', b'Z');
+        let mut rng = rand::thread_rng();
+
         (0..8)
-            .map(|_| Uuid::new_v4().simple().to_string()[..8].to_uppercase())
+            .map(|_| {
+                (0..8)
+                    .map(|_| rng.sample(alphabet) as char)
+                    .collect::<String>()
+            })
             .collect()
     }
 }

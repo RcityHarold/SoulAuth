@@ -25,7 +25,10 @@ impl UserManagementService {
 
     // 用户档案管理
     pub async fn create_user_profile(&self, user_id: &str, request: CreateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         // 检查用户是否存在
         let user_check_query = format!("SELECT * FROM user:{}", user_id);
@@ -74,7 +77,7 @@ impl UserManagementService {
         let query = "CREATE user_profile CONTENT $profile";
         let mut response = self.db.client
             .query(query)
-            .bind(("profile", &profile))
+            .bind(("profile", profile.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create user profile: {}", e);
@@ -106,12 +109,15 @@ impl UserManagementService {
     }
 
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user profile: {}", e);
@@ -129,7 +135,10 @@ impl UserManagementService {
     }
 
     pub async fn update_user_profile(&self, user_id: &str, request: UpdateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         // 获取现有档案
         let existing_profile = self.get_user_profile(user_id).await?;
@@ -175,7 +184,7 @@ impl UserManagementService {
         
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to update user profile: {}", e);
@@ -208,7 +217,10 @@ impl UserManagementService {
 
     // 用户偏好管理
     pub async fn create_user_preferences(&self, user_id: &str, request: CreateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         // 检查偏好是否已存在
         let existing_prefs = self.get_user_preferences(user_id).await;
@@ -259,7 +271,7 @@ impl UserManagementService {
         let query = "CREATE user_preferences CONTENT $preferences";
         let mut response = self.db.client
             .query(query)
-            .bind(("preferences", &preferences))
+            .bind(("preferences", preferences.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create user preferences: {}", e);
@@ -291,12 +303,15 @@ impl UserManagementService {
     }
 
     pub async fn get_user_preferences(&self, user_id: &str) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user preferences: {}", e);
@@ -314,7 +329,10 @@ impl UserManagementService {
     }
 
     pub async fn update_user_preferences(&self, user_id: &str, request: UpdateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         // 获取现有偏好
         let _existing_prefs = self.get_user_preferences(user_id).await?;
@@ -369,7 +387,7 @@ impl UserManagementService {
         
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to update user preferences: {}", e);
@@ -402,7 +420,10 @@ impl UserManagementService {
 
     // 账户状态管理
     pub async fn update_account_status(&self, user_id: &str, request: UpdateAccountStatusRequest, updated_by: &User) -> Result<AccountStatusResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         // 检查用户是否存在
         let user_check_query = format!("SELECT * FROM user:{}", user_id);
@@ -431,7 +452,7 @@ impl UserManagementService {
 
         self.db.client
             .query(&query)
-            .bind(("status", &request.status))
+            .bind(("status", request.status.clone()))
             .bind(("updated_at", now.timestamp()))
             .await
             .map_err(|e| {
@@ -477,7 +498,10 @@ impl UserManagementService {
         user_agent: &str,
         details: serde_json::Value,
     ) -> Result<(), AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         
         let activity = UserActivity {
             id: None,
@@ -494,7 +518,7 @@ impl UserManagementService {
         let query = "CREATE user_activity CONTENT $activity";
         self.db.client
             .query(query)
-            .bind(("activity", &activity))
+            .bind(("activity", activity.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to log user activity: {}", e);
@@ -505,7 +529,10 @@ impl UserManagementService {
     }
 
     pub async fn get_user_activity_log(&self, user_id: &str, request: ActivityLogRequest) -> Result<ActivityLogResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from(("user", user_id));
+        let user_thing = surrealdb::sql::Thing::from((
+            "user".to_string(),
+            user_id.trim_start_matches("user:").to_string(),
+        ));
         let page = request.page.unwrap_or(1);
         let limit = request.limit.unwrap_or(50);
         let offset = (page - 1) * limit;
@@ -534,7 +561,7 @@ impl UserManagementService {
 
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user activity log: {}", e);
@@ -554,7 +581,7 @@ impl UserManagementService {
 
         let mut count_response = self.db.client
             .query(&count_query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to count activities: {}", e);

@@ -67,7 +67,7 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
     let query = "SELECT * FROM user WHERE id = $user_id";
     let mut result = db.client
         .query(query)
-        .bind(("user_id", &token_data.claims.sub))
+        .bind(("user_id", token_data.claims.sub.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
