@@ -34,12 +34,20 @@ impl EmailService {
             }
         }
 
-        let transport = SmtpTransport::starttls_relay(&self.config.smtp_host)
-            .map_err(|e| AuthError::ServerError(format!("Failed to create SMTP transport: {}", e)))?
-            .port(self.config.smtp_port)
-            .credentials(creds)
-            .timeout(Some(Duration::from_secs(60))) // 增加超时时间
-            .build();
+        let transport = if self.config.smtp_insecure {
+            SmtpTransport::builder_dangerous(&self.config.smtp_host)
+                .port(self.config.smtp_port)
+                .credentials(creds)
+                .timeout(Some(Duration::from_secs(60)))
+                .build()
+        } else {
+            SmtpTransport::starttls_relay(&self.config.smtp_host)
+                .map_err(|e| AuthError::ServerError(format!("Failed to create SMTP transport: {}", e)))?
+                .port(self.config.smtp_port)
+                .credentials(creds)
+                .timeout(Some(Duration::from_secs(60)))
+                .build()
+        };
 
         Ok(transport)
     }

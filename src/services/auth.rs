@@ -22,7 +22,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::sync::Arc;
-use surrealdb::sql::Thing;
+use surrealdb::{RecordId, sql::Thing};
 use tracing::{error, info, debug};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -286,10 +286,25 @@ impl AuthService {
 
         // 更新用户记录
         let user_thing = user.id.as_ref().unwrap();
-        let updated_user = self
+        let mut updated_user = self
             .db
-            .update_record("user", &user_thing.to_string(), &user)
-            .await?;
+            .client
+            .query(
+                "UPDATE user SET last_login_at = $last_login_at, last_login_ip = $last_login_ip, updated_at = $updated_at WHERE id = $user_id RETURN *",
+            )
+            .bind(("last_login_at", now.timestamp()))
+            .bind(("last_login_ip", "0.0.0.0".to_string()))
+            .bind(("updated_at", now.timestamp()))
+            .bind(("user_id", user_thing.to_string()))
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update login info: {}", e)))?;
+        let updated_user: Vec<User> = updated_user
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated user: {}", e)))?;
+        let updated_user = updated_user
+            .into_iter()
+            .next()
+            .unwrap_or(user.clone());
 
         // 创建会话
         self.create_session(updated_user).await
@@ -417,11 +432,25 @@ impl AuthService {
         // 保持原始 id
         updated_user.id = user.id.clone();
 
-        let verified_user = self.db.update_record(
-            "user",
-            &user.id.as_ref().unwrap().to_string(),
-            &updated_user,
-        ).await?;
+        let now = Utc::now();
+        let updated_at = now.timestamp();
+        let mut result = self
+            .db
+            .client
+            .query(
+                "UPDATE user SET verified = true, verification_token = NONE, updated_at = $updated_at WHERE verification_token = $verify_token RETURN *",
+            )
+            .bind(("verify_token", token))
+            .bind(("updated_at", updated_at))
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update verification: {}", e)))?;
+        let verified_users: Vec<User> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse verified user: {}", e)))?;
+        let verified_user = verified_users
+            .into_iter()
+            .next()
+            .ok_or(AuthError::DatabaseError("Record not found".into()))?;
 
         // 验证成功后创建会话
         self.create_session(verified_user).await

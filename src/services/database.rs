@@ -3,6 +3,7 @@ use std::time::Duration;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 use surrealdb::{RecordId, Surreal};
+use surrealdb::sql::Thing;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
@@ -133,13 +134,17 @@ impl Database {
             table, id, record
         );
 
-        let rid = RecordId::from((table.to_string(), id.to_string()));
-        let updated = self
-            .client
-            .update(rid)
-            .content(record.clone())
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?;
+        let updated = if id.contains(':') {
+            let thing: Thing = id
+                .parse()
+                .map_err(|_| AuthError::DatabaseError("Invalid record id".into()))?;
+            let rid = RecordId::from((thing.tb, thing.id.to_string()));
+            self.client.update(rid).content(record.clone()).await
+        } else {
+            let rid = RecordId::from((table.to_string(), id.to_string()));
+            self.client.update(rid).content(record.clone()).await
+        }
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?;
 
         updated.ok_or_else(|| AuthError::DatabaseError("Record not found".into()))
     }
@@ -161,10 +166,10 @@ impl Database {
     }
 
     pub async fn delete_session_by_token(&self, token: &str) -> Result<()> {
-        let query = "DELETE session WHERE token = $token";
+        let query = "DELETE session WHERE token = $session_token";
         self.client
             .query(query)
-            .bind(("token", token.to_owned()))
+            .bind(("session_token", token.to_owned()))
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())
