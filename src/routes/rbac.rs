@@ -23,6 +23,7 @@ use crate::{
     },
     services::{database::Database, rbac::RBACService},
     require_permission_status,
+    utils::jwt::Claims,
 };
 
 #[derive(Debug, Deserialize)]
@@ -86,6 +87,15 @@ pub fn router() -> Router {
         // 权限检查路由
         .route("/check/permission/:permission_name", get(check_permission))
         .route("/check/role/:role_name", get(check_role))
+}
+
+fn normalize_user_id(id: &str) -> String {
+    id.replace("user:", "")
+        .replace('⟨', "")
+        .replace('⟩', "")
+        .replace('<', "")
+        .replace('>', "")
+        .replace('"', "")
 }
 
 // ===== 角色管理 =====
@@ -364,17 +374,26 @@ async fn remove_permission_from_role(
 
 async fn get_user_roles(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
-    Path(user_id): Path<String>,
+    claims: Claims,
+    Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<UserRoleResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
-    require_permission_status!(db, &user_id, "users.read");
+    let requester_id = normalize_user_id(&claims.sub);
+    let target_user_id = normalize_user_id(&target_user_id);
+
+    if requester_id != target_user_id {
+        let rbac_service = RBACService::new(db.clone());
+        let allowed = rbac_service
+            .check_user_permission(&requester_id, "users.read")
+            .await
+            .unwrap_or(false);
+        if !allowed {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     let rbac_service = RBACService::new(db);
-    
-    match rbac_service.get_user_roles(&user_id).await {
+
+    match rbac_service.get_user_roles(&target_user_id).await {
         Ok(user_roles) => Ok(Json(ApiResponse::success(user_roles, "User roles retrieved successfully"))),
         Err(e) => {
             error!("Failed to get user roles: {}", e);
@@ -449,17 +468,26 @@ async fn remove_role_from_user(
 
 async fn get_user_permissions(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
-    Path(user_id): Path<String>,
+    claims: Claims,
+    Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
-    require_permission_status!(db, &user_id, "users.read");
+    let requester_id = normalize_user_id(&claims.sub);
+    let target_user_id = normalize_user_id(&target_user_id);
+
+    if requester_id != target_user_id {
+        let rbac_service = RBACService::new(db.clone());
+        let allowed = rbac_service
+            .check_user_permission(&requester_id, "users.read")
+            .await
+            .unwrap_or(false);
+        if !allowed {
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
     let rbac_service = RBACService::new(db);
-    
-    match rbac_service.get_user_permissions(&user_id).await {
+
+    match rbac_service.get_user_permissions(&target_user_id).await {
         Ok(permissions) => Ok(Json(ApiResponse::success(permissions, "User permissions retrieved successfully"))),
         Err(e) => {
             error!("Failed to get user permissions: {}", e);

@@ -400,62 +400,99 @@ impl RBACService {
     }
 
     pub async fn get_user_roles(&self, user_id: &str) -> Result<UserRoleResponse, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
-        
+        #[derive(Debug, serde::Deserialize)]
+        struct UserRoleRow {
+            role_id: String,
+            assigned_at: Option<i64>,
+        }
+
+        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
+        let user_id_plain = format!("user:{}", user_id);
+
         let query = r#"
-            SELECT 
-                user_role.user_id as user_id,
-                user_role.assigned_at as assigned_at,
-                role.id as role_id,
-                role.name as role_name,
-                role.display_name as role_display_name,
-                role.description as role_description
-            FROM user_role 
-            INNER JOIN role ON user_role.role_id = role.id 
-            WHERE user_role.user_id = $user_id
+            SELECT string::replace(type::string(role_id), 'role:', '') as role_id, assigned_at
+            FROM user_role
+            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", user_thing.clone()))
+            .bind(("user_id_bracketed", user_id_bracketed))
+            .bind(("user_id_plain", user_id_plain))
             .await
             .map_err(|e| {
                 error!("Failed to get user roles: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let role_data: Vec<serde_json::Value> = response.take(0).map_err(|e| {
+        let role_data: Vec<UserRoleRow> = response.take(0).map_err(|e| {
             error!("Failed to parse user roles: {}", e);
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        let mut roles = Vec::new();
-        for data in role_data {
-            let role_id = data["role_id"]["id"].as_str().unwrap_or("").to_string();
-            let role_name = data["role_name"].as_str().unwrap_or("").to_string();
-            
-            // 获取角色的权限
+        if role_data.is_empty() {
+            return Ok(UserRoleResponse {
+                user_id: user_id.to_string(),
+                roles: Vec::new(),
+            });
+        }
+
+        let mut assigned_at_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut role_ids: Vec<surrealdb::sql::Thing> = Vec::new();
+        for data in &role_data {
+            let role_id_str = data.role_id.trim();
+            if role_id_str.is_empty() {
+                continue;
+            }
+            let assigned_at = data.assigned_at.unwrap_or(0);
+
+            assigned_at_map.insert(role_id_str.to_string(), assigned_at);
+            role_ids.push(surrealdb::sql::Thing::from(("role", role_id_str)));
+        }
+
+        if role_ids.is_empty() {
+            return Ok(UserRoleResponse {
+                user_id: user_id.to_string(),
+                roles: Vec::new(),
+            });
+        }
+
+        let role_query = "SELECT * FROM role WHERE id IN $role_ids";
+        let mut role_response = self.db.client
+            .query(role_query)
+            .bind(("role_ids", role_ids))
+            .await
+            .map_err(|e| {
+                error!("Failed to get roles: {}", e);
+                AuthError::DatabaseError(e.to_string())
+            })?;
+
+        let roles: Vec<Role> = role_response.take(0).map_err(|e| {
+            error!("Failed to parse roles: {}", e);
+            AuthError::DatabaseError(e.to_string())
+        })?;
+
+        let mut roles_with_permissions = Vec::new();
+        for role in roles {
+            let role_id = role.id.clone().ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+            let role_id_str = role_id.id.to_string();
+            let role_name = role.name.clone();
             let permissions = self.get_role_permissions(&role_name).await?;
-            
-            let role = RoleWithPermissions {
-                id: role_id,
+
+            let assigned_at = assigned_at_map.get(role_id_str.as_str()).copied().unwrap_or(0);
+            roles_with_permissions.push(RoleWithPermissions {
+                id: role_id_str,
                 name: role_name,
-                display_name: data["role_display_name"].as_str().unwrap_or("").to_string(),
-                description: data["role_description"].as_str().map(|s| s.to_string()),
+                display_name: role.display_name.clone(),
+                description: role.description.clone(),
                 permissions,
-                assigned_at: chrono::DateTime::from_timestamp(
-                    data["assigned_at"].as_i64().unwrap_or(0), 0
-                ).unwrap_or_default(),
-            };
-            roles.push(role);
+                assigned_at: chrono::DateTime::from_timestamp(assigned_at, 0).unwrap_or_default(),
+            });
         }
 
         Ok(UserRoleResponse {
             user_id: user_id.to_string(),
-            roles,
+            roles: roles_with_permissions,
         })
     }
 
@@ -465,15 +502,10 @@ impl RBACService {
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
 
-        let query = r#"
-            SELECT permission.name as permission_name
-            FROM role_permission 
-            INNER JOIN permission ON role_permission.permission_id = permission.id 
-            WHERE role_permission.role_id = $role_id
-        "#;
-
-        let mut response = self.db.client
-            .query(query)
+        // SurrealDB 2.x does not support JOIN; use subqueries
+        let ids_query = "SELECT VALUE permission_id FROM role_permission WHERE role_id = $role_id";
+        let mut ids_response = self.db.client
+            .query(ids_query)
             .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
@@ -481,14 +513,33 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let permission_data: Vec<serde_json::Value> = response.take(0).map_err(|e| {
+        let permission_ids: Vec<surrealdb::sql::Thing> = ids_response.take(0).map_err(|e| {
+            error!("Failed to parse role permission ids: {}", e);
+            AuthError::DatabaseError(e.to_string())
+        })?;
+
+        if permission_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let names_query = "SELECT name FROM permission WHERE id IN $permission_ids";
+        let mut names_response = self.db.client
+            .query(names_query)
+            .bind(("permission_ids", permission_ids))
+            .await
+            .map_err(|e| {
+                error!("Failed to get role permissions: {}", e);
+                AuthError::DatabaseError(e.to_string())
+            })?;
+
+        let permission_data: Vec<serde_json::Value> = names_response.take(0).map_err(|e| {
             error!("Failed to parse role permissions: {}", e);
             AuthError::DatabaseError(e.to_string())
         })?;
 
         let permissions = permission_data
             .into_iter()
-            .map(|data| data["permission_name"].as_str().unwrap_or("").to_string())
+            .map(|data| data["name"].as_str().unwrap_or("").to_string())
             .filter(|name| !name.is_empty())
             .collect();
 
@@ -577,23 +628,25 @@ impl RBACService {
 
     // 权限检查
     pub async fn check_user_permission(&self, user_id: &str, permission_name: &str) -> Result<bool, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
+        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
+        let user_id_plain = format!("user:{}", user_id);
         
         let query = r#"
             SELECT count() as count
-            FROM user_role 
-            INNER JOIN role_permission ON user_role.role_id = role_permission.role_id
-            INNER JOIN permission ON role_permission.permission_id = permission.id
-            WHERE user_role.user_id = $user_id AND permission.name = $permission_name
+            FROM role_permission
+            WHERE role_id IN (
+                SELECT VALUE role_id
+                FROM user_role
+                WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+            )
+              AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", user_thing.clone()))
+            .bind(("user_id_bracketed", user_id_bracketed))
+            .bind(("user_id_plain", user_id_plain))
             .bind(("permission_name", permission_name.to_owned()))
             .await
             .map_err(|e| {
@@ -618,22 +671,21 @@ impl RBACService {
     }
 
     pub async fn check_user_role(&self, user_id: &str, role_name: &str) -> Result<bool, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
+        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
+        let user_id_plain = format!("user:{}", user_id);
         
         let query = r#"
             SELECT count() as count
-            FROM user_role 
-            INNER JOIN role ON user_role.role_id = role.id
-            WHERE user_role.user_id = $user_id AND role.name = $role_name
+            FROM user_role
+            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+              AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", user_thing.clone()))
+            .bind(("user_id_bracketed", user_id_bracketed))
+            .bind(("user_id_plain", user_id_plain))
             .bind(("role_name", role_name.to_owned()))
             .await
             .map_err(|e| {
@@ -658,22 +710,26 @@ impl RBACService {
     }
 
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AuthError> {
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
+        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
+        let user_id_plain = format!("user:{}", user_id);
         
         let query = r#"
-            SELECT DISTINCT permission.name as permission_name
-            FROM user_role 
-            INNER JOIN role_permission ON user_role.role_id = role_permission.role_id
-            INNER JOIN permission ON role_permission.permission_id = permission.id
-            WHERE user_role.user_id = $user_id
+            SELECT name
+            FROM permission
+            WHERE id IN (
+                SELECT VALUE permission_id FROM role_permission
+                WHERE role_id IN (
+                    SELECT VALUE role_id
+                    FROM user_role
+                    WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+                )
+            )
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", user_thing.clone()))
+            .bind(("user_id_bracketed", user_id_bracketed))
+            .bind(("user_id_plain", user_id_plain))
             .await
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);
@@ -685,11 +741,13 @@ impl RBACService {
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        let permissions = permission_data
+        let mut permissions: Vec<String> = permission_data
             .into_iter()
-            .map(|data| data["permission_name"].as_str().unwrap_or("").to_string())
+            .map(|data| data["name"].as_str().unwrap_or("").to_string())
             .filter(|name| !name.is_empty())
             .collect();
+        permissions.sort();
+        permissions.dedup();
 
         Ok(permissions)
     }
