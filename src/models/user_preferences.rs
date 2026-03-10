@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct UserPreferences {
     pub id: Option<Thing>,
     pub user_id: Thing,
@@ -78,9 +79,9 @@ impl From<UserPreferences> for UserPreferencesResponse {
     fn from(prefs: UserPreferences) -> Self {
         Self {
             id: prefs.id
-                .map(|id| id.id.to_string())
+                .map(|id| crate::utils::record_id::record_id_key_to_string(&id))
                 .unwrap_or_default(),
-            user_id: prefs.user_id.id.to_string(),
+            user_id: crate::utils::record_id::record_id_key_to_string(&prefs.user_id),
             theme: prefs.theme,
             language: prefs.language,
             email_notifications: prefs.email_notifications,
@@ -104,7 +105,7 @@ impl Default for UserPreferences {
         let now = Utc::now();
         Self {
             id: None,
-            user_id: Thing::from(("user", "default")),
+            user_id: Thing::new("user", "default"),
             theme: "light".to_string(),
             language: "en".to_string(),
             email_notifications: true,

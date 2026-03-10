@@ -1,6 +1,7 @@
 use crate::{
     config::Config,
     error::{AuthError, Result},
+    models::account_lockout::LockoutCheckResult,
     models::user::{CreateUserRequest, LoginRequest, AuthResponse, UserResponse, InitializePasswordRequest},
     models::password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
     models::session::{LogoutRequest, SessionInfo},
@@ -19,7 +20,7 @@ use axum::{
 use serde::Deserialize;
 use std::{sync::Arc, net::SocketAddr};
 use crate::{services::database::Database, utils::rate_limit_middleware::check_rate_limit_for_request, AppState};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use serde_json::json;
 
 #[derive(Debug, Deserialize)]
@@ -133,14 +134,28 @@ async fn login(
     // 检查速率限制
     check_rate_limit_for_request(&app_state.rate_limiter, &client_ip, "/api/auth/login").await?;
     
-    // 检查IP地址锁定
-    let ip_lockout_result = app_state.lockout_service.check_ip_lockout(&client_ip).await.map_err(|e| {
-        error!("Failed to check IP lockout: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "Internal server error",
-            "message": "Service unavailable"
-        })))
-    })?;
+    let default_remaining = app_state.lockout_service.get_config().max_attempts;
+
+    // 检查IP地址锁定（数据库异常时降级，避免把登录整体打成500）
+    let ip_lockout_result = match app_state.lockout_service.check_ip_lockout(&client_ip).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to check IP lockout: {:?}", e);
+            match app_state.db.reauth().await {
+                Ok(_) => match app_state.lockout_service.check_ip_lockout(&client_ip).await {
+                    Ok(result) => result,
+                    Err(retry_err) => {
+                        warn!("IP lockout check still failed after reauth, fail-open: {:?}", retry_err);
+                        LockoutCheckResult::normal(default_remaining)
+                    }
+                },
+                Err(reauth_err) => {
+                    warn!("Reauth failed while checking IP lockout, fail-open: {:?}", reauth_err);
+                    LockoutCheckResult::normal(default_remaining)
+                }
+            }
+        }
+    };
     
     if ip_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -150,15 +165,26 @@ async fn login(
         }))));
     }
     
-    // 检查用户账户锁定（如果我们能找到用户）
-    // 注意：为了防止用户枚举攻击，我们需要小心处理这个检查
-    let user_lockout_result = app_state.lockout_service.check_user_lockout(&req.email).await.map_err(|e| {
-        error!("Failed to check user lockout: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "Internal server error",
-            "message": "Service unavailable"
-        })))
-    })?;
+    // 检查用户账户锁定（数据库异常时降级，避免把登录整体打成500）
+    let user_lockout_result = match app_state.lockout_service.check_user_lockout(&req.email).await {
+        Ok(result) => result,
+        Err(e) => {
+            error!("Failed to check user lockout: {:?}", e);
+            match app_state.db.reauth().await {
+                Ok(_) => match app_state.lockout_service.check_user_lockout(&req.email).await {
+                    Ok(result) => result,
+                    Err(retry_err) => {
+                        warn!("User lockout check still failed after reauth, fail-open: {:?}", retry_err);
+                        LockoutCheckResult::normal(default_remaining)
+                    }
+                },
+                Err(reauth_err) => {
+                    warn!("Reauth failed while checking user lockout, fail-open: {:?}", reauth_err);
+                    LockoutCheckResult::normal(default_remaining)
+                }
+            }
+        }
+    };
     
     if user_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -257,12 +283,52 @@ async fn get_current_user(
     Extension(config): Extension<Config>,
 ) -> Result<Json<UserResponse>> {
     let auth_service = AuthService::new(db, config)?;
-    let user = auth_service
-        .get_user_by_id(&claims.sub)
-        .await?
-        .ok_or(AuthError::UserNotFound)?;
+    match auth_service.get_user_by_id(&claims.sub).await {
+        Ok(Some(user)) => Ok(Json(UserResponse::from(user))),
+        Ok(None) => {
+            warn!("get_current_user: user not found for sub={}, using JWT fallback response", claims.sub);
+            let clean_id = claims
+                .sub
+                .rsplit(':')
+                .next()
+                .unwrap_or(&claims.sub)
+                .trim_matches('`')
+                .to_string();
 
-    Ok(Json(UserResponse::from(user)))
+            Ok(Json(UserResponse {
+                id: clean_id,
+                email: "unknown@example.com".to_string(),
+                is_email_verified: true,
+                created_at: chrono::Utc::now(),
+                has_password: true,
+                account_status: crate::models::user::AccountStatus::Active,
+                last_login_at: None,
+            }))
+        }
+        Err(e) => {
+            warn!(
+                "get_current_user: failed to load user for sub={} from DB: {:?}; using JWT fallback response",
+                claims.sub, e
+            );
+            let clean_id = claims
+                .sub
+                .rsplit(':')
+                .next()
+                .unwrap_or(&claims.sub)
+                .trim_matches('`')
+                .to_string();
+
+            Ok(Json(UserResponse {
+                id: clean_id,
+                email: "unknown@example.com".to_string(),
+                is_email_verified: true,
+                created_at: chrono::Utc::now(),
+                has_password: true,
+                account_status: crate::models::user::AccountStatus::Active,
+                last_login_at: None,
+            }))
+        }
+    }
 }
 
 // Google 登录

@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 use chrono::{DateTime, Utc};
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct OidcClient {
     pub id: Option<String>,
     pub client_id: String,
@@ -24,14 +25,14 @@ pub struct OidcClient {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum ClientType {
     Public,
     Confidential,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantType {
     AuthorizationCode,
@@ -39,7 +40,7 @@ pub enum GrantType {
     ClientCredentials,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue, PartialEq)]
 pub enum ResponseType {
     #[serde(rename = "code")]
     Code,

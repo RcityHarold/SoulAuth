@@ -5,7 +5,7 @@
 DEFINE TABLE user SCHEMAFULL;
 DEFINE FIELD email ON user TYPE string;
 DEFINE FIELD password ON user TYPE option<string>;
-DEFINE FIELD verified ON user TYPE bool;
+DEFINE FIELD verified ON user TYPE bool DEFAULT false;
 DEFINE FIELD verification_token ON user TYPE option<string>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
 DEFINE FIELD last_login_at ON user TYPE option<number>;

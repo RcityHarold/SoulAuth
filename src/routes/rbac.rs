@@ -98,6 +98,14 @@ fn normalize_user_id(id: &str) -> String {
         .replace('"', "")
 }
 
+fn current_user_id(current_user: &User) -> Result<String, StatusCode> {
+    let rid = current_user
+        .id
+        .as_ref()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(crate::utils::record_id::record_id_key_to_string(rid))
+}
+
 // ===== 角色管理 =====
 
 async fn create_role(
@@ -105,9 +113,7 @@ async fn create_role(
     Extension(current_user): Extension<User>,
     Json(request): Json<CreateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "roles.write");
 
     let rbac_service = RBACService::new(db);
@@ -133,9 +139,7 @@ async fn list_roles(
     Extension(current_user): Extension<User>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<RoleResponse>>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "roles.read");
 
     let rbac_service = RBACService::new(db);
@@ -154,9 +158,7 @@ async fn get_role(
     Extension(current_user): Extension<User>,
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "roles.read");
 
     let rbac_service = RBACService::new(db);
@@ -184,9 +186,7 @@ async fn update_role(
     Path(role_name): Path<String>,
     Json(request): Json<UpdateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "roles.write");
 
     let rbac_service = RBACService::new(db);
@@ -216,9 +216,7 @@ async fn create_permission(
     Extension(current_user): Extension<User>,
     Json(request): Json<CreatePermissionRequest>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "permissions.write");
 
     let rbac_service = RBACService::new(db);
@@ -244,9 +242,7 @@ async fn list_permissions(
     Extension(current_user): Extension<User>,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<PermissionResponse>>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "permissions.read");
 
     let rbac_service = RBACService::new(db);
@@ -265,9 +261,7 @@ async fn get_permission(
     Extension(current_user): Extension<User>,
     Path(permission_name): Path<String>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "permissions.read");
 
     let rbac_service = RBACService::new(db);
@@ -289,9 +283,7 @@ async fn get_role_permissions(
     Extension(current_user): Extension<User>,
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "roles.read");
 
     let rbac_service = RBACService::new(db);
@@ -312,9 +304,7 @@ async fn assign_permission_to_role(
     Path(role_name): Path<String>,
     Json(request): Json<AssignPermissionToRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "permissions.write");
 
     let rbac_service = RBACService::new(db);
@@ -346,9 +336,7 @@ async fn remove_permission_from_role(
     Path(role_name): Path<String>,
     Json(request): Json<RemovePermissionFromRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, "permissions.write");
 
     let rbac_service = RBACService::new(db);
@@ -404,21 +392,33 @@ async fn get_user_roles(
 
 async fn assign_role_to_user(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    claims: Claims,
     Path(user_id): Path<String>,
     Json(request): Json<AssignRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
-    require_permission_status!(db, &user_id, "roles.write");
+    let requester_id = normalize_user_id(&claims.sub);
+    require_permission_status!(db, &requester_id, "roles.write");
+
+    let current_user = db
+        .find_record_by_field::<User>("user", "id", &requester_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to load requester user for role assignment: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let target_user_id = normalize_user_id(&user_id);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.assign_role_to_user(&user_id, &request.role_name, &current_user).await {
+    match rbac_service
+        .assign_role_to_user(&target_user_id, &request.role_name, &current_user)
+        .await
+    {
         Ok(_) => {
             info!("Role '{}' assigned to user '{}' by user '{}'", 
-                  request.role_name, user_id, current_user.email);
+                  request.role_name, target_user_id, current_user.email);
             Ok(Json(ApiResponse::<()>::success_message("Role assigned to user successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -438,21 +438,33 @@ async fn assign_role_to_user(
 
 async fn remove_role_from_user(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    claims: Claims,
     Path(user_id): Path<String>,
     Json(request): Json<RemoveRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let user_id = current_user.id.as_ref()
-        .ok_or_else(|| StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
-    require_permission_status!(db, &user_id, "roles.write");
+    let requester_id = normalize_user_id(&claims.sub);
+    require_permission_status!(db, &requester_id, "roles.write");
+
+    let current_user = db
+        .find_record_by_field::<User>("user", "id", &requester_id)
+        .await
+        .map_err(|e| {
+            error!("Failed to load requester user for role removal: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+
+    let target_user_id = normalize_user_id(&user_id);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.remove_role_from_user(&user_id, &request.role_name, &current_user).await {
+    match rbac_service
+        .remove_role_from_user(&target_user_id, &request.role_name, &current_user)
+        .await
+    {
         Ok(_) => {
             info!("Role '{}' removed from user '{}' by user '{}'", 
-                  request.role_name, user_id, current_user.email);
+                  request.role_name, target_user_id, current_user.email);
             Ok(Json(ApiResponse::<()>::success_message("Role removed from user successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -518,9 +530,7 @@ async fn check_permission(
     Path(permission_name): Path<String>,
 ) -> Result<Json<ApiResponse<PermissionCheckResponse>>, StatusCode> {
     let rbac_service = RBACService::new(db);
-    let user_id = current_user.id.as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     
     match rbac_service.check_user_permission(&user_id, &permission_name).await {
         Ok(has_permission) => {
@@ -544,9 +554,7 @@ async fn check_role(
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<RoleCheckResponse>>, StatusCode> {
     let rbac_service = RBACService::new(db);
-    let user_id = current_user.id.as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = current_user_id(&current_user)?;
     
     match rbac_service.check_user_role(&user_id, &role_name).await {
         Ok(has_role) => {

@@ -1,9 +1,10 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+use surrealdb::types::SurrealValue;
 
 /// MFA设置状态
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, SurrealValue)]
 pub enum MfaStatus {
     /// 未启用MFA
     Disabled,
@@ -14,7 +15,7 @@ pub enum MfaStatus {
 }
 
 /// MFA方法类型
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, SurrealValue)]
 pub enum MfaMethod {
     /// TOTP (Time-based One-Time Password)
     Totp,
@@ -25,7 +26,7 @@ pub enum MfaMethod {
 }
 
 /// 用户MFA配置
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct UserMfa {
     /// 用户ID
     pub user_id: String,

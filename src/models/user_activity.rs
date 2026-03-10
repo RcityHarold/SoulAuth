@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct UserActivity {
     pub id: Option<Thing>,
     pub user_id: Thing,
@@ -15,7 +16,7 @@ pub struct UserActivity {
     pub timestamp: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub enum ActivityCategory {
     Authentication,
     Profile,
@@ -25,7 +26,7 @@ pub enum ActivityCategory {
     System,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub enum ActivityStatus {
     Success,
     Failed,
@@ -50,9 +51,9 @@ impl From<UserActivity> for UserActivityResponse {
     fn from(activity: UserActivity) -> Self {
         Self {
             id: activity.id
-                .map(|id| id.id.to_string())
+                .map(|id| crate::utils::record_id::record_id_key_to_string(&id))
                 .unwrap_or_default(),
-            user_id: activity.user_id.id.to_string(),
+            user_id: crate::utils::record_id::record_id_key_to_string(&activity.user_id),
             action: activity.action,
             category: activity.category,
             ip_address: activity.ip_address,

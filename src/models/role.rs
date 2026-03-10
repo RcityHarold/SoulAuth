@@ -1,18 +1,16 @@
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct Role {
     pub id: Option<Thing>,
     pub name: String,
     pub display_name: String,
     pub description: Option<String>,
     pub is_system: bool, // 系统角色不可删除
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub created_at: DateTime<Utc>,
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub updated_at: DateTime<Utc>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -35,15 +33,15 @@ pub struct RoleResponse {
     pub display_name: String,
     pub description: Option<String>,
     pub is_system: bool,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: i64,
+    pub updated_at: i64,
     pub permissions: Vec<String>, // 权限名称列表
 }
 
 impl From<Role> for RoleResponse {
     fn from(role: Role) -> Self {
         Self {
-            id: role.id.unwrap().id.to_string(),
+            id: crate::utils::record_id::record_id_key_to_string(&role.id.unwrap()),
             name: role.name,
             display_name: role.display_name,
             description: role.description,

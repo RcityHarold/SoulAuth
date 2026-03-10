@@ -297,7 +297,7 @@ impl MfaService {
     /// 保存用户MFA配置到数据库
     async fn save_user_mfa(&self, mfa_config: &UserMfa) -> Result<()> {
         let query = r#"
-            CREATE user_mfa CONTENT {
+            UPSERT type::thing('user_mfa', $user_id) CONTENT {
                 user_id: $user_id,
                 status: $status,
                 method: $method,
@@ -306,7 +306,7 @@ impl MfaService {
                 created_at: $created_at,
                 updated_at: $updated_at,
                 last_used_at: $last_used_at
-            } REPLACE
+            }
         "#;
 
         self.db.query(query)

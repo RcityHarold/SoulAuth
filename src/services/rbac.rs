@@ -2,6 +2,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
 use tracing::{error, info, warn};
+use surrealdb_types::SurrealValue;
 
 use crate::{
     error::AuthError,
@@ -30,7 +31,7 @@ impl RBACService {
             return Err(AuthError::ValidationError("Role name already exists".to_string()));
         }
 
-        let now = Utc::now();
+        let now = Utc::now().timestamp();
         let role = Role {
             id: None,
             name: request.name.clone(),
@@ -126,7 +127,8 @@ impl RBACService {
             return Err(AuthError::ValidationError("No fields to update".to_string()));
         }
 
-        let query = format!("UPDATE {} SET {}", role_id, updates.join(", "));
+        let role_key = crate::utils::record_id::record_id_key_to_string(&role_id);
+        let query = format!("UPDATE role:{} SET {}", role_key, updates.join(", "));
         let mut response = self
             .db
             .client
@@ -196,7 +198,8 @@ impl RBACService {
             })?;
 
         // 删除角色
-        let delete_query = format!("DELETE {}", role_id);
+        let role_key = crate::utils::record_id::record_id_key_to_string(&role_id);
+        let delete_query = format!("DELETE role:{}", role_key);
         self.db.client
             .query(&delete_query)
             .await
@@ -240,7 +243,7 @@ impl RBACService {
             return Err(AuthError::ValidationError("Permission name already exists".to_string()));
         }
 
-        let now = Utc::now();
+        let now = Utc::now().timestamp();
         let permission = Permission {
             id: None,
             name: request.name.clone(),
@@ -324,10 +327,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
+        let user_thing = surrealdb::types::RecordId::new("user", user_id);
         let assigned_by_thing = assigned_by.id.as_ref()
             .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
 
@@ -379,10 +379,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = surrealdb::sql::Thing::from((
-            "user".to_string(),
-            user_id.to_string(),
-        ));
+        let user_thing = surrealdb::types::RecordId::new("user", user_id);
 
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         self.db.client
@@ -400,7 +397,7 @@ impl RBACService {
     }
 
     pub async fn get_user_roles(&self, user_id: &str) -> Result<UserRoleResponse, AuthError> {
-        #[derive(Debug, serde::Deserialize)]
+        #[derive(Debug, serde::Deserialize, SurrealValue)]
         struct UserRoleRow {
             role_id: String,
             assigned_at: Option<i64>,
@@ -438,7 +435,7 @@ impl RBACService {
         }
 
         let mut assigned_at_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
-        let mut role_ids: Vec<surrealdb::sql::Thing> = Vec::new();
+        let mut role_ids: Vec<surrealdb::types::RecordId> = Vec::new();
         for data in &role_data {
             let role_id_str = data.role_id.trim();
             if role_id_str.is_empty() {
@@ -447,7 +444,7 @@ impl RBACService {
             let assigned_at = data.assigned_at.unwrap_or(0);
 
             assigned_at_map.insert(role_id_str.to_string(), assigned_at);
-            role_ids.push(surrealdb::sql::Thing::from(("role", role_id_str)));
+            role_ids.push(surrealdb::types::RecordId::new("role", role_id_str));
         }
 
         if role_ids.is_empty() {
@@ -475,7 +472,7 @@ impl RBACService {
         let mut roles_with_permissions = Vec::new();
         for role in roles {
             let role_id = role.id.clone().ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-            let role_id_str = role_id.id.to_string();
+            let role_id_str = crate::utils::record_id::record_id_key_to_string(&role_id);
             let role_name = role.name.clone();
             let permissions = self.get_role_permissions(&role_name).await?;
 
@@ -513,7 +510,7 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let permission_ids: Vec<surrealdb::sql::Thing> = ids_response.take(0).map_err(|e| {
+        let permission_ids: Vec<surrealdb::types::RecordId> = ids_response.take(0).map_err(|e| {
             error!("Failed to parse role permission ids: {}", e);
             AuthError::DatabaseError(e.to_string())
         })?;
@@ -630,6 +627,7 @@ impl RBACService {
     pub async fn check_user_permission(&self, user_id: &str, permission_name: &str) -> Result<bool, AuthError> {
         let user_id_bracketed = format!("user:⟨{}⟩", user_id);
         let user_id_plain = format!("user:{}", user_id);
+        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT count() as count
@@ -637,7 +635,7 @@ impl RBACService {
             WHERE role_id IN (
                 SELECT VALUE role_id
                 FROM user_role
-                WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+                WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
             )
               AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
@@ -647,6 +645,7 @@ impl RBACService {
             .query(query)
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
+            .bind(("user_id_quoted", user_id_quoted))
             .bind(("permission_name", permission_name.to_owned()))
             .await
             .map_err(|e| {
@@ -673,11 +672,12 @@ impl RBACService {
     pub async fn check_user_role(&self, user_id: &str, role_name: &str) -> Result<bool, AuthError> {
         let user_id_bracketed = format!("user:⟨{}⟩", user_id);
         let user_id_plain = format!("user:{}", user_id);
+        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT count() as count
             FROM user_role
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
               AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
@@ -686,6 +686,7 @@ impl RBACService {
             .query(query)
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
+            .bind(("user_id_quoted", user_id_quoted))
             .bind(("role_name", role_name.to_owned()))
             .await
             .map_err(|e| {
@@ -712,6 +713,7 @@ impl RBACService {
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AuthError> {
         let user_id_bracketed = format!("user:⟨{}⟩", user_id);
         let user_id_plain = format!("user:{}", user_id);
+        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT name
@@ -721,7 +723,7 @@ impl RBACService {
                 WHERE role_id IN (
                     SELECT VALUE role_id
                     FROM user_role
-                    WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+                    WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
                 )
             )
         "#;
@@ -730,6 +732,7 @@ impl RBACService {
             .query(query)
             .bind(("user_id_bracketed", user_id_bracketed))
             .bind(("user_id_plain", user_id_plain))
+            .bind(("user_id_quoted", user_id_quoted))
             .await
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);

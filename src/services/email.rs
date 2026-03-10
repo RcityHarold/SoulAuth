@@ -16,10 +16,23 @@ impl EmailService {
     }
 
     fn create_transport(&self) -> Result<SmtpTransport> {
-        let creds = Credentials::new(
-            self.config.smtp_username.clone(),
-            self.config.smtp_password.clone(),
+        tracing::info!(
+            "SMTP transport config host={} port={} insecure={} username_set={}",
+            self.config.smtp_host,
+            self.config.smtp_port,
+            self.config.smtp_insecure,
+            !self.config.smtp_username.trim().is_empty()
         );
+        let creds = if !self.config.smtp_username.trim().is_empty()
+            || !self.config.smtp_password.trim().is_empty()
+        {
+            Some(Credentials::new(
+                self.config.smtp_username.clone(),
+                self.config.smtp_password.clone(),
+            ))
+        } else {
+            None
+        };
 
         // 如果启用了代理，设置环境变量
         if self.config.proxy_enabled {
@@ -35,18 +48,22 @@ impl EmailService {
         }
 
         let transport = if self.config.smtp_insecure {
-            SmtpTransport::builder_dangerous(&self.config.smtp_host)
+            let mut builder = SmtpTransport::builder_dangerous(&self.config.smtp_host)
                 .port(self.config.smtp_port)
-                .credentials(creds)
-                .timeout(Some(Duration::from_secs(60)))
-                .build()
+                .timeout(Some(Duration::from_secs(60)));
+            if let Some(creds) = creds {
+                builder = builder.credentials(creds);
+            }
+            builder.build()
         } else {
-            SmtpTransport::starttls_relay(&self.config.smtp_host)
+            let mut builder = SmtpTransport::starttls_relay(&self.config.smtp_host)
                 .map_err(|e| AuthError::ServerError(format!("Failed to create SMTP transport: {}", e)))?
                 .port(self.config.smtp_port)
-                .credentials(creds)
-                .timeout(Some(Duration::from_secs(60)))
-                .build()
+                .timeout(Some(Duration::from_secs(60)));
+            if let Some(creds) = creds {
+                builder = builder.credentials(creds);
+            }
+            builder.build()
         };
 
         Ok(transport)
