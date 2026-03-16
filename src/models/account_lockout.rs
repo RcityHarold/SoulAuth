@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use surrealdb::types::SurrealValue;
 
 /// 账户锁定状态
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, PartialEq)]
 pub enum LockoutStatus {
     /// 正常状态
     Normal,
@@ -13,7 +14,7 @@ pub enum LockoutStatus {
 }
 
 /// 账户锁定记录
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct AccountLockout {
     /// 用户ID或IP地址
     pub identifier: String,
@@ -36,7 +37,7 @@ pub struct AccountLockout {
 }
 
 /// 锁定类型
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SurrealValue, PartialEq)]
 pub enum LockoutType {
     /// 基于用户账户的锁定
     User,

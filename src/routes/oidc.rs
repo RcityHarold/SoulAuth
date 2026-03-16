@@ -89,7 +89,7 @@ async fn authorize(
                 let token = &auth_str[7..];
                 if let Ok(user) = get_user_from_token(token, &db).await {
                     // 用户已登录，生成授权码
-                    match oidc_service.create_authorization_code(&request, &user.id.unwrap().id.to_string()).await {
+                    match oidc_service.create_authorization_code(&request, &crate::utils::record_id::record_id_key_to_string(&user.id.unwrap())).await {
                         Ok(code) => {
                             let mut redirect_url = format!("{}?code={}", request.redirect_uri, code);
                             if let Some(state) = request.state {

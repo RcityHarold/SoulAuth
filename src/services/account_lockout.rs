@@ -10,9 +10,14 @@ use chrono::Utc;
 use std::sync::Arc;
 use tracing::{info, warn, debug};
 
+fn is_unauthorized_db_error(err: &surrealdb::Error) -> bool {
+    let msg = err.to_string();
+    msg.contains("401") || msg.contains("Unauthorized")
+}
+
 /// 账户锁定服务
 pub struct AccountLockoutService {
-    db: Database,
+    db: Arc<Database>,
     config: LockoutConfig,
 }
 
@@ -20,7 +25,7 @@ impl AccountLockoutService {
     /// 创建新的账户锁定服务实例
     pub fn new(db: Arc<Database>, _config: Config) -> Result<Self> {
         Ok(Self {
-            db: (*db).clone(),
+            db,
             config: LockoutConfig::default(),
         })
     }
@@ -28,7 +33,7 @@ impl AccountLockoutService {
     /// 使用自定义配置创建服务
     pub fn with_config(db: Arc<Database>, config: LockoutConfig) -> Result<Self> {
         Ok(Self {
-            db: (*db).clone(),
+            db,
             config,
         })
     }
@@ -262,9 +267,28 @@ impl AccountLockoutService {
             AND status IN ['Locked', 'TemporaryLocked']
         "#;
 
-        let result = self.db.query(query)
-            .bind(("now", Utc::now()))
-            .await?;
+        let now = Utc::now().to_string();
+        let _result = match self
+            .db
+            .query(query)
+            .bind(("now", now.clone()))
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                if is_unauthorized_db_error(&err) {
+                    warn!("cleanup_expired_lockouts got 401, reauth and retry");
+                    self.db.reauth().await?;
+                    self.db
+                        .query(query)
+                        .bind(("now", now))
+                        .await
+                        .map_err(|e| AuthError::DatabaseError(e.to_string()))?
+                } else {
+                    return Err(AuthError::DatabaseError(err.to_string()));
+                }
+            }
+        };
 
         info!("Cleaned up expired lockout records");
         Ok(0) // SurrealDB DELETE 不返回删除计数，这里返回0
@@ -273,11 +297,32 @@ impl AccountLockoutService {
     /// 从数据库获取锁定记录
     async fn get_lockout_record(&self, identifier: &str, lockout_type: LockoutType) -> Result<AccountLockout> {
         let query = "SELECT * FROM account_lockout WHERE identifier = $identifier AND lockout_type = $lockout_type";
-        
-        let mut result = self.db.query(query)
-            .bind(("identifier", identifier))
-            .bind(("lockout_type", lockout_type))
-            .await?;
+
+        let ident = identifier.to_owned();
+        let ltype = lockout_type.clone();
+        let mut result = match self
+            .db
+            .query(query)
+            .bind(("identifier", ident.clone()))
+            .bind(("lockout_type", ltype.clone()))
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                if is_unauthorized_db_error(&err) {
+                    warn!("get_lockout_record got 401, reauth and retry");
+                    self.db.reauth().await?;
+                    self.db
+                        .query(query)
+                        .bind(("identifier", ident))
+                        .bind(("lockout_type", ltype))
+                        .await
+                        .map_err(|e| AuthError::DatabaseError(e.to_string()))?
+                } else {
+                    return Err(AuthError::DatabaseError(err.to_string()));
+                }
+            }
+        };
         
         let lockout: Option<AccountLockout> = result.take(0)?;
         
@@ -286,8 +331,16 @@ impl AccountLockoutService {
 
     /// 保存锁定记录到数据库
     async fn save_lockout_record(&self, lockout: &AccountLockout) -> Result<()> {
+        // SurrealQL doesn't support `REPLACE` in this position.
+        // Use a deterministic record id so we can UPDATE (create-or-replace semantics).
+        // Example: account_lockout:user:foo@example.com
+        let lockout_type = format!("{:?}", lockout.lockout_type).to_lowercase();
+        let identifier = lockout.identifier.replace(' ', "_");
+        let id = format!("{}:{}", lockout_type, identifier);
+        let rid = format!("account_lockout:{id}");
+
         let query = r#"
-            CREATE account_lockout CONTENT {
+            UPDATE type::record($rid) CONTENT {
                 identifier: $identifier,
                 lockout_type: $lockout_type,
                 failed_attempts: $failed_attempts,
@@ -297,20 +350,56 @@ impl AccountLockoutService {
                 last_attempt_at: $last_attempt_at,
                 created_at: $created_at,
                 updated_at: $updated_at
-            } REPLACE
+            }
         "#;
 
-        self.db.query(query)
-            .bind(("identifier", &lockout.identifier))
-            .bind(("lockout_type", &lockout.lockout_type))
-            .bind(("failed_attempts", lockout.failed_attempts))
-            .bind(("status", &lockout.status))
-            .bind(("locked_at", lockout.locked_at))
-            .bind(("locked_until", lockout.locked_until))
-            .bind(("last_attempt_at", lockout.last_attempt_at))
-            .bind(("created_at", lockout.created_at))
-            .bind(("updated_at", lockout.updated_at))
-            .await?;
+        let identifier_value = lockout.identifier.clone();
+        let lockout_type_value = lockout.lockout_type.clone();
+        let status_value = lockout.status.clone();
+        let failed_attempts_value = lockout.failed_attempts;
+        let locked_at_value = lockout.locked_at;
+        let locked_until_value = lockout.locked_until;
+        let last_attempt_at_value = lockout.last_attempt_at;
+        let created_at_value = lockout.created_at;
+        let updated_at_value = lockout.updated_at;
+
+        let save = self
+            .db
+            .query(query)
+            .bind(("rid", rid.clone()))
+            .bind(("identifier", identifier_value.clone()))
+            .bind(("lockout_type", lockout_type_value.clone()))
+            .bind(("failed_attempts", failed_attempts_value))
+            .bind(("status", status_value.clone()))
+            .bind(("locked_at", locked_at_value))
+            .bind(("locked_until", locked_until_value))
+            .bind(("last_attempt_at", last_attempt_at_value))
+            .bind(("created_at", created_at_value))
+            .bind(("updated_at", updated_at_value))
+            .await;
+
+        if let Err(err) = save {
+            if is_unauthorized_db_error(&err) {
+                warn!("save_lockout_record got 401, reauth and retry");
+                self.db.reauth().await?;
+                self.db
+                    .query(query)
+                    .bind(("rid", rid))
+                    .bind(("identifier", identifier_value))
+                    .bind(("lockout_type", lockout_type_value))
+                    .bind(("failed_attempts", failed_attempts_value))
+                    .bind(("status", status_value))
+                    .bind(("locked_at", locked_at_value))
+                    .bind(("locked_until", locked_until_value))
+                    .bind(("last_attempt_at", last_attempt_at_value))
+                    .bind(("created_at", created_at_value))
+                    .bind(("updated_at", updated_at_value))
+                    .await
+                    .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+            } else {
+                return Err(AuthError::DatabaseError(err.to_string()));
+            }
+        }
 
         Ok(())
     }

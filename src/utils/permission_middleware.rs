@@ -14,6 +14,11 @@ use crate::{
     services::{database::Database, rbac::RBACService},
 };
 
+fn user_id_from_record(user: &User) -> Result<String, StatusCode> {
+    let rid = user.id.as_ref().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(crate::utils::record_id::record_id_key_to_string(rid))
+}
+
 /// 权限检查中间件
 /// 检查当前用户是否具有指定的权限
 pub async fn check_permission<B>(
@@ -27,9 +32,7 @@ pub async fn check_permission<B>(
     
     if let Some(permission) = required_permission {
         let rbac_service = RBACService::new(db);
-        let user_id = user.id.as_ref()
-            .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-            .id.to_string();
+        let user_id = user_id_from_record(&user)?;
 
         match rbac_service.check_user_permission(&user_id, &permission).await {
             Ok(has_permission) => {
@@ -61,9 +64,7 @@ pub async fn check_role<B>(
     next: Next<B>,
 ) -> Result<Response, StatusCode> {
     let rbac_service = RBACService::new(db);
-    let user_id = user.id.as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = user_id_from_record(&user)?;
 
     match rbac_service.check_user_role(&user_id, &required_role).await {
         Ok(has_role) => {
@@ -92,9 +93,7 @@ pub async fn check_admin_permission<B>(
     next: Next<B>,
 ) -> Result<Response, StatusCode> {
     let rbac_service = RBACService::new(db);
-    let user_id = user.id.as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-        .id.to_string();
+    let user_id = user_id_from_record(&user)?;
 
     // 检查是否是管理员角色
     match rbac_service.check_user_role(&user_id, "admin").await {
@@ -226,4 +225,3 @@ macro_rules! require_admin {
         crate::require_role!($db, $user_id, "admin");
     }};
 }
-
