@@ -40,6 +40,10 @@ pub struct AuthService {
     oauth_service: OAuthService,
 }
 
+fn new_thing(table: &str) -> Thing {
+    Thing::from((table.to_string(), Uuid::new_v4().to_string()))
+}
+
 impl AuthService {
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
         let email_service = EmailService::new(config.clone());
@@ -126,10 +130,7 @@ impl AuthService {
             // 如果找到用户，创建身份提供商记录
             let now = Utc::now();
             let now_ts = now.timestamp();
-            let provider_id = Thing {
-                tb: "identity_provider".to_string(),
-                id: Uuid::new_v4().to_string().into(),
-            };
+            let provider_id = new_thing("identity_provider");
             let identity = IdentityProvider {
                 id: provider_id.clone(),
                 provider: user_info.provider,
@@ -147,10 +148,7 @@ impl AuthService {
         debug!("No existing user found, creating new user");
         // 创建新用户
         let now = Utc::now();
-        let id = Thing {
-            tb: "user".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let id = new_thing("user");
         debug!("Generated new user ID: {:?}", id);
         let user = User {
             id: Some(id.clone()),
@@ -172,10 +170,7 @@ impl AuthService {
         // 创建身份提供商记录
         let now = Utc::now();
         let now_ts = now.timestamp();
-        let provider_id = Thing {
-            tb: "identity_provider".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let provider_id = new_thing("identity_provider");
         let identity = IdentityProvider {
             id: provider_id.clone(),
             provider: user_info.provider,
@@ -213,10 +208,7 @@ impl AuthService {
         // 创建用户
         let now = Utc::now();
         let verification_token = Uuid::new_v4().to_string();
-        let id = Thing {
-            tb: "user".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let id = new_thing("user");
         let user = User {
             id: Some(id),
             email: req.email.clone(),
@@ -307,10 +299,7 @@ impl AuthService {
         let exp = now + Duration::hours(24); // 24小时后过期
 
         // 创建会话记录
-        let session_id = Thing {
-            tb: "session".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let session_id = new_thing("session");
 
         let session = Session {
             id: Some(session_id.clone()),
@@ -356,10 +345,7 @@ impl AuthService {
         let exp = now + Duration::hours(24); // 24小时后过期
 
         // 创建会话记录
-        let session_id = Thing {
-            tb: "session".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let session_id = new_thing("session");
 
         let user_thing: Thing = if user_id.starts_with("user:") {
             // 如果已经包含前缀，直接解析
@@ -486,10 +472,7 @@ impl AuthService {
         let now = Utc::now();
         let expires_at = now + Duration::hours(1); // 1小时后过期
 
-        let id = Thing {
-            tb: "password_reset_token".to_string(),
-            id: Uuid::new_v4().to_string().into(),
-        };
+        let id = new_thing("password_reset_token");
 
         let token_record = PasswordResetToken {
             id: Some(id),

@@ -3,7 +3,7 @@ use std::time::Duration;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 use surrealdb::sql::Thing;
-use surrealdb::{Surreal, Response};
+use surrealdb::Surreal;
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
@@ -79,18 +79,17 @@ impl Database {
 
     pub async fn create_record<T>(&self, table: &str, record: &T) -> Result<T>
     where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug + 'static,
     {
         debug!("Creating record in table {}: {:?}", table, record);
         
-        let created: Vec<T> = self.client
+        let created: Option<T> = self.client
             .create(table)
-            .content(record)
+            .content(record.clone())
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to create record: {}", e)))?;
             
-        created.into_iter()
-            .next()
+        created
             .ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()))
     }
 
@@ -111,7 +110,7 @@ impl Database {
         
         let mut result = self.client
             .query(&query)
-            .bind(("value", value))
+            .bind(("value", value.to_string()))
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {}", e)))?;
         
@@ -127,13 +126,13 @@ impl Database {
 
     pub async fn update_record<T>(&self, table: &str, thing: &Thing, record: &T) -> Result<T>
     where
-        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug,
+        T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug + 'static,
     {
         debug!("Updating record in table {} with thing {:?}: {:?}", table, thing, record);
         
         let updated = self.client
-            .update(thing.clone())
-            .content(record)
+            .update((thing.tb.clone(), thing.id.to_raw()))
+            .content(record.clone())
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?;
             
@@ -150,7 +149,7 @@ impl Database {
             .map_err(|_| AuthError::DatabaseError("Invalid record ID format".into()))?;
             
         let deleted = self.client
-            .delete(thing)
+            .delete((thing.tb.clone(), thing.id.to_raw()))
             .await
             .map_err(|_| AuthError::DatabaseError("Failed to delete record".into()))?;
             
@@ -161,7 +160,7 @@ impl Database {
         let query = "DELETE session WHERE token = $token";
         self.client
             .query(query)
-            .bind(("token", token))
+            .bind(("token", token.to_string()))
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())

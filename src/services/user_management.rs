@@ -74,7 +74,7 @@ impl UserManagementService {
         let query = "CREATE user_profile CONTENT $profile";
         let mut response = self.db.client
             .query(query)
-            .bind(("profile", &profile))
+            .bind(("profile", profile.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create user profile: {}", e);
@@ -111,7 +111,7 @@ impl UserManagementService {
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user profile: {}", e);
@@ -175,7 +175,7 @@ impl UserManagementService {
         
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to update user profile: {}", e);
@@ -259,7 +259,7 @@ impl UserManagementService {
         let query = "CREATE user_preferences CONTENT $preferences";
         let mut response = self.db.client
             .query(query)
-            .bind(("preferences", &preferences))
+            .bind(("preferences", preferences.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create user preferences: {}", e);
@@ -296,7 +296,7 @@ impl UserManagementService {
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user preferences: {}", e);
@@ -369,7 +369,7 @@ impl UserManagementService {
         
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to update user preferences: {}", e);
@@ -431,7 +431,7 @@ impl UserManagementService {
 
         self.db.client
             .query(&query)
-            .bind(("status", &request.status))
+            .bind(("status", request.status.clone()))
             .bind(("updated_at", now.timestamp()))
             .await
             .map_err(|e| {
@@ -494,7 +494,7 @@ impl UserManagementService {
         let query = "CREATE user_activity CONTENT $activity";
         self.db.client
             .query(query)
-            .bind(("activity", &activity))
+            .bind(("activity", activity.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to log user activity: {}", e);
@@ -534,7 +534,7 @@ impl UserManagementService {
 
         let mut response = self.db.client
             .query(&query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user activity log: {}", e);
@@ -554,7 +554,7 @@ impl UserManagementService {
 
         let mut count_response = self.db.client
             .query(&count_query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to count activities: {}", e);

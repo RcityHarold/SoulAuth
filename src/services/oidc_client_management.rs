@@ -93,7 +93,7 @@ impl OidcClientService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("client_id", client_id))
+            .bind(("client_id", client_id.to_string()))
             .await?;
 
         let client: Option<OidcClient> = result.take(0)?;
@@ -190,7 +190,7 @@ impl OidcClientService {
         
         self.db.client
             .query(query)
-            .bind(("client_id", client_id))
+            .bind(("client_id", client_id.to_string()))
             .await?;
 
         Ok(())
@@ -206,7 +206,7 @@ impl OidcClientService {
         self.db.client
             .query(query)
             .bind(("hash", client_secret_hash))
-            .bind(("client_id", client_id))
+            .bind(("client_id", client_id.to_string()))
             .await?;
 
         Ok(client_secret)
@@ -245,21 +245,21 @@ impl OidcClientService {
 
         self.db.client
             .query(query)
-            .bind(("client_id", &client.client_id))
-            .bind(("client_secret_hash", &client.client_secret_hash))
-            .bind(("client_name", &client.client_name))
-            .bind(("client_type", &client.client_type))
-            .bind(("redirect_uris", &client.redirect_uris))
-            .bind(("post_logout_redirect_uris", &client.post_logout_redirect_uris))
-            .bind(("allowed_scopes", &client.allowed_scopes))
-            .bind(("allowed_grant_types", &client.allowed_grant_types))
-            .bind(("allowed_response_types", &client.allowed_response_types))
+            .bind(("client_id", client.client_id.clone()))
+            .bind(("client_secret_hash", client.client_secret_hash.clone()))
+            .bind(("client_name", client.client_name.clone()))
+            .bind(("client_type", client.client_type.clone()))
+            .bind(("redirect_uris", client.redirect_uris.clone()))
+            .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
+            .bind(("allowed_scopes", client.allowed_scopes.clone()))
+            .bind(("allowed_grant_types", client.allowed_grant_types.clone()))
+            .bind(("allowed_response_types", client.allowed_response_types.clone()))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
             .bind(("id_token_lifetime", client.id_token_lifetime))
             .bind(("is_active", client.is_active))
-            .bind(("created_by", &client.created_by))
+            .bind(("created_by", client.created_by.clone()))
             .bind(("created_at", client.created_at))
             .bind(("updated_at", client.updated_at))
             .await?;
@@ -288,14 +288,14 @@ impl OidcClientService {
 
         self.db.client
             .query(query)
-            .bind(("client_id", &client.client_id))
-            .bind(("client_name", &client.client_name))
-            .bind(("client_type", &client.client_type))
-            .bind(("redirect_uris", &client.redirect_uris))
-            .bind(("post_logout_redirect_uris", &client.post_logout_redirect_uris))
-            .bind(("allowed_scopes", &client.allowed_scopes))
-            .bind(("allowed_grant_types", &client.allowed_grant_types))
-            .bind(("allowed_response_types", &client.allowed_response_types))
+            .bind(("client_id", client.client_id.clone()))
+            .bind(("client_name", client.client_name.clone()))
+            .bind(("client_type", client.client_type.clone()))
+            .bind(("redirect_uris", client.redirect_uris.clone()))
+            .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
+            .bind(("allowed_scopes", client.allowed_scopes.clone()))
+            .bind(("allowed_grant_types", client.allowed_grant_types.clone()))
+            .bind(("allowed_response_types", client.allowed_response_types.clone()))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))

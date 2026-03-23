@@ -44,7 +44,7 @@ impl RBACService {
         let query = "CREATE role CONTENT $role";
         let mut response = self.db.client
             .query(query)
-            .bind(("role", &role))
+            .bind(("role", role.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create role: {}", e);
@@ -68,7 +68,7 @@ impl RBACService {
         let query = "SELECT * FROM role WHERE name = $name";
         let mut response = self.db.client
             .query(query)
-            .bind(("name", name))
+            .bind(("name", name.to_string()))
             .await
             .map_err(|e| {
                 error!("Failed to get role by name: {}", e);
@@ -160,7 +160,7 @@ impl RBACService {
         let user_count_query = "SELECT count() as count FROM user_role WHERE role_id = $role_id GROUP ALL";
         let mut response = self.db.client
             .query(user_count_query)
-            .bind(("role_id", &role_id))
+            .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to check role usage: {}", e);
@@ -184,7 +184,7 @@ impl RBACService {
         let delete_permissions_query = "DELETE FROM role_permission WHERE role_id = $role_id";
         self.db.client
             .query(delete_permissions_query)
-            .bind(("role_id", &role_id))
+            .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to delete role permissions: {}", e);
@@ -250,7 +250,7 @@ impl RBACService {
         let query = "CREATE permission CONTENT $permission";
         let mut response = self.db.client
             .query(query)
-            .bind(("permission", &permission))
+            .bind(("permission", permission.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to create permission: {}", e);
@@ -274,7 +274,7 @@ impl RBACService {
         let query = "SELECT * FROM permission WHERE name = $name";
         let mut response = self.db.client
             .query(query)
-            .bind(("name", name))
+            .bind(("name", name.to_string()))
             .await
             .map_err(|e| {
                 error!("Failed to get permission by name: {}", e);
@@ -326,8 +326,8 @@ impl RBACService {
         let check_query = "SELECT * FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         let mut response = self.db.client
             .query(check_query)
-            .bind(("user_id", &user_thing))
-            .bind(("role_id", &role_id))
+            .bind(("user_id", user_thing.clone()))
+            .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to check user role: {}", e);
@@ -354,7 +354,7 @@ impl RBACService {
         let query = "CREATE user_role CONTENT $user_role";
         self.db.client
             .query(query)
-            .bind(("user_role", &user_role))
+            .bind(("user_role", user_role.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to assign role to user: {}", e);
@@ -375,8 +375,8 @@ impl RBACService {
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         self.db.client
             .query(delete_query)
-            .bind(("user_id", &user_thing))
-            .bind(("role_id", &role_id))
+            .bind(("user_id", user_thing.clone()))
+            .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to remove role from user: {}", e);
@@ -405,7 +405,7 @@ impl RBACService {
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user roles: {}", e);
@@ -459,7 +459,7 @@ impl RBACService {
 
         let mut response = self.db.client
             .query(query)
-            .bind(("role_id", &role_id))
+            .bind(("role_id", role_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get role permissions: {}", e);
@@ -496,8 +496,8 @@ impl RBACService {
         let check_query = "SELECT * FROM role_permission WHERE role_id = $role_id AND permission_id = $permission_id";
         let mut response = self.db.client
             .query(check_query)
-            .bind(("role_id", &role_id))
-            .bind(("permission_id", &permission_id))
+            .bind(("role_id", role_id.clone()))
+            .bind(("permission_id", permission_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to check role permission: {}", e);
@@ -524,7 +524,7 @@ impl RBACService {
         let query = "CREATE role_permission CONTENT $role_permission";
         self.db.client
             .query(query)
-            .bind(("role_permission", &role_permission))
+            .bind(("role_permission", role_permission.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to assign permission to role: {}", e);
@@ -548,8 +548,8 @@ impl RBACService {
         let delete_query = "DELETE FROM role_permission WHERE role_id = $role_id AND permission_id = $permission_id";
         self.db.client
             .query(delete_query)
-            .bind(("role_id", &role_id))
-            .bind(("permission_id", &permission_id))
+            .bind(("role_id", role_id.clone()))
+            .bind(("permission_id", permission_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to remove permission from role: {}", e);
@@ -575,8 +575,8 @@ impl RBACService {
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
-            .bind(("permission_name", permission_name))
+            .bind(("user_id", user_thing.clone()))
+            .bind(("permission_name", permission_name.to_string()))
             .await
             .map_err(|e| {
                 error!("Failed to check user permission: {}", e);
@@ -612,8 +612,8 @@ impl RBACService {
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
-            .bind(("role_name", role_name))
+            .bind(("user_id", user_thing.clone()))
+            .bind(("role_name", role_name.to_string()))
             .await
             .map_err(|e| {
                 error!("Failed to check user role: {}", e);
@@ -649,7 +649,7 @@ impl RBACService {
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id", &user_thing))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);

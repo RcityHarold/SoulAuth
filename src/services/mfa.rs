@@ -286,7 +286,7 @@ impl MfaService {
         let query = "SELECT * FROM user_mfa WHERE user_id = $user_id";
         
         let mut result = self.db.query(query)
-            .bind(("user_id", user_id))
+            .bind(("user_id", user_id.to_string()))
             .await?;
         
         let mfa_config: Option<UserMfa> = result.take(0)?;
@@ -310,11 +310,11 @@ impl MfaService {
         "#;
 
         self.db.query(query)
-            .bind(("user_id", &mfa_config.user_id))
-            .bind(("status", &mfa_config.status))
-            .bind(("method", &mfa_config.method))
-            .bind(("totp_secret", &mfa_config.totp_secret))
-            .bind(("backup_codes", &mfa_config.backup_codes))
+            .bind(("user_id", mfa_config.user_id.clone()))
+            .bind(("status", mfa_config.status.clone()))
+            .bind(("method", mfa_config.method.clone()))
+            .bind(("totp_secret", mfa_config.totp_secret.clone()))
+            .bind(("backup_codes", mfa_config.backup_codes.clone()))
             .bind(("created_at", mfa_config.created_at))
             .bind(("updated_at", mfa_config.updated_at))
             .bind(("last_used_at", mfa_config.last_used_at))
@@ -328,7 +328,7 @@ impl MfaService {
         let query = "DELETE user_mfa WHERE user_id = $user_id";
         
         self.db.query(query)
-            .bind(("user_id", user_id))
+            .bind(("user_id", user_id.to_string()))
             .await?;
 
         Ok(())

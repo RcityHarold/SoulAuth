@@ -72,7 +72,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("session_id", session_id))
+            .bind(("session_id", session_id.to_string()))
             .await?;
 
         let session: Option<SsoSession> = result.take(0)?;
@@ -151,7 +151,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("user_id", user_id))
+            .bind(("user_id", user_id.to_string()))
             .await?;
 
         let session: Option<SsoSession> = result.take(0)?;
@@ -187,7 +187,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("user_id", user_id))
+            .bind(("user_id", user_id.to_string()))
             .await?;
 
         let sessions: Vec<SsoSession> = result.take(0)?;
@@ -215,7 +215,7 @@ impl SsoSessionService {
         
         let _result = self.db.client
             .query(query)
-            .bind(("user_id", user_id))
+            .bind(("user_id", user_id.to_string()))
             .await?;
 
         // 返回删除的会话数量（这里简化处理）
@@ -286,14 +286,14 @@ impl SsoSessionService {
 
         self.db.client
             .query(query)
-            .bind(("session_id", &session.session_id))
-            .bind(("user_id", &session.user_id))
-            .bind(("client_sessions", &session.client_sessions))
+            .bind(("session_id", session.session_id.clone()))
+            .bind(("user_id", session.user_id.clone()))
+            .bind(("client_sessions", session.client_sessions.clone()))
             .bind(("created_at", session.created_at))
             .bind(("last_accessed_at", session.last_accessed_at))
             .bind(("expires_at", session.expires_at))
-            .bind(("ip_address", &session.ip_address))
-            .bind(("user_agent", &session.user_agent))
+            .bind(("ip_address", session.ip_address.clone()))
+            .bind(("user_agent", session.user_agent.clone()))
             .await?;
 
         Ok(())
@@ -311,8 +311,8 @@ impl SsoSessionService {
 
         self.db.client
             .query(query)
-            .bind(("session_id", &session.session_id))
-            .bind(("client_sessions", &session.client_sessions))
+            .bind(("session_id", session.session_id.clone()))
+            .bind(("client_sessions", session.client_sessions.clone()))
             .bind(("last_accessed_at", session.last_accessed_at))
             .bind(("expires_at", session.expires_at))
             .await?;
@@ -326,7 +326,7 @@ impl SsoSessionService {
         
         self.db.client
             .query(query)
-            .bind(("session_id", session_id))
+            .bind(("session_id", session_id.to_string()))
             .await?;
 
         Ok(())

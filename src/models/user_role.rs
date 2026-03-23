@@ -12,7 +12,7 @@ pub struct UserRole {
     pub assigned_by: Thing, // 分配者的用户ID
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct RolePermission {
     pub id: Option<Thing>,
     pub role_id: Thing,

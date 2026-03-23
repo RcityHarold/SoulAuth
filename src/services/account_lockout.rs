@@ -275,7 +275,7 @@ impl AccountLockoutService {
         let query = "SELECT * FROM account_lockout WHERE identifier = $identifier AND lockout_type = $lockout_type";
         
         let mut result = self.db.query(query)
-            .bind(("identifier", identifier))
+            .bind(("identifier", identifier.to_string()))
             .bind(("lockout_type", lockout_type))
             .await?;
         
@@ -301,10 +301,10 @@ impl AccountLockoutService {
         "#;
 
         self.db.query(query)
-            .bind(("identifier", &lockout.identifier))
-            .bind(("lockout_type", &lockout.lockout_type))
+            .bind(("identifier", lockout.identifier.clone()))
+            .bind(("lockout_type", lockout.lockout_type.clone()))
             .bind(("failed_attempts", lockout.failed_attempts))
-            .bind(("status", &lockout.status))
+            .bind(("status", lockout.status.clone()))
             .bind(("locked_at", lockout.locked_at))
             .bind(("locked_until", lockout.locked_until))
             .bind(("last_attempt_at", lockout.last_attempt_at))

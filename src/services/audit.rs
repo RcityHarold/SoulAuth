@@ -147,7 +147,7 @@ impl AuditService {
             // Check if IP is currently locked
             let lockout_query = "SELECT status FROM account_lockout WHERE identifier = $ip AND lockout_type = 'IpAddress' AND locked_until > $now";
             let mut lockout_result = self.db.client.query(lockout_query)
-                .bind(("ip", &ip_address))
+                .bind(("ip", ip_address.clone()))
                 .bind(("now", Utc::now()))
                 .await
                 .map_err(|e| {
