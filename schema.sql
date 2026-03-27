@@ -1,8 +1,15 @@
 -- Rust Auth System Database Schema
 -- 运行此文件以创建所有必需的数据库表和索引
 
+-- 主体表
+DEFINE TABLE subject SCHEMAFULL;
+DEFINE FIELD subject_type ON subject TYPE string;
+DEFINE FIELD created_at ON subject TYPE number;
+DEFINE FIELD updated_at ON subject TYPE number;
+
 -- 用户表
 DEFINE TABLE user SCHEMAFULL;
+DEFINE FIELD subject_id ON user TYPE option<record<subject>>;
 DEFINE FIELD email ON user TYPE string;
 DEFINE FIELD password ON user TYPE option<string>;
 DEFINE FIELD verified ON user TYPE bool DEFAULT false;

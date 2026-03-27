@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use crate::{
     error::{AuthError, Result},
-    models::user::User,
+    models::{subject::SubjectType, user::User},
     services::database::Database,
 };
 use axum::{
@@ -19,7 +19,10 @@ pub struct Claims {
     pub sub: String,
     pub exp: i64,
     pub iat: i64,
+    #[serde(default)]
     pub session_id: Option<String>,
+    #[serde(default)]
+    pub subject_type: Option<SubjectType>,
 }
 
 #[async_trait]
@@ -55,7 +58,7 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
     // 验证 JWT
     let jwt_secret = std::env::var("JWT_SECRET")
         .map_err(|_| AuthError::InvalidToken)?;
-    
+
     let token_data = decode::<Claims>(
         token,
         &DecodingKey::from_secret(jwt_secret.as_bytes()),
@@ -73,6 +76,40 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
 
     let user: Option<User> = result.take(0)
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-    
+
     user.ok_or(AuthError::UserNotFound)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Claims;
+    use crate::models::subject::SubjectType;
+
+    #[test]
+    fn claims_deserialize_old_tokens_without_subject_type() {
+        let old_claims = serde_json::json!({
+            "sub": "user:legacy",
+            "exp": 1,
+            "iat": 1,
+            "session_id": "session:legacy"
+        });
+
+        let claims: Claims = serde_json::from_value(old_claims).expect("old claims should deserialize");
+        assert_eq!(claims.sub, "user:legacy");
+        assert_eq!(claims.subject_type, None);
+    }
+
+    #[test]
+    fn claims_deserialize_new_tokens_with_subject_type() {
+        let new_claims = serde_json::json!({
+            "sub": "user:new",
+            "exp": 1,
+            "iat": 1,
+            "session_id": "session:new",
+            "subject_type": "human"
+        });
+
+        let claims: Claims = serde_json::from_value(new_claims).expect("new claims should deserialize");
+        assert_eq!(claims.subject_type, Some(SubjectType::Human));
+    }
 }

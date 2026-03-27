@@ -3,6 +3,7 @@ use crate::{
     error::{AuthError, Result},
     models::{
         user::{User, CreateUserRequest, AuthResponse, UserResponse},
+        subject::{Subject, SubjectType},
         identity_provider::{IdentityProvider, OAuthUserInfo},
         password_reset::{PasswordResetToken, RequestPasswordResetRequest, ResetPasswordRequest},
         session::{Session, SessionInfo},
@@ -31,7 +32,10 @@ struct Claims {
     sub: String,
     exp: i64,
     iat: i64,
+    #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    subject_type: Option<SubjectType>,
 }
 
 pub struct AuthService {
@@ -51,6 +55,44 @@ impl AuthService {
             email_service,
             oauth_service,
         })
+    }
+
+    async fn create_subject(&self, subject_type: SubjectType) -> Result<Thing> {
+        let now = Utc::now().timestamp();
+        let subject_id = Thing::new("subject", Uuid::new_v4().to_string());
+        let subject = Subject {
+            id: Some(subject_id.clone()),
+            subject_type,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.db.create_record("subject", &subject).await?;
+        Ok(subject_id)
+    }
+
+    async fn ensure_user_subject(&self, user: User, subject_type: SubjectType) -> Result<User> {
+        if user.subject_id.is_some() {
+            return Ok(user);
+        }
+
+        let subject_id = self.create_subject(subject_type).await?;
+        let mut updated_user = user.clone();
+        updated_user.subject_id = Some(subject_id);
+        updated_user.updated_at = Utc::now().timestamp();
+
+        let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        self.db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &updated_user,
+            )
+            .await
     }
 
     pub fn get_google_auth_url(&self) -> Result<String> {
@@ -96,7 +138,7 @@ impl AuthService {
     }
 
     async fn find_or_create_oauth_user(&self, user_info: OAuthUserInfo) -> Result<User> {
-        debug!("Starting find_or_create_oauth_user for provider: {} and user_id: {}", 
+        debug!("Starting find_or_create_oauth_user for provider: {} and user_id: {}",
             user_info.provider, user_info.provider_user_id);
 
         // 首先通过 identity_provider 查找用户
@@ -108,13 +150,13 @@ impl AuthService {
         ).await?
         {
             debug!("Found existing identity provider record: {:?}", identity);
-            // 如果找到身份提供商记录，返回对应的用户
-            return self.db.find_record_by_field::<User>(
+            let user = self.db.find_record_by_field::<User>(
                 "user",
                 "id",
                 &crate::utils::record_id::record_id_key_to_string(&identity.user_id),
             ).await?
-            .ok_or(AuthError::UserNotFound);
+            .ok_or(AuthError::UserNotFound)?;
+            return self.ensure_user_subject(user, SubjectType::Human).await;
         }
 
         debug!("No existing identity provider record found");
@@ -127,8 +169,8 @@ impl AuthService {
             &user_info.email,
         ).await?
         {
+            let existing_user = self.ensure_user_subject(existing_user, SubjectType::Human).await?;
             debug!("Found existing user: {:?}", existing_user);
-            // 如果找到用户，创建身份提供商记录
             let now = Utc::now();
             let now_ts = now.timestamp();
             let provider_id = Thing::new("identity_provider", Uuid::new_v4().to_string());
@@ -147,17 +189,18 @@ impl AuthService {
         }
 
         debug!("No existing user found, creating new user");
-        // 创建新用户
         let now = Utc::now();
         let id = Thing::new("user", Uuid::new_v4().to_string());
+        let subject_id = self.create_subject(SubjectType::Human).await?;
         debug!("Generated new user ID: {:?}", id);
         let user = User {
             id: Some(id.clone()),
+            subject_id: Some(subject_id),
             email: user_info.email,
-            password_hash: None, // OAuth 用户没有密码
+            password_hash: None,
             created_at: now.timestamp(),
             updated_at: now.timestamp(),
-            is_email_verified: true, // OAuth 邮箱已验证
+            is_email_verified: true,
             verification_token: None,
             account_status: "Active".to_string(),
             last_login_at: Some(now.timestamp()),
@@ -168,7 +211,6 @@ impl AuthService {
         let created_user = self.db.create_record("user", &user).await?;
         debug!("User created successfully: {:?}", created_user);
 
-        // 创建身份提供商记录
         let now = Utc::now();
         let now_ts = now.timestamp();
         let provider_id = Thing::new("identity_provider", Uuid::new_v4().to_string());
@@ -210,8 +252,10 @@ impl AuthService {
         let now = Utc::now();
         let verification_token = Uuid::new_v4().to_string();
         let id = Thing::new("user", Uuid::new_v4().to_string());
+        let subject_id = self.create_subject(SubjectType::Human).await?;
         let user = User {
             id: Some(id),
+            subject_id: Some(subject_id),
             email: req.email.clone(),
             password_hash: Some(hashed_password),
             created_at: now.timestamp(),
@@ -269,6 +313,8 @@ impl AuthService {
                 // Active or unknown -> allow login
             }
         }
+
+        user = self.ensure_user_subject(user, SubjectType::Human).await?;
 
         // 更新最后登录信息
         let now = Utc::now();
@@ -329,6 +375,7 @@ impl AuthService {
             exp: exp.timestamp(),
             iat: now.timestamp(),
             session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
+            subject_type: Some(SubjectType::Human),
         };
 
         let token = encode(
@@ -380,6 +427,7 @@ impl AuthService {
             exp: exp.timestamp(),
             iat: now.timestamp(),
             session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
+            subject_type: Some(SubjectType::Human),
         };
         debug!("Created JWT claims: {:?}", claims);
 

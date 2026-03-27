@@ -9,6 +9,7 @@ use surrealdb::types::SurrealValue;
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct User {
     pub id: Option<Thing>,
+    pub subject_id: Option<Thing>,
     pub email: String,
     #[surreal(rename = "password")]
     #[serde(rename = "password")]
