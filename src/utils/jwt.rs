@@ -22,6 +22,19 @@ pub struct Claims {
     pub session_id: Option<String>,
 }
 
+pub fn decode_token_claims(token: &str) -> Result<Claims> {
+    let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| AuthError::InvalidToken)?;
+
+    let token_data = decode::<Claims>(
+        token,
+        &DecodingKey::from_secret(jwt_secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| AuthError::InvalidToken)?;
+
+    Ok(token_data.claims)
+}
+
 #[async_trait]
 impl<S> FromRequestParts<S> for Claims
 where
@@ -37,37 +50,19 @@ where
             .map_err(|_| AuthError::InvalidToken)?;
 
         // 验证 JWT
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .map_err(|_| AuthError::InvalidToken)?;
-        
-        let token_data = decode::<Claims>(
-            bearer.token(),
-            &DecodingKey::from_secret(jwt_secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| AuthError::InvalidToken)?;
-
-        Ok(token_data.claims)
+        decode_token_claims(bearer.token())
     }
 }
 
 pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User> {
     // 验证 JWT
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .map_err(|_| AuthError::InvalidToken)?;
-    
-    let token_data = decode::<Claims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret.as_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| AuthError::InvalidToken)?;
+    let claims = decode_token_claims(token)?;
 
     // 从数据库获取用户
     let query = "SELECT * FROM user WHERE id = $user_id";
     let mut result = db.client
         .query(query)
-        .bind(("user_id", token_data.claims.sub.clone()))
+        .bind(("user_id", claims.sub.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 

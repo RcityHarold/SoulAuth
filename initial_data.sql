@@ -239,6 +239,8 @@ CREATE role:user CONTENT {
 -- 为系统用户创建记录（用于权限分配的授权者）
 CREATE user:system CONTENT {
     email: "system@internal",
+    username: "system",
+    username_normalized: "system",
     password: NONE,
     verified: true,
     verification_token: NONE,

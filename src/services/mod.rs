@@ -11,3 +11,4 @@ pub mod user_management;
 pub mod oidc;
 pub mod oidc_client_management;
 pub mod sso_session_management;
+pub mod social_hub;

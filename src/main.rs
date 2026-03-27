@@ -23,6 +23,7 @@ use crate::{
         account_lockout::AccountLockoutService,
         oidc::OidcService,
         oidc_client_management::OidcClientService,
+        social_hub::SocialHub,
         sso_session_management::SsoSessionService,
     },
 };
@@ -33,6 +34,7 @@ pub struct AppState {
     pub config: Config,
     pub rate_limiter: Arc<RateLimiter>,
     pub lockout_service: Arc<AccountLockoutService>,
+    pub social_hub: Arc<SocialHub>,
 }
 
 #[tokio::main]
@@ -93,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
     let oidc_service = Arc::new(OidcService::new(shared_db.clone(), config.clone())?);
     let oidc_client_service = Arc::new(OidcClientService::new(shared_db.clone()));
     let sso_session_service = Arc::new(SsoSessionService::new(shared_db.clone()));
+    let social_hub = Arc::new(SocialHub::new());
 
     // 启动定期清理任务
     let cleanup_limiter = rate_limiter.clone();
@@ -114,6 +117,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         rate_limiter: rate_limiter.clone(),
         lockout_service: lockout_service.clone(),
+        social_hub: social_hub.clone(),
     };
 
     // 创建路由
@@ -128,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("", routes::oidc::oidc_routes()) // 为 /.well-known 路径
         .layer(Extension(shared_db))
         .layer(Extension(Arc::new(app_state)))
+        .layer(Extension(social_hub))
         .layer(Extension(config.clone()))  // 添加 Config 扩展
         .layer(Extension(oidc_service))     // 添加 OIDC 服务扩展
         .layer(Extension(oidc_client_service)) // 添加 OIDC 客户端服务扩展

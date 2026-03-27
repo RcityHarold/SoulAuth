@@ -6,6 +6,9 @@ use surrealdb::sql::Thing;
 pub struct User {
     pub id: Option<Thing>, 
     pub email: String,
+    pub username: String,
+    #[serde(default)]
+    pub username_normalized: String,
     #[serde(rename = "password")]
     pub password_hash: Option<String>,
     #[serde(with = "chrono::serde::ts_seconds")]
@@ -34,6 +37,7 @@ pub enum AccountStatus {
 pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,6 +56,7 @@ pub struct AuthResponse {
 pub struct UserResponse {
     pub id: String,
     pub email: String,
+    pub username: String,
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub created_at: DateTime<Utc>,
@@ -105,6 +110,7 @@ impl From<User> for UserResponse {
         Self {
             id: user.id.unwrap().id.to_string(),
             email: user.email,
+            username: user.username,
             is_email_verified: user.is_email_verified,
             created_at: user.created_at,
             has_password: user.password_hash.is_some(),

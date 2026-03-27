@@ -45,6 +45,64 @@ fn new_thing(table: &str) -> Thing {
 }
 
 impl AuthService {
+    fn normalize_username(username: &str) -> String {
+        username.trim().to_ascii_lowercase()
+    }
+
+    async fn ensure_username_available(&self, username: &str) -> Result<String> {
+        let normalized = Self::normalize_username(username);
+        if normalized.is_empty() {
+            return Err(AuthError::ValidationError("Username is required".to_string()));
+        }
+
+        if self
+            .db
+            .find_record_by_field::<User>("user", "username_normalized", &normalized)
+            .await?
+            .is_some()
+        {
+            return Err(AuthError::UsernameExists);
+        }
+
+        Ok(normalized)
+    }
+
+    async fn generate_unique_username(&self, base: &str) -> Result<(String, String)> {
+        let fallback = "user";
+        let seed = base.trim();
+        let seed = if seed.is_empty() { fallback } else { seed };
+        let seed = seed
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .collect::<String>();
+        let seed = if seed.is_empty() {
+            fallback.to_string()
+        } else {
+            seed
+        };
+
+        for attempt in 0..1000 {
+            let candidate = if attempt == 0 {
+                seed.clone()
+            } else {
+                format!("{seed}{attempt}")
+            };
+            let normalized = Self::normalize_username(&candidate);
+            if self
+                .db
+                .find_record_by_field::<User>("user", "username_normalized", &normalized)
+                .await?
+                .is_none()
+            {
+                return Ok((candidate, normalized));
+            }
+        }
+
+        Err(AuthError::ServerError(
+            "Failed to generate a unique username".to_string(),
+        ))
+    }
+
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
         let email_service = EmailService::new(config.clone());
         let oauth_service = OAuthService::new(config.clone())?;
@@ -149,10 +207,15 @@ impl AuthService {
         // 创建新用户
         let now = Utc::now();
         let id = new_thing("user");
+        let (username, username_normalized) = self
+            .generate_unique_username(user_info.email.split('@').next().unwrap_or("user"))
+            .await?;
         debug!("Generated new user ID: {:?}", id);
         let user = User {
             id: Some(id.clone()),
             email: user_info.email,
+            username,
+            username_normalized,
             password_hash: None, // OAuth 用户没有密码
             created_at: now,
             updated_at: now,
@@ -197,6 +260,15 @@ impl AuthService {
             return Err(AuthError::EmailExists);
         }
 
+        let username = req
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AuthError::ValidationError("Username is required".to_string()))?
+            .to_string();
+        let username_normalized = self.ensure_username_available(&username).await?;
+
         // 生成密码哈希
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
@@ -207,31 +279,41 @@ impl AuthService {
 
         // 创建用户
         let now = Utc::now();
-        let verification_token = Uuid::new_v4().to_string();
+        let verification_token = if self.config.email_verification_enabled {
+            Some(Uuid::new_v4().to_string())
+        } else {
+            None
+        };
         let id = new_thing("user");
         let user = User {
             id: Some(id),
             email: req.email.clone(),
+            username,
+            username_normalized,
             password_hash: Some(hashed_password),
             created_at: now,
             updated_at: now,
-            is_email_verified: false,
-            verification_token: Some(verification_token.clone()),
+            is_email_verified: !self.config.email_verification_enabled,
+            verification_token: verification_token.clone(),
             account_status: crate::models::user::AccountStatus::Active,
             last_login_at: Some(now),
             last_login_ip: None,
         };
 
         let created_user = self.db.create_record("user", &user).await?;
-        
-        // 发送验证邮件
-        self.email_service.send_verification_email(&req.email, &verification_token).await?;
-        
-        // 不立即创建会话，而是返回成功消息
-        Ok(AuthResponse {
-            token: "".to_string(), // 空令牌，表示需要验证邮箱
-            user: created_user.into(),
-        })
+
+        if self.config.email_verification_enabled {
+            if let Some(token) = verification_token {
+                self.email_service.send_verification_email(&req.email, &token).await?;
+            }
+
+            Ok(AuthResponse {
+                token: "".to_string(),
+                user: created_user.into(),
+            })
+        } else {
+            self.create_session(created_user).await
+        }
     }
 
     pub async fn login(&self, email: String, password: String) -> Result<AuthResponse> {
@@ -255,7 +337,7 @@ impl AuthService {
             .map_err(|_| AuthError::InvalidCredentials)?;
 
         // 检查邮箱验证状态
-        if !user.is_email_verified {
+        if self.config.email_verification_enabled && !user.is_email_verified {
             return Err(AuthError::EmailNotVerified);
         }
 

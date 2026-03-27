@@ -21,6 +21,9 @@ pub enum AuthError {
     
     #[error("Email already exists")]
     EmailExists,
+
+    #[error("Username already exists")]
+    UsernameExists,
     
     #[error("Invalid token")]
     InvalidToken,
