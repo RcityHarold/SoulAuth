@@ -54,6 +54,35 @@ pub struct CreateGroupRequest {
     pub ai_member_ids: Vec<String>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AddGroupMembersRequest {
+    #[serde(default)]
+    pub member_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateGroupSettingsRequest {
+    pub allow_member_invite: bool,
+    pub join_mode: String,
+    pub allow_file_upload: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateGroupAnnouncementRequest {
+    pub announcement: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateGroupAdminRequest {
+    pub target_user_id: String,
+    pub is_admin: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TransferGroupOwnershipRequest {
+    pub new_owner_id: String,
+}
+
 fn default_true() -> bool {
     true
 }

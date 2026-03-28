@@ -30,6 +30,45 @@ pub enum SocialEvent {
         message_id: String,
         sender_id: String,
     },
+    #[serde(rename = "group_created")]
+    GroupCreated {
+        group_id: String,
+    },
+    #[serde(rename = "group_updated")]
+    GroupUpdated {
+        group_id: String,
+    },
+    #[serde(rename = "group_deleted")]
+    GroupDeleted {
+        group_id: String,
+    },
+    #[serde(rename = "group_thread_created")]
+    GroupThreadCreated {
+        group_id: String,
+        thread_id: String,
+        created_by: String,
+    },
+    #[serde(rename = "group_message_created")]
+    GroupMessageCreated {
+        group_id: String,
+        thread_id: String,
+        message_id: String,
+        sender_id: String,
+    },
+    #[serde(rename = "group_collab_run_started")]
+    GroupCollabRunStarted {
+        group_id: String,
+        thread_id: String,
+        run_id: String,
+        triggered_by: String,
+    },
+    #[serde(rename = "group_collab_run_completed")]
+    GroupCollabRunCompleted {
+        group_id: String,
+        thread_id: String,
+        run_id: String,
+        status: String,
+    },
 }
 
 #[derive(Clone, Default)]
