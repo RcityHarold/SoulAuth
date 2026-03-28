@@ -90,12 +90,7 @@ pub fn router() -> Router {
 }
 
 fn normalize_user_id(id: &str) -> String {
-    id.replace("user:", "")
-        .replace('⟨', "")
-        .replace('⟩', "")
-        .replace('<', "")
-        .replace('>', "")
-        .replace('"', "")
+    crate::utils::record_id::normalize_user_id(id)
 }
 
 fn current_user_id(current_user: &User) -> Result<String, StatusCode> {
