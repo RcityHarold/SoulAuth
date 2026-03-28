@@ -283,52 +283,8 @@ async fn get_current_user(
     Extension(config): Extension<Config>,
 ) -> Result<Json<UserResponse>> {
     let auth_service = AuthService::new(db, config)?;
-    match auth_service.get_user_by_id(&claims.sub).await {
-        Ok(Some(user)) => Ok(Json(UserResponse::from(user))),
-        Ok(None) => {
-            warn!("get_current_user: user not found for sub={}, using JWT fallback response", claims.sub);
-            let clean_id = claims
-                .sub
-                .rsplit(':')
-                .next()
-                .unwrap_or(&claims.sub)
-                .trim_matches('`')
-                .to_string();
-
-            Ok(Json(UserResponse {
-                id: clean_id,
-                email: "unknown@example.com".to_string(),
-                is_email_verified: true,
-                created_at: chrono::Utc::now(),
-                has_password: true,
-                account_status: crate::models::user::AccountStatus::Active,
-                last_login_at: None,
-            }))
-        }
-        Err(e) => {
-            warn!(
-                "get_current_user: failed to load user for sub={} from DB: {:?}; using JWT fallback response",
-                claims.sub, e
-            );
-            let clean_id = claims
-                .sub
-                .rsplit(':')
-                .next()
-                .unwrap_or(&claims.sub)
-                .trim_matches('`')
-                .to_string();
-
-            Ok(Json(UserResponse {
-                id: clean_id,
-                email: "unknown@example.com".to_string(),
-                is_email_verified: true,
-                created_at: chrono::Utc::now(),
-                has_password: true,
-                account_status: crate::models::user::AccountStatus::Active,
-                last_login_at: None,
-            }))
-        }
-    }
+    let user = auth_service.resolve_authenticated_user(&claims).await?;
+    Ok(Json(UserResponse::from(user)))
 }
 
 // Google 登录
@@ -409,7 +365,8 @@ async fn initialize_password(
     Json(request): Json<InitializePasswordRequest>,
 ) -> Result<Json<UserResponse>> {
     let auth_service = AuthService::new(db, config)?;
-    let user = auth_service.initialize_password(&claims.sub, &request.password).await?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let user = auth_service.initialize_password(&user_id, &request.password).await?;
     Ok(Json(user.into()))
 }
 
@@ -454,7 +411,8 @@ async fn logout_all(
     claims: Claims,
 ) -> Result<&'static str> {
     let auth_service = AuthService::new(db, config)?;
-    auth_service.logout_all_sessions(&claims.sub).await?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    auth_service.logout_all_sessions(&user_id).await?;
     Ok("All sessions logged out successfully")
 }
 
@@ -466,7 +424,8 @@ async fn get_sessions(
     claims: Claims,
 ) -> Result<Json<Vec<SessionInfo>>> {
     let auth_service = AuthService::new(db, config)?;
-    let sessions = auth_service.get_user_sessions(&claims.sub, bearer.token()).await?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let sessions = auth_service.get_user_sessions(&user_id, bearer.token()).await?;
     Ok(Json(sessions))
 }
 

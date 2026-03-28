@@ -26,6 +26,7 @@ use std::sync::Arc;
 use surrealdb::types::RecordId;
 use surrealdb::types::RecordId as Thing;
 use tracing::{error, info, debug};
+use crate::utils::jwt::{AuthSubjectRef, Claims as JwtClaims};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -498,6 +499,42 @@ impl AuthService {
 
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         self.db.find_record_by_field("user", "id", user_id).await
+    }
+
+    pub async fn get_user_by_subject_id(&self, subject_id: &str) -> Result<Option<User>> {
+        let query = "SELECT * FROM user WHERE subject_id = type::thing($subject_id) LIMIT 1";
+        let mut result = self
+            .db
+            .client
+            .query(query)
+            .bind(("subject_id", subject_id.to_string()))
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user by subject_id: {}", e)))?;
+
+        let users: Vec<User> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse user by subject_id: {}", e)))?;
+
+        Ok(users.into_iter().next())
+    }
+
+    pub async fn resolve_authenticated_user(&self, claims: &JwtClaims) -> Result<User> {
+        match claims.auth_subject_ref() {
+            AuthSubjectRef::UserId(user_id) => self
+                .get_user_by_id(&user_id)
+                .await?
+                .ok_or(AuthError::UserNotFound),
+            AuthSubjectRef::SubjectId(subject_id) => self
+                .get_user_by_subject_id(&subject_id)
+                .await?
+                .ok_or(AuthError::UserNotFound),
+        }
+    }
+
+    pub async fn resolve_authenticated_user_id(&self, claims: &JwtClaims) -> Result<String> {
+        let user = self.resolve_authenticated_user(claims).await?;
+        let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        Ok(crate::utils::record_id::record_id_key_to_string(user_id))
     }
 
     pub async fn initialize_password(&self, user_id: &str, password: &str) -> Result<User> {
