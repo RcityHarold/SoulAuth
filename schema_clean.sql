@@ -1,5 +1,11 @@
 
+DEFINE TABLE subject SCHEMAFULL;
+DEFINE FIELD subject_type ON subject TYPE string;
+DEFINE FIELD created_at ON subject TYPE number;
+DEFINE FIELD updated_at ON subject TYPE number;
+
 DEFINE TABLE user SCHEMAFULL;
+DEFINE FIELD subject_id ON user TYPE option<record<subject>>;
 DEFINE FIELD email ON user TYPE string;
 DEFINE FIELD password ON user TYPE option<string>;
 DEFINE FIELD verified ON user TYPE bool DEFAULT false;
