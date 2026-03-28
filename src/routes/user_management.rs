@@ -4,18 +4,18 @@ use axum::{
     Router, Json,
 };
 use std::sync::Arc;
-use tracing::error;
 
 use crate::{
+    config::Config,
     error::AuthError,
     routes::rbac::ApiResponse,
     models::{
-        user::{User, UpdateAccountStatusRequest, UserListRequest},
+        user::{UpdateAccountStatusRequest, UserListRequest},
         user_profile::{CreateUserProfileRequest, UpdateUserProfileRequest},
         user_preferences::{CreateUserPreferencesRequest, UpdateUserPreferencesRequest},
         user_activity::ActivityLogRequest,
     },
-    services::{database::Database, user_management::UserManagementService},
+    services::{auth::AuthService, database::Database, user_management::UserManagementService},
     utils::jwt::Claims,
     require_permission,
 };
@@ -40,29 +40,41 @@ pub fn router() -> Router {
 async fn create_user_profile(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Json(request): Json<CreateUserProfileRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_profile::UserProfileResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let profile = service.create_user_profile(&claims.sub, request).await?;
+    let profile = service.create_user_profile(&user_id, request).await?;
     Ok(Json(ApiResponse::success(profile, "User profile created successfully")))
 }
 
 async fn get_user_profile(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
 ) -> Result<Json<ApiResponse<crate::models::user_profile::UserProfileResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let profile = service.get_user_profile(&claims.sub).await?;
+    let profile = service.get_user_profile(&user_id).await?;
     Ok(Json(ApiResponse::success(profile, "User profile retrieved successfully")))
 }
 
 async fn update_user_profile(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Json(request): Json<UpdateUserProfileRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_profile::UserProfileResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let profile = service.update_user_profile(&claims.sub, request).await?;
+    let profile = service.update_user_profile(&user_id, request).await?;
     Ok(Json(ApiResponse::success(profile, "User profile updated successfully")))
 }
 
@@ -70,29 +82,41 @@ async fn update_user_profile(
 async fn create_user_preferences(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Json(request): Json<CreateUserPreferencesRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_preferences::UserPreferencesResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let preferences = service.create_user_preferences(&claims.sub, request).await?;
+    let preferences = service.create_user_preferences(&user_id, request).await?;
     Ok(Json(ApiResponse::success(preferences, "User preferences created successfully")))
 }
 
 async fn get_user_preferences(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
 ) -> Result<Json<ApiResponse<crate::models::user_preferences::UserPreferencesResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let preferences = service.get_user_preferences(&claims.sub).await?;
+    let preferences = service.get_user_preferences(&user_id).await?;
     Ok(Json(ApiResponse::success(preferences, "User preferences retrieved successfully")))
 }
 
 async fn update_user_preferences(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Json(request): Json<UpdateUserPreferencesRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_preferences::UserPreferencesResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let preferences = service.update_user_preferences(&claims.sub, request).await?;
+    let preferences = service.update_user_preferences(&user_id, request).await?;
     Ok(Json(ApiResponse::success(preferences, "User preferences updated successfully")))
 }
 
@@ -100,10 +124,14 @@ async fn update_user_preferences(
 async fn get_user_activity_log(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Query(request): Query<ActivityLogRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_activity::ActivityLogResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+
     let service = UserManagementService::new(db);
-    let activity_log = service.get_user_activity_log(&claims.sub, request).await?;
+    let activity_log = service.get_user_activity_log(&user_id, request).await?;
     Ok(Json(ApiResponse::success(activity_log, "User activity log retrieved successfully")))
 }
 
@@ -111,10 +139,13 @@ async fn get_user_activity_log(
 async fn list_users(
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Query(request): Query<UserListRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user::UserListResponse>>, AuthError> {
-    require_permission!(db, &claims.sub, "users.read");
-    
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &user_id, "users.read");
+
     let service = UserManagementService::new(db);
     let users = service.list_users(request).await?;
     Ok(Json(ApiResponse::success(users, "Users retrieved successfully")))
@@ -124,15 +155,14 @@ async fn update_user_account_status(
     Path(user_id): Path<String>,
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Json(request): Json<UpdateAccountStatusRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user::AccountStatusResponse>>, AuthError> {
-    require_permission!(db, &claims.sub, "users.write");
-    
-    // 获取当前用户信息
-    let current_user = db.find_record_by_field::<User>("user", "id", &claims.sub).await
-        .map_err(|e| AuthError::DatabaseError(e.to_string()))?
-        .ok_or_else(|| AuthError::NotFound("Current user not found".to_string()))?;
-    
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "users.write");
+    let current_user = auth_service.resolve_authenticated_user(&claims).await?;
+
     let service = UserManagementService::new(db);
     let response = service.update_account_status(&user_id, request, &current_user).await?;
     Ok(Json(ApiResponse::success(response, "Account status updated successfully")))
@@ -142,9 +172,12 @@ async fn get_user_profile_by_id(
     Path(user_id): Path<String>,
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
 ) -> Result<Json<ApiResponse<crate::models::user_profile::UserProfileResponse>>, AuthError> {
-    require_permission!(db, &claims.sub, "users.read");
-    
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "users.read");
+
     let service = UserManagementService::new(db);
     let profile = service.get_user_profile(&user_id).await?;
     Ok(Json(ApiResponse::success(profile, "User profile retrieved successfully")))
@@ -154,9 +187,12 @@ async fn get_user_preferences_by_id(
     Path(user_id): Path<String>,
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
 ) -> Result<Json<ApiResponse<crate::models::user_preferences::UserPreferencesResponse>>, AuthError> {
-    require_permission!(db, &claims.sub, "users.read");
-    
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "users.read");
+
     let service = UserManagementService::new(db);
     let preferences = service.get_user_preferences(&user_id).await?;
     Ok(Json(ApiResponse::success(preferences, "User preferences retrieved successfully")))
@@ -166,10 +202,13 @@ async fn get_user_activity_log_by_id(
     Path(user_id): Path<String>,
     claims: Claims,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     Query(request): Query<ActivityLogRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_activity::ActivityLogResponse>>, AuthError> {
-    require_permission!(db, &claims.sub, "audit.read");
-    
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "audit.read");
+
     let service = UserManagementService::new(db);
     let activity_log = service.get_user_activity_log(&user_id, request).await?;
     Ok(Json(ApiResponse::success(activity_log, "User activity log retrieved successfully")))
