@@ -1,7 +1,6 @@
 use crate::{
     config::Config,
     error::{AuthError, Result},
-    models::account_lockout::LockoutCheckResult,
     models::user::{CreateUserRequest, LoginRequest, AuthResponse, UserResponse, InitializePasswordRequest},
     models::password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
     models::session::{LogoutRequest, SessionInfo},
@@ -18,10 +17,68 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::Deserialize;
-use std::{sync::Arc, net::SocketAddr};
+use std::{future::Future, sync::Arc, net::SocketAddr};
 use crate::{services::database::Database, utils::rate_limit_middleware::check_rate_limit_for_request, AppState};
 use tracing::{error, info, warn};
 use serde_json::json;
+
+fn lockout_check_unavailable(scope: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "Authentication service unavailable",
+            "message": format!("{} lockout check unavailable", scope)
+        })),
+    )
+}
+
+async fn run_lockout_check_with_reauth<T, C, CFut, R, RFut>(
+    scope: &str,
+    check: C,
+    reauth: R,
+) -> std::result::Result<T, (StatusCode, Json<serde_json::Value>)>
+where
+    C: Fn() -> CFut,
+    CFut: Future<Output = Result<T>>,
+    R: Fn() -> RFut,
+    RFut: Future<Output = Result<()>>,
+{
+    match check().await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Failed to check {} lockout: {:?}", scope, e);
+            match reauth().await {
+                Ok(_) => match check().await {
+                    Ok(result) => Ok(result),
+                    Err(retry_err) => {
+                        error!(
+                            "{} lockout check still failed after reauth, fail-safe: {:?}",
+                            scope, retry_err
+                        );
+                        Err(lockout_check_unavailable(scope))
+                    }
+                },
+                Err(reauth_err) => {
+                    error!(
+                        "Reauth failed while checking {} lockout, fail-safe: {:?}",
+                        scope, reauth_err
+                    );
+                    Err(lockout_check_unavailable(scope))
+                }
+            }
+        }
+    }
+}
+
+fn require_existing_user<T>(user: Option<T>, subject: &str) -> Result<T> {
+    match user {
+        Some(user) => Ok(user),
+        None => {
+            warn!("get_current_user: user not found for sub={}", subject);
+            Err(AuthError::UserNotFound)
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 pub struct OAuthCallback {
@@ -134,28 +191,12 @@ async fn login(
     // 检查速率限制
     check_rate_limit_for_request(&app_state.rate_limiter, &client_ip, "/api/auth/login").await?;
     
-    let default_remaining = app_state.lockout_service.get_config().max_attempts;
-
-    // 检查IP地址锁定（数据库异常时降级，避免把登录整体打成500）
-    let ip_lockout_result = match app_state.lockout_service.check_ip_lockout(&client_ip).await {
-        Ok(result) => result,
-        Err(e) => {
-            error!("Failed to check IP lockout: {:?}", e);
-            match app_state.db.reauth().await {
-                Ok(_) => match app_state.lockout_service.check_ip_lockout(&client_ip).await {
-                    Ok(result) => result,
-                    Err(retry_err) => {
-                        warn!("IP lockout check still failed after reauth, fail-open: {:?}", retry_err);
-                        LockoutCheckResult::normal(default_remaining)
-                    }
-                },
-                Err(reauth_err) => {
-                    warn!("Reauth failed while checking IP lockout, fail-open: {:?}", reauth_err);
-                    LockoutCheckResult::normal(default_remaining)
-                }
-            }
-        }
-    };
+    // 检查IP地址锁定（数据库异常时 fail-safe，避免绕过锁定逻辑）
+    let ip_lockout_result = run_lockout_check_with_reauth(
+        "IP",
+        || app_state.lockout_service.check_ip_lockout(&client_ip),
+        || app_state.db.reauth(),
+    ).await?;
     
     if ip_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -165,26 +206,12 @@ async fn login(
         }))));
     }
     
-    // 检查用户账户锁定（数据库异常时降级，避免把登录整体打成500）
-    let user_lockout_result = match app_state.lockout_service.check_user_lockout(&req.email).await {
-        Ok(result) => result,
-        Err(e) => {
-            error!("Failed to check user lockout: {:?}", e);
-            match app_state.db.reauth().await {
-                Ok(_) => match app_state.lockout_service.check_user_lockout(&req.email).await {
-                    Ok(result) => result,
-                    Err(retry_err) => {
-                        warn!("User lockout check still failed after reauth, fail-open: {:?}", retry_err);
-                        LockoutCheckResult::normal(default_remaining)
-                    }
-                },
-                Err(reauth_err) => {
-                    warn!("Reauth failed while checking user lockout, fail-open: {:?}", reauth_err);
-                    LockoutCheckResult::normal(default_remaining)
-                }
-            }
-        }
-    };
+    // 检查用户账户锁定（数据库异常时 fail-safe，避免绕过锁定逻辑）
+    let user_lockout_result = run_lockout_check_with_reauth(
+        "User",
+        || app_state.lockout_service.check_user_lockout(&req.email),
+        || app_state.db.reauth(),
+    ).await?;
     
     if user_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -284,49 +311,13 @@ async fn get_current_user(
 ) -> Result<Json<UserResponse>> {
     let auth_service = AuthService::new(db, config)?;
     match auth_service.get_user_by_id(&claims.sub).await {
-        Ok(Some(user)) => Ok(Json(UserResponse::from(user))),
-        Ok(None) => {
-            warn!("get_current_user: user not found for sub={}, using JWT fallback response", claims.sub);
-            let clean_id = claims
-                .sub
-                .rsplit(':')
-                .next()
-                .unwrap_or(&claims.sub)
-                .trim_matches('`')
-                .to_string();
-
-            Ok(Json(UserResponse {
-                id: clean_id,
-                email: "unknown@example.com".to_string(),
-                is_email_verified: true,
-                created_at: chrono::Utc::now(),
-                has_password: true,
-                account_status: crate::models::user::AccountStatus::Active,
-                last_login_at: None,
-            }))
-        }
+        Ok(user) => Ok(Json(UserResponse::from(require_existing_user(user, &claims.sub)?))),
         Err(e) => {
-            warn!(
-                "get_current_user: failed to load user for sub={} from DB: {:?}; using JWT fallback response",
+            error!(
+                "get_current_user: failed to load user for sub={} from DB: {:?}",
                 claims.sub, e
             );
-            let clean_id = claims
-                .sub
-                .rsplit(':')
-                .next()
-                .unwrap_or(&claims.sub)
-                .trim_matches('`')
-                .to_string();
-
-            Ok(Json(UserResponse {
-                id: clean_id,
-                email: "unknown@example.com".to_string(),
-                is_email_verified: true,
-                created_at: chrono::Utc::now(),
-                has_password: true,
-                account_status: crate::models::user::AccountStatus::Active,
-                last_login_at: None,
-            }))
+            Err(e)
         }
     }
 }
@@ -569,5 +560,45 @@ impl axum::response::IntoResponse for AuthError {
         }));
 
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn me_missing_user_returns_user_not_found_instead_of_fake_success() {
+        let result = require_existing_user::<()>(None, "user:missing");
+        assert!(matches!(result, Err(AuthError::UserNotFound)));
+    }
+
+    #[tokio::test]
+    async fn lockout_retry_failure_returns_503() {
+        let response = run_lockout_check_with_reauth(
+            "User",
+            || async { Err::<(), _>(AuthError::DatabaseError("lockout read failed".into())) },
+            || async { Ok::<(), AuthError>(()) },
+        )
+        .await;
+
+        let (status, body) = response.expect_err("retry failure should fail closed");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["error"], "Authentication service unavailable");
+        assert_eq!(body.0["message"], "User lockout check unavailable");
+    }
+
+    #[tokio::test]
+    async fn lockout_reauth_failure_returns_503() {
+        let response = run_lockout_check_with_reauth(
+            "IP",
+            || async { Err::<(), _>(AuthError::DatabaseError("lockout read failed".into())) },
+            || async { Err::<(), _>(AuthError::DatabaseError("reauth failed".into())) },
+        )
+        .await;
+
+        let (status, body) = response.expect_err("reauth failure should fail closed");
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.0["message"], "IP lockout check unavailable");
     }
 }
