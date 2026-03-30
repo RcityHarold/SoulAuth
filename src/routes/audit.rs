@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
+    config::Config,
     error::{Result as ApiResult, AuthError},
-    services::{database::Database, audit::AuditService},
+    services::{auth::AuthService, audit::AuditService, database::Database},
     utils::jwt::Claims,
     require_permission,
 };
@@ -259,10 +260,13 @@ pub struct RetentionMetrics {
 
 pub async fn get_audit_dashboard(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<AuditDashboard>> {
-    require_permission!(&db, &claims.sub, "audit.read");
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(&db, &user_id, "audit.read");
 
     let days = query.days.unwrap_or(7);
     let start_time = Utc::now() - Duration::days(days);
@@ -312,10 +316,13 @@ pub async fn get_audit_dashboard(
 
 pub async fn get_security_metrics(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<SecurityMetrics>> {
-    require_permission!(&db, &claims.sub, "security.read");
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(&db, &user_id, "security.read");
 
     let hours = query.hours.unwrap_or(24);
     let start_time = Utc::now() - Duration::hours(hours);
@@ -346,10 +353,13 @@ pub async fn get_security_metrics(
 
 pub async fn get_activity_summary(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<ActivitySummary>> {
-    require_permission!(&db, &claims.sub, "audit.read");
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(&db, &user_id, "audit.read");
 
     let days = query.days.unwrap_or(7);
     let start_time = Utc::now() - Duration::days(days);
@@ -378,9 +388,12 @@ pub async fn get_activity_summary(
 
 pub async fn get_system_health(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
 ) -> ApiResult<Json<SystemHealth>> {
-    require_permission!(&db, &claims.sub, "security.read");
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(&db, &user_id, "security.read");
     
     tracing::info!("Checking system health");
 
@@ -404,10 +417,13 @@ pub async fn get_system_health(
 
 pub async fn generate_security_report(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<SecurityReport>> {
-    require_permission!(&db, &claims.sub, "audit.read");
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(&db, &user_id, "audit.read");
 
     let days = query.days.unwrap_or(30);
     let start_time = Utc::now() - Duration::days(days);

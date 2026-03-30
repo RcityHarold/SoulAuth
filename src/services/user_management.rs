@@ -25,12 +25,12 @@ impl UserManagementService {
 
     // 用户档案管理
     pub async fn create_user_profile(&self, user_id: &str, request: CreateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查用户是否存在
-        let user_check_query = format!("SELECT * FROM user:{}", user_id);
         let mut response = self.db.client
-            .query(&user_check_query)
+            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
@@ -106,7 +106,7 @@ impl UserManagementService {
     }
 
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -129,7 +129,7 @@ impl UserManagementService {
     }
 
     pub async fn update_user_profile(&self, user_id: &str, request: UpdateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 获取现有档案
         let existing_profile = self.get_user_profile(user_id).await?;
@@ -208,7 +208,7 @@ impl UserManagementService {
 
     // 用户偏好管理
     pub async fn create_user_preferences(&self, user_id: &str, request: CreateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查偏好是否已存在
         let existing_prefs = self.get_user_preferences(user_id).await;
@@ -291,7 +291,7 @@ impl UserManagementService {
     }
 
     pub async fn get_user_preferences(&self, user_id: &str) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -314,7 +314,7 @@ impl UserManagementService {
     }
 
     pub async fn update_user_preferences(&self, user_id: &str, request: UpdateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 获取现有偏好
         let _existing_prefs = self.get_user_preferences(user_id).await?;
@@ -402,12 +402,12 @@ impl UserManagementService {
 
     // 账户状态管理
     pub async fn update_account_status(&self, user_id: &str, request: UpdateAccountStatusRequest, updated_by: &User) -> Result<AccountStatusResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查用户是否存在
-        let user_check_query = format!("SELECT * FROM user:{}", user_id);
         let mut response = self.db.client
-            .query(&user_check_query)
+            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
@@ -424,15 +424,12 @@ impl UserManagementService {
         }
 
         let now = Utc::now();
-        let query = format!(
-            "UPDATE user:{} SET account_status = $status, updated_at = $updated_at",
-            user_id
-        );
 
         self.db.client
-            .query(&query)
+            .query("UPDATE user SET account_status = $status, updated_at = $updated_at WHERE id = $user_id")
             .bind(("status", request.status.to_string()))
             .bind(("updated_at", now.timestamp()))
+            .bind(("user_id", user_thing.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to update account status: {}", e);
@@ -477,7 +474,7 @@ impl UserManagementService {
         user_agent: &str,
         details: serde_json::Value,
     ) -> Result<(), AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         let activity = UserActivity {
             id: None,
@@ -505,7 +502,7 @@ impl UserManagementService {
     }
 
     pub async fn get_user_activity_log(&self, user_id: &str, request: ActivityLogRequest) -> Result<ActivityLogResponse, AuthError> {
-        let user_thing = surrealdb::types::RecordId::new("user", user_id.trim_start_matches("user:"));
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         let page = request.page.unwrap_or(1);
         let limit = request.limit.unwrap_or(50);
         let offset = (page - 1) * limit;

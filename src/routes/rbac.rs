@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
+    config::Config,
     error::AuthError,
     models::{
         user::User,
@@ -21,7 +22,7 @@ use crate::{
             UserRoleResponse,
         },
     },
-    services::{database::Database, rbac::RBACService},
+    services::{auth::AuthService, database::Database, rbac::RBACService},
     require_permission_status,
     utils::jwt::Claims,
 };
@@ -90,12 +91,7 @@ pub fn router() -> Router {
 }
 
 fn normalize_user_id(id: &str) -> String {
-    id.replace("user:", "")
-        .replace('⟨', "")
-        .replace('⟩', "")
-        .replace('<', "")
-        .replace('>', "")
-        .replace('"', "")
+    crate::utils::record_id::normalize_user_id(id)
 }
 
 fn current_user_id(current_user: &User) -> Result<String, StatusCode> {
@@ -362,10 +358,22 @@ async fn remove_permission_from_role(
 
 async fn get_user_roles(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<UserRoleResponse>>, StatusCode> {
-    let requester_id = normalize_user_id(&claims.sub);
+    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
+        error!("Failed to create auth service for user roles lookup: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let requester_id = auth_service
+        .resolve_authenticated_user_id(&claims)
+        .await
+        .map(|id| normalize_user_id(&id))
+        .map_err(|e| {
+            error!("Failed to resolve requester user id for user roles lookup: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
     let target_user_id = normalize_user_id(&target_user_id);
 
     if requester_id != target_user_id {
@@ -392,21 +400,32 @@ async fn get_user_roles(
 
 async fn assign_role_to_user(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Path(user_id): Path<String>,
     Json(request): Json<AssignRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let requester_id = normalize_user_id(&claims.sub);
+    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
+        error!("Failed to create auth service for role assignment: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let requester_id = auth_service
+        .resolve_authenticated_user_id(&claims)
+        .await
+        .map(|id| normalize_user_id(&id))
+        .map_err(|e| {
+            error!("Failed to resolve requester user id for role assignment: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
     require_permission_status!(db, &requester_id, "roles.write");
 
-    let current_user = db
-        .find_record_by_field::<User>("user", "id", &requester_id)
+    let current_user = auth_service
+        .resolve_authenticated_user(&claims)
         .await
         .map_err(|e| {
-            error!("Failed to load requester user for role assignment: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+            error!("Failed to resolve requester user for role assignment: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
 
     let target_user_id = normalize_user_id(&user_id);
 
@@ -438,21 +457,32 @@ async fn assign_role_to_user(
 
 async fn remove_role_from_user(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Path(user_id): Path<String>,
     Json(request): Json<RemoveRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let requester_id = normalize_user_id(&claims.sub);
+    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
+        error!("Failed to create auth service for role removal: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let requester_id = auth_service
+        .resolve_authenticated_user_id(&claims)
+        .await
+        .map(|id| normalize_user_id(&id))
+        .map_err(|e| {
+            error!("Failed to resolve requester user id for role removal: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
     require_permission_status!(db, &requester_id, "roles.write");
 
-    let current_user = db
-        .find_record_by_field::<User>("user", "id", &requester_id)
+    let current_user = auth_service
+        .resolve_authenticated_user(&claims)
         .await
         .map_err(|e| {
-            error!("Failed to load requester user for role removal: {}", e);
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+            error!("Failed to resolve requester user for role removal: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
 
     let target_user_id = normalize_user_id(&user_id);
 
@@ -480,10 +510,22 @@ async fn remove_role_from_user(
 
 async fn get_user_permissions(
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     claims: Claims,
     Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
-    let requester_id = normalize_user_id(&claims.sub);
+    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
+        error!("Failed to create auth service for user permissions lookup: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let requester_id = auth_service
+        .resolve_authenticated_user_id(&claims)
+        .await
+        .map(|id| normalize_user_id(&id))
+        .map_err(|e| {
+            error!("Failed to resolve requester user id for user permissions lookup: {}", e);
+            StatusCode::UNAUTHORIZED
+        })?;
     let target_user_id = normalize_user_id(&target_user_id);
 
     if requester_id != target_user_id {

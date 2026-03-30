@@ -26,6 +26,7 @@ use std::sync::Arc;
 use surrealdb::types::RecordId;
 use surrealdb::types::RecordId as Thing;
 use tracing::{error, info, debug};
+use crate::utils::jwt::{AuthSubjectRef, Claims as JwtClaims};
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -95,6 +96,19 @@ impl AuthService {
             .await
     }
 
+    fn user_subject_sub(user: &User) -> Result<String> {
+        let subject_id = user
+            .subject_id
+            .as_ref()
+            .ok_or_else(|| AuthError::ServerError("User subject_id missing".to_string()))?;
+
+        Ok(format!(
+            "{}:{}",
+            subject_id.table,
+            crate::utils::record_id::record_id_key_to_string(subject_id)
+        ))
+    }
+
     pub fn get_google_auth_url(&self) -> Result<String> {
         self.oauth_service.get_google_auth_url()
     }
@@ -108,11 +122,7 @@ impl AuthService {
         let user = self.find_or_create_oauth_user(user_info).await?;
         debug!("User found or created: {:?}", user);
 
-        let token = self
-            .create_token(&crate::utils::record_id::record_id_key_to_string(
-                user.id.as_ref().ok_or(AuthError::UserNotFound)?,
-            ))
-            .await?;
+        let token = self.create_token(&user).await?;
         debug!("JWT token created successfully");
 
         debug!("Creating auth response");
@@ -355,13 +365,15 @@ impl AuthService {
     async fn create_session_with_metadata(&self, user: User, user_agent: String, ip_address: String) -> Result<AuthResponse> {
         let now = Utc::now();
         let exp = now + Duration::hours(24); // 24小时后过期
+        let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?.clone();
+        let subject_sub = Self::user_subject_sub(&user)?;
 
         // 创建会话记录
         let session_id = Thing::new("session", Uuid::new_v4().to_string());
 
         let session = Session {
             id: Some(session_id.clone()),
-            user_id: user.id.as_ref().unwrap().clone(),
+            user_id,
             token: "".to_string(), // 临时空值，稍后更新
             expires_at: exp.timestamp(),
             created_at: now.timestamp(),
@@ -371,7 +383,7 @@ impl AuthService {
 
         // 创建JWT claims，包含session_id
         let claims = Claims {
-            sub: crate::utils::record_id::record_id_key_to_string(user.id.as_ref().unwrap()),
+            sub: subject_sub,
             exp: exp.timestamp(),
             iat: now.timestamp(),
             session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
@@ -398,23 +410,22 @@ impl AuthService {
         })
     }
 
-    async fn create_token(&self, user_id: &str) -> Result<String> {
-        debug!("Starting token creation for user ID: {}", user_id);
+    async fn create_token(&self, user: &User) -> Result<String> {
+        let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        debug!(
+            "Starting token creation for user ID: {}",
+            crate::utils::record_id::record_id_key_to_string(user_id)
+        );
         let now = Utc::now();
         let exp = now + Duration::hours(24); // 24小时后过期
+        let subject_sub = Self::user_subject_sub(user)?;
 
         // 创建会话记录
         let session_id = Thing::new("session", Uuid::new_v4().to_string());
 
-        let user_thing: Thing = if let Some((tb, key_raw)) = user_id.split_once(':') {
-            Thing::new(tb, key_raw.trim().trim_matches('⟨').trim_matches('⟩'))
-        } else {
-            Thing::new("user", user_id.to_string())
-        };
-
         let session = Session {
             id: Some(session_id.clone()),
-            user_id: user_thing,
+            user_id: user_id.clone(),
             token: "".to_string(), // 临时空值，稍后更新
             expires_at: exp.timestamp(),
             created_at: now.timestamp(),
@@ -423,7 +434,7 @@ impl AuthService {
         };
 
         let claims = Claims {
-            sub: user_id.to_string(),
+            sub: subject_sub,
             exp: exp.timestamp(),
             iat: now.timestamp(),
             session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
@@ -459,6 +470,7 @@ impl AuthService {
             &token,
         ).await?
         .ok_or(AuthError::InvalidToken)?;
+        let user = self.ensure_user_subject(user, SubjectType::Human).await?;
 
         // 检查用户是否已经验证
         if user.is_email_verified {
@@ -498,6 +510,42 @@ impl AuthService {
 
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<Option<User>> {
         self.db.find_record_by_field("user", "id", user_id).await
+    }
+
+    pub async fn get_user_by_subject_id(&self, subject_id: &str) -> Result<Option<User>> {
+        let query = "SELECT * FROM user WHERE subject_id = type::thing($subject_id) LIMIT 1";
+        let mut result = self
+            .db
+            .client
+            .query(query)
+            .bind(("subject_id", subject_id.to_string()))
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user by subject_id: {}", e)))?;
+
+        let users: Vec<User> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse user by subject_id: {}", e)))?;
+
+        Ok(users.into_iter().next())
+    }
+
+    pub async fn resolve_authenticated_user(&self, claims: &JwtClaims) -> Result<User> {
+        match claims.auth_subject_ref() {
+            AuthSubjectRef::UserId(user_id) => self
+                .get_user_by_id(&user_id)
+                .await?
+                .ok_or(AuthError::UserNotFound),
+            AuthSubjectRef::SubjectId(subject_id) => self
+                .get_user_by_subject_id(&subject_id)
+                .await?
+                .ok_or(AuthError::UserNotFound),
+        }
+    }
+
+    pub async fn resolve_authenticated_user_id(&self, claims: &JwtClaims) -> Result<String> {
+        let user = self.resolve_authenticated_user(claims).await?;
+        let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        Ok(crate::utils::record_id::record_id_key_to_string(user_id))
     }
 
     pub async fn initialize_password(&self, user_id: &str, password: &str) -> Result<User> {
