@@ -3,6 +3,7 @@ use crate::{
     error::{AuthError, Result},
     models::{
         user::{User, CreateUserRequest, AuthResponse, UserResponse},
+        subject::{Subject, SubjectType},
         identity_provider::{IdentityProvider, OAuthUserInfo},
         password_reset::{PasswordResetToken, RequestPasswordResetRequest, ResetPasswordRequest},
         session::{Session, SessionInfo},
@@ -22,7 +23,7 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::sync::Arc;
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
 use tracing::{error, info, debug};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,7 +31,10 @@ struct Claims {
     sub: String,
     exp: i64,
     iat: i64,
+    #[serde(default)]
     session_id: Option<String>,
+    #[serde(default)]
+    subject_type: Option<SubjectType>,
 }
 
 pub struct AuthService {
@@ -41,10 +45,48 @@ pub struct AuthService {
 }
 
 fn new_thing(table: &str) -> Thing {
-    Thing::from((table.to_string(), Uuid::new_v4().to_string()))
+    Thing::new(table, Uuid::new_v4().to_string())
 }
 
 impl AuthService {
+    async fn create_subject(&self, subject_type: SubjectType) -> Result<Thing> {
+        let now = Utc::now().timestamp();
+        let subject_id = Thing::new("subject", Uuid::new_v4().to_string());
+        let subject = Subject {
+            id: Some(subject_id.clone()),
+            subject_type,
+            created_at: now,
+            updated_at: now,
+        };
+
+        self.db.create_record("subject", &subject).await?;
+        Ok(subject_id)
+    }
+
+    async fn ensure_user_subject(&self, user: User, subject_type: SubjectType) -> Result<User> {
+        if user.subject_id.is_some() {
+            return Ok(user);
+        }
+
+        let subject_id = self.create_subject(subject_type).await?;
+        let mut updated_user = user.clone();
+        updated_user.subject_id = Some(subject_id);
+        updated_user.updated_at = Utc::now().timestamp();
+
+        let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        self.db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &updated_user,
+            )
+            .await
+    }
+
     fn normalize_username(username: &str) -> String {
         username.trim().to_ascii_lowercase()
     }
@@ -127,7 +169,11 @@ impl AuthService {
         let user = self.find_or_create_oauth_user(user_info).await?;
         debug!("User found or created: {:?}", user);
 
-        let token = self.create_token(&user.id.clone().unwrap().to_string()).await?;
+        let token = self
+            .create_token(&crate::utils::record_id::record_id_key_to_string(
+                user.id.as_ref().ok_or(AuthError::UserNotFound)?,
+            ))
+            .await?;
         debug!("JWT token created successfully");
 
         debug!("Creating auth response");
@@ -166,12 +212,13 @@ impl AuthService {
         {
             debug!("Found existing identity provider record: {:?}", identity);
             // 如果找到身份提供商记录，返回对应的用户
-            return self.db.find_record_by_field::<User>(
+            let user = self.db.find_record_by_field::<User>(
                 "user",
                 "id",
-                &identity.user_id.to_string(),
+                &crate::utils::record_id::record_id_key_to_string(&identity.user_id),
             ).await?
-            .ok_or(AuthError::UserNotFound);
+            .ok_or(AuthError::UserNotFound)?;
+            return self.ensure_user_subject(user, SubjectType::Human).await;
         }
 
         debug!("No existing identity provider record found");
@@ -200,29 +247,31 @@ impl AuthService {
             debug!("Creating identity provider record: {:?}", identity);
             self.db.create_record("identity_provider", &identity).await?;
             debug!("Identity provider record created successfully");
-            return Ok(existing_user);
+            return self.ensure_user_subject(existing_user, SubjectType::Human).await;
         }
 
         debug!("No existing user found, creating new user");
         // 创建新用户
         let now = Utc::now();
         let id = new_thing("user");
+        let subject_id = self.create_subject(SubjectType::Human).await?;
         let (username, username_normalized) = self
             .generate_unique_username(user_info.email.split('@').next().unwrap_or("user"))
             .await?;
         debug!("Generated new user ID: {:?}", id);
         let user = User {
             id: Some(id.clone()),
+            subject_id: Some(subject_id),
             email: user_info.email,
             username,
             username_normalized,
             password_hash: None, // OAuth 用户没有密码
-            created_at: now,
-            updated_at: now,
+            created_at: now.timestamp(),
+            updated_at: now.timestamp(),
             is_email_verified: true, // OAuth 邮箱已验证
             verification_token: None,
-            account_status: crate::models::user::AccountStatus::Active,
-            last_login_at: Some(now),
+            account_status: crate::models::user::AccountStatus::Active.to_string(),
+            last_login_at: Some(now.timestamp()),
             last_login_ip: Some("0.0.0.0".to_string()),
         };
 
@@ -285,18 +334,20 @@ impl AuthService {
             None
         };
         let id = new_thing("user");
+        let subject_id = self.create_subject(SubjectType::Human).await?;
         let user = User {
             id: Some(id),
+            subject_id: Some(subject_id),
             email: req.email.clone(),
             username,
             username_normalized,
             password_hash: Some(hashed_password),
-            created_at: now,
-            updated_at: now,
+            created_at: now.timestamp(),
+            updated_at: now.timestamp(),
             is_email_verified: !self.config.email_verification_enabled,
             verification_token: verification_token.clone(),
-            account_status: crate::models::user::AccountStatus::Active,
-            last_login_at: Some(now),
+            account_status: crate::models::user::AccountStatus::Active.to_string(),
+            last_login_at: Some(now.timestamp()),
             last_login_ip: None,
         };
 
@@ -342,31 +393,34 @@ impl AuthService {
         }
 
         // 检查账户状态
-        match user.account_status {
-            crate::models::user::AccountStatus::Suspended => {
-                return Err(AuthError::AccountSuspended);
-            }
-            crate::models::user::AccountStatus::Inactive => {
-                return Err(AuthError::AccountInactive);
-            }
-            crate::models::user::AccountStatus::PendingDeletion | 
-            crate::models::user::AccountStatus::Deleted => {
-                return Err(AuthError::AccountDeleted);
-            }
-            crate::models::user::AccountStatus::Active => {
-                // 继续登录流程
-            }
+        match user.account_status.as_str() {
+            "Suspended" => return Err(AuthError::AccountSuspended),
+            "Inactive" => return Err(AuthError::AccountInactive),
+            "PendingDeletion" | "Deleted" => return Err(AuthError::AccountDeleted),
+            _ => {}
         }
 
         // 更新最后登录信息
         let now = Utc::now();
-        user.last_login_at = Some(now);
+        user = self.ensure_user_subject(user, SubjectType::Human).await?;
+        user.last_login_at = Some(now.timestamp());
         user.last_login_ip = Some("0.0.0.0".to_string()); // 这里应该从请求中获取真实IP
-        user.updated_at = now;
+        user.updated_at = now.timestamp();
 
         // 更新用户记录
         let user_thing = user.id.as_ref().unwrap();
-        let updated_user = self.db.update_record("user", user_thing, &user).await?;
+        let updated_user = self
+            .db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &user,
+            )
+            .await?;
 
         // 创建会话
         self.create_session(updated_user).await
@@ -395,10 +449,11 @@ impl AuthService {
 
         // 创建JWT claims，包含session_id
         let claims = Claims {
-            sub: user.id.as_ref().unwrap().to_string(),
+            sub: crate::utils::record_id::record_id_key_to_string(user.id.as_ref().unwrap()),
             exp: exp.timestamp(),
             iat: now.timestamp(),
-            session_id: Some(session_id.to_string()),
+            session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
+            subject_type: Some(SubjectType::Human),
         };
 
         let token = encode(
@@ -429,12 +484,10 @@ impl AuthService {
         // 创建会话记录
         let session_id = new_thing("session");
 
-        let user_thing: Thing = if user_id.starts_with("user:") {
-            // 如果已经包含前缀，直接解析
-            user_id.parse().map_err(|_| AuthError::InvalidUserId)?
+        let user_thing: Thing = if let Some((tb, key_raw)) = user_id.split_once(':') {
+            Thing::new(tb, key_raw.trim().trim_matches('⟨').trim_matches('⟩'))
         } else {
-            // 如果没有前缀，添加前缀后解析
-            format!("user:{}", user_id).parse().map_err(|_| AuthError::InvalidUserId)?
+            Thing::new("user", user_id.to_string())
         };
 
         let session = Session {
@@ -451,7 +504,8 @@ impl AuthService {
             sub: user_id.to_string(),
             exp: exp.timestamp(),
             iat: now.timestamp(),
-            session_id: Some(session_id.to_string()),
+            session_id: Some(crate::utils::record_id::record_id_key_to_string(&session_id)),
+            subject_type: Some(SubjectType::Human),
         };
         debug!("Created JWT claims: {:?}", claims);
 
@@ -492,15 +546,22 @@ impl AuthService {
         let mut updated_user = user.clone();
         updated_user.is_email_verified = true;
         updated_user.verification_token = None;
-        updated_user.updated_at = Utc::now();
-        // 保持原始 id
+        updated_user.updated_at = Utc::now().timestamp();
         updated_user.id = user.id.clone();
 
-        let verified_user = self.db.update_record(
-            "user",
-            user.id.as_ref().unwrap(),
-            &updated_user,
-        ).await?;
+        let user_thing = user.id.as_ref().unwrap();
+        let verified_user = self
+            .db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &updated_user,
+            )
+            .await?;
 
         // 验证成功后创建会话
         self.create_session(verified_user).await
@@ -511,12 +572,10 @@ impl AuthService {
     }
 
     pub async fn initialize_password(&self, user_id: &str, password: &str) -> Result<User> {
-        let thing: Thing = if user_id.starts_with("user:") {
-            // 如果已经包含前缀，直接解析
-            user_id.parse().map_err(|_| AuthError::InvalidUserId)?
+        let thing: Thing = if let Some((tb, key_raw)) = user_id.split_once(':') {
+            Thing::new(tb, key_raw.trim().trim_matches('⟨').trim_matches('⟩'))
         } else {
-            // 如果没有前缀，添加前缀后解析
-            format!("user:{}", user_id).parse().map_err(|_| AuthError::InvalidUserId)?
+            Thing::new("user", user_id.to_string())
         };
 
         let mut user: User = self.db.find_record_by_field("user", "id", user_id)
@@ -530,10 +589,20 @@ impl AuthService {
 
         // 设置密码
         user.password_hash = Some(hash_password(password)?);
-        user.updated_at = Utc::now();
+        user.updated_at = Utc::now().timestamp();
 
         // 更新用户记录
-        self.db.update_record("user", &thing, &user).await
+        self.db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    thing.table,
+                    crate::utils::record_id::record_id_key_to_string(&thing)
+                ),
+                &user,
+            )
+            .await
     }
 
     pub async fn request_password_reset(&self, email: String) -> Result<()> {
@@ -603,17 +672,37 @@ impl AuthService {
 
         // 更新密码
         user.password_hash = Some(hash_password(&new_password)?);
-        user.updated_at = Utc::now();
+        user.updated_at = Utc::now().timestamp();
 
         // 更新用户记录
         let user_thing = user.id.as_ref().unwrap();
-        self.db.update_record("user", user_thing, &user).await?;
+        self.db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &user,
+            )
+            .await?;
 
         // 标记令牌为已使用
         let mut updated_token = reset_token.clone();
         updated_token.used = true;
         let token_thing = reset_token.id.as_ref().unwrap();
-        self.db.update_record("password_reset_token", token_thing, &updated_token).await?;
+        self.db
+            .update_record(
+                "password_reset_token",
+                &format!(
+                    "{}:{}",
+                    token_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(token_thing)
+                ),
+                &updated_token,
+            )
+            .await?;
 
         Ok(())
     }
@@ -636,7 +725,7 @@ impl AuthService {
         let session_infos: Vec<SessionInfo> = sessions
             .into_iter()
             .map(|session| SessionInfo {
-                id: session.id.as_ref().unwrap().to_string(),
+                id: crate::utils::record_id::record_id_key_to_string(session.id.as_ref().unwrap()),
                 created_at: DateTime::<Utc>::from_timestamp(session.created_at, 0)
                     .unwrap_or_else(|| Utc::now()),
                 user_agent: session.user_agent,

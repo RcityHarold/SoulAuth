@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct UserRole {
     pub id: Option<Thing>,
     pub user_id: Thing,
@@ -12,7 +13,7 @@ pub struct UserRole {
     pub assigned_by: Thing, // 分配者的用户ID
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct RolePermission {
     pub id: Option<Thing>,
     pub role_id: Thing,
@@ -24,13 +25,11 @@ pub struct RolePermission {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AssignRoleRequest {
-    pub user_id: String,
     pub role_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RemoveRoleRequest {
-    pub user_id: String,
     pub role_name: String,
 }
 

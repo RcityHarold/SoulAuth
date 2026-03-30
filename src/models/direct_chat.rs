@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct DirectConversation {
     pub id: Option<Thing>,
     pub user_a: Thing,
@@ -10,7 +11,7 @@ pub struct DirectConversation {
     pub updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct DirectMessage {
     pub id: Option<Thing>,
     pub conversation_id: Thing,

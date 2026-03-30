@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct GroupThread {
     pub id: Option<Thing>,
     pub group_id: String,
@@ -13,7 +14,7 @@ pub struct GroupThread {
     pub updated_at: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct GroupThreadMessage {
     pub id: Option<Thing>,
     pub group_id: String,

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct SsoSession {
     pub id: Option<String>,
     pub session_id: String,
@@ -13,7 +14,7 @@ pub struct SsoSession {
     pub user_agent: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct ClientSession {
     pub client_id: String,
     pub session_id: String,

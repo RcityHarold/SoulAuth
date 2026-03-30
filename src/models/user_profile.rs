@@ -1,8 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct UserProfile {
     pub id: Option<Thing>,
     pub user_id: Thing,
@@ -72,9 +73,9 @@ impl From<UserProfile> for UserProfileResponse {
     fn from(profile: UserProfile) -> Self {
         Self {
             id: profile.id
-                .map(|id| id.id.to_string())
+                .map(|id| crate::utils::record_id::record_id_key_to_string(&id))
                 .unwrap_or_default(),
-            user_id: profile.user_id.id.to_string(),
+            user_id: crate::utils::record_id::record_id_key_to_string(&profile.user_id),
             first_name: profile.first_name,
             last_name: profile.last_name,
             display_name: profile.display_name,

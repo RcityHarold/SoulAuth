@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct SocialGroup {
     pub id: Option<Thing>,
     pub name: String,
@@ -30,7 +31,7 @@ pub struct SocialGroup {
     pub member_user_ids: Vec<String>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct GroupSettings {
     #[serde(default = "default_join_mode")]
     pub join_mode: String,

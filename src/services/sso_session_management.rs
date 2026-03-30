@@ -72,7 +72,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("session_id", session_id.to_string()))
+            .bind(("session_id", session_id.to_owned()))
             .await?;
 
         let session: Option<SsoSession> = result.take(0)?;
@@ -151,7 +151,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("user_id", user_id.to_string()))
+            .bind(("user_id", user_id.to_owned()))
             .await?;
 
         let session: Option<SsoSession> = result.take(0)?;
@@ -187,7 +187,7 @@ impl SsoSessionService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("user_id", user_id.to_string()))
+            .bind(("user_id", user_id.to_owned()))
             .await?;
 
         let sessions: Vec<SsoSession> = result.take(0)?;
@@ -215,7 +215,7 @@ impl SsoSessionService {
         
         let _result = self.db.client
             .query(query)
-            .bind(("user_id", user_id.to_string()))
+            .bind(("user_id", user_id.to_owned()))
             .await?;
 
         // 返回删除的会话数量（这里简化处理）
@@ -326,7 +326,7 @@ impl SsoSessionService {
         
         self.db.client
             .query(query)
-            .bind(("session_id", session_id.to_string()))
+            .bind(("session_id", session_id.to_owned()))
             .await?;
 
         Ok(())

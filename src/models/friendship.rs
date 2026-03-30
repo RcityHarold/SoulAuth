@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
+use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, SurrealValue)]
 pub enum FriendRequestStatus {
     Pending,
     Accepted,
@@ -9,7 +10,7 @@ pub enum FriendRequestStatus {
     Cancelled,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct FriendRequest {
     pub id: Option<Thing>,
     pub requester_id: Thing,
@@ -20,7 +21,7 @@ pub struct FriendRequest {
     pub responded_at: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct Friendship {
     pub id: Option<Thing>,
     pub user_a: Thing,

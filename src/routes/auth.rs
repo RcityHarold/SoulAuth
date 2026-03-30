@@ -28,6 +28,7 @@ use crate::{
     models::session::{LogoutRequest, SessionInfo},
     services::auth::AuthService,
     services::social_hub::{SocialEvent, SocialHub},
+    utils::record_id::record_id_key_to_string,
     utils::jwt::{decode_token_claims, Claims},
 };
 use axum::{
@@ -44,7 +45,7 @@ use std::{sync::Arc, net::SocketAddr};
 use crate::{services::database::Database, utils::rate_limit_middleware::check_rate_limit_for_request, AppState};
 use tracing::{error, info};
 use serde_json::json;
-use surrealdb::sql::Thing;
+use surrealdb::types::RecordId as Thing;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
@@ -391,22 +392,26 @@ async fn social_ws_session(mut socket: WebSocket, social_hub: Arc<SocialHub>, us
 }
 
 fn user_thing(user_id: &str) -> Thing {
-    Thing::from((String::from("user"), normalize_user_id(user_id)))
+    Thing::new("user", normalize_user_id(user_id))
 }
 
 fn request_thing(request_id: &str) -> Thing {
-    Thing::from((String::from("friend_request"), normalize_request_id(request_id)))
+    Thing::new("friend_request", normalize_request_id(request_id))
 }
 
 fn direct_conversation_thing(conversation_id: &str) -> Thing {
-    Thing::from((
-        String::from("direct_conversation"),
+    Thing::new(
+        "direct_conversation",
         normalize_direct_conversation_id(conversation_id),
-    ))
+    )
 }
 
 fn direct_message_thing(message_id: &str) -> Thing {
-    Thing::from((String::from("direct_message"), message_id.trim().to_string()))
+    Thing::new("direct_message", message_id.trim().to_string())
+}
+
+fn thing_key_string(thing: &Thing) -> String {
+    record_id_key_to_string(thing)
 }
 
 fn surreal_user_id_string(user_id: &str) -> String {
@@ -514,10 +519,7 @@ async fn create_social_group_members(
 ) -> Result<()> {
     for member_id in human_member_ids {
         let membership = SocialGroupMember {
-            id: Some(Thing::from((
-                String::from("social_group_member"),
-                Uuid::new_v4().to_string(),
-            ))),
+            id: Some(Thing::new("social_group_member", Uuid::new_v4().to_string())),
             group_id: group_id.to_string(),
             member_id: member_id.clone(),
             member_kind: "human".to_string(),
@@ -528,10 +530,7 @@ async fn create_social_group_members(
 
     for member_id in ai_member_ids {
         let membership = SocialGroupMember {
-            id: Some(Thing::from((
-                String::from("social_group_member"),
-                Uuid::new_v4().to_string(),
-            ))),
+            id: Some(Thing::new("social_group_member", Uuid::new_v4().to_string())),
             group_id: group_id.to_string(),
             member_id: member_id.clone(),
             member_kind: "ai".to_string(),
@@ -582,7 +581,7 @@ async fn hydrate_social_group(db: &Database, mut group: SocialGroup) -> Result<S
     let group_id = group
         .id
         .as_ref()
-        .map(|thing| normalize_group_id(&thing.id.to_raw()))
+        .map(|thing| normalize_group_id(&thing_key_string(thing)))
         .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
 
     let (human_member_ids, ai_member_ids) = load_social_group_members(db, &group_id).await?;
@@ -602,7 +601,7 @@ fn map_group_thread_view(thread: GroupThread) -> GroupThreadView {
         id: thread
             .id
             .as_ref()
-            .map(|thing| thing.id.to_raw())
+            .map(thing_key_string)
             .unwrap_or_default(),
         group_id: thread.group_id,
         thread_type: thread.thread_type,
@@ -619,7 +618,7 @@ fn map_group_thread_message_view(message: GroupThreadMessage) -> GroupThreadMess
         id: message
             .id
             .as_ref()
-            .map(|thing| thing.id.to_raw())
+            .map(thing_key_string)
             .unwrap_or_default(),
         group_id: message.group_id,
         thread_id: message.thread_id,
@@ -637,7 +636,7 @@ fn map_group_collab_run_view(run: GroupCollabRun) -> GroupCollabRunView {
         id: run
             .id
             .as_ref()
-            .map(|thing| thing.id.to_raw())
+            .map(thing_key_string)
             .unwrap_or_default(),
         group_id: run.group_id,
         thread_id: run.thread_id,
@@ -698,7 +697,7 @@ async fn ensure_group_thread_access(
 async fn create_default_group_thread(db: &Database, group_id: &str, created_by: &str) -> Result<GroupThread> {
     let now = chrono::Utc::now().to_rfc3339();
     let thread = GroupThread {
-        id: Some(Thing::from((String::from("group_thread"), Uuid::new_v4().to_string()))),
+        id: Some(Thing::new("group_thread", Uuid::new_v4().to_string())),
         group_id: group_id.to_string(),
         thread_type: "chat".to_string(),
         title: "主会话".to_string(),
@@ -796,7 +795,7 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
     let group_id = group
         .id
         .as_ref()
-        .map(|thing| thing.id.to_raw())
+        .map(thing_key_string)
         .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
 
     let mut result = db
@@ -895,7 +894,7 @@ async fn create_group_thread(
 
     let now = chrono::Utc::now().to_rfc3339();
     let thread = GroupThread {
-        id: Some(Thing::from((String::from("group_thread"), Uuid::new_v4().to_string()))),
+        id: Some(Thing::new("group_thread", Uuid::new_v4().to_string())),
         group_id: group_id.clone(),
         thread_type: "chat".to_string(),
         title: title.to_string(),
@@ -964,10 +963,7 @@ async fn send_group_thread_message(
 
     let now = chrono::Utc::now().to_rfc3339();
     let message = GroupThreadMessage {
-        id: Some(Thing::from((
-            String::from("group_thread_message"),
-            Uuid::new_v4().to_string(),
-        ))),
+        id: Some(Thing::new("group_thread_message", Uuid::new_v4().to_string())),
         group_id: group_id.clone(),
         thread_id: thread_id.clone(),
         sender_id: current_user_id.clone(),
@@ -1053,7 +1049,7 @@ async fn create_group_collab_run(
     let now = chrono::Utc::now().to_rfc3339();
     let participant_ids = normalize_unique_ids(req.participant_ids);
     let run = GroupCollabRun {
-        id: Some(Thing::from((String::from("group_collab_run"), Uuid::new_v4().to_string()))),
+        id: Some(Thing::new("group_collab_run", Uuid::new_v4().to_string())),
         group_id: group_id.clone(),
         thread_id: thread_id.clone(),
         scenario_type: group.group_type,
@@ -1276,10 +1272,7 @@ async fn ensure_direct_conversation(
     let (user_a, user_b) = canonical_friend_pair(requester_id, target_user_id);
     let now = chrono::Utc::now().timestamp();
     let conversation = DirectConversation {
-        id: Some(Thing::from((
-            String::from("direct_conversation"),
-            Uuid::new_v4().to_string(),
-        ))),
+        id: Some(Thing::new("direct_conversation", Uuid::new_v4().to_string())),
         user_a: user_thing(&user_a),
         user_b: user_thing(&user_b),
         created_at: now,
@@ -1320,10 +1313,10 @@ async fn direct_conversation_view_for(
     let conversation_id = conversation
         .id
         .as_ref()
-        .map(|value| value.id.to_string())
+        .map(thing_key_string)
         .unwrap_or_default();
-    let left_id = normalize_user_id(&conversation.user_a.id.to_string());
-    let right_id = normalize_user_id(&conversation.user_b.id.to_string());
+    let left_id = normalize_user_id(&thing_key_string(&conversation.user_a));
+    let right_id = normalize_user_id(&thing_key_string(&conversation.user_b));
     let normalized_viewer = normalize_user_id(viewer_id);
     let peer_user_id = if left_id == normalized_viewer {
         right_id
@@ -1348,11 +1341,11 @@ fn map_direct_message_view(message: DirectMessage) -> DirectMessageView {
         id: message
             .id
             .as_ref()
-            .map(|value| value.id.to_string())
+            .map(thing_key_string)
             .unwrap_or_default(),
-        conversation_id: normalize_direct_conversation_id(&message.conversation_id.id.to_string()),
-        sender_id: normalize_user_id(&message.sender_id.id.to_string()),
-        recipient_id: normalize_user_id(&message.recipient_id.id.to_string()),
+        conversation_id: normalize_direct_conversation_id(&thing_key_string(&message.conversation_id)),
+        sender_id: normalize_user_id(&thing_key_string(&message.sender_id)),
+        recipient_id: normalize_user_id(&thing_key_string(&message.recipient_id)),
         content: message.content,
         created_at: ts_to_rfc3339(message.created_at),
     }
@@ -1384,8 +1377,8 @@ async fn pending_request_exists(db: &Arc<Database>, left: &str, right: &str) -> 
 }
 
 async fn map_request_view(db: &Arc<Database>, request: FriendRequest) -> Result<FriendRequestView> {
-    let requester_id = normalize_user_id(&request.requester_id.id.to_string());
-    let addressee_id = normalize_user_id(&request.addressee_id.id.to_string());
+    let requester_id = normalize_user_id(&thing_key_string(&request.requester_id));
+    let addressee_id = normalize_user_id(&thing_key_string(&request.addressee_id));
     let requester = ensure_user_exists(db, &requester_id).await?;
     let addressee = ensure_user_exists(db, &addressee_id).await?;
 
@@ -1393,7 +1386,7 @@ async fn map_request_view(db: &Arc<Database>, request: FriendRequest) -> Result<
         request_id: request
             .id
             .as_ref()
-            .map(|value| value.id.to_string())
+            .map(thing_key_string)
             .unwrap_or_default(),
         requester_id,
         requester_username: requester.username,
@@ -1435,7 +1428,7 @@ async fn send_friend_request(
 
     let request_id = Uuid::new_v4().to_string();
     let request = FriendRequest {
-        id: Some(Thing::from((String::from("friend_request"), request_id.clone()))),
+        id: Some(Thing::new("friend_request", request_id.clone())),
         requester_id: user_thing(&requester_id),
         addressee_id: user_thing(&target_user_id),
         status: FriendRequestStatus::Pending,
@@ -1525,7 +1518,7 @@ async fn respond_friend_request(
     let current_user_id = normalize_user_id(&claims.sub);
     let request = find_friend_request_by_id(&db, &request_id).await?;
 
-    if normalize_user_id(&request.addressee_id.id.to_string()) != current_user_id {
+    if normalize_user_id(&thing_key_string(&request.addressee_id)) != current_user_id {
         return Err(AuthError::Forbidden("You can only respond to your own incoming requests".to_string()));
     }
     if request.status != FriendRequestStatus::Pending {
@@ -1552,12 +1545,12 @@ async fn respond_friend_request(
         .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated friend request: {}", e)))?;
 
     if req.accept {
-        let requester_id = normalize_user_id(&request.requester_id.id.to_string());
-        let addressee_id = normalize_user_id(&request.addressee_id.id.to_string());
+        let requester_id = normalize_user_id(&thing_key_string(&request.requester_id));
+        let addressee_id = normalize_user_id(&thing_key_string(&request.addressee_id));
         if !friendship_exists(&db, &requester_id, &addressee_id).await? {
             let (a, b) = canonical_friend_pair(&requester_id, &addressee_id);
             let friendship = Friendship {
-                id: Some(Thing::from((String::from("friendship"), Uuid::new_v4().to_string()))),
+                id: Some(Thing::new("friendship", Uuid::new_v4().to_string())),
                 user_a: user_thing(&a),
                 user_b: user_thing(&b),
                 created_at: responded_at,
@@ -1586,8 +1579,8 @@ async fn respond_friend_request(
             )
             .await;
     } else {
-        let requester_id = normalize_user_id(&request.requester_id.id.to_string());
-        let addressee_id = normalize_user_id(&request.addressee_id.id.to_string());
+        let requester_id = normalize_user_id(&thing_key_string(&request.requester_id));
+        let addressee_id = normalize_user_id(&thing_key_string(&request.addressee_id));
         let _ = social_hub
             .publish(
                 &requester_id,
@@ -1631,8 +1624,8 @@ async fn list_friends(
 
     let mut friends = Vec::with_capacity(friendships.len());
     for friendship in friendships {
-        let left_id = normalize_user_id(&friendship.user_a.id.to_string());
-        let right_id = normalize_user_id(&friendship.user_b.id.to_string());
+        let left_id = normalize_user_id(&thing_key_string(&friendship.user_a));
+        let right_id = normalize_user_id(&thing_key_string(&friendship.user_b));
         let friend_id = if left_id == current_user_id { right_id } else { left_id };
         let user = ensure_user_exists(&db, &friend_id).await?;
         friends.push(FriendView {
@@ -1679,7 +1672,7 @@ async fn list_groups(
         let group_id = group
             .id
             .as_ref()
-            .map(|thing| normalize_group_id(&thing.id.to_raw()))
+            .map(|thing| normalize_group_id(&thing_key_string(thing)))
             .unwrap_or_default();
         group.owner_id == current_user_id || group_ids.contains(&group_id)
     }) {
@@ -2162,7 +2155,7 @@ async fn create_group(
         };
 
     let group = SocialGroup {
-        id: Some(Thing::from((String::from("social_group"), Uuid::new_v4().to_string()))),
+        id: Some(Thing::new("social_group", Uuid::new_v4().to_string())),
         name: name.to_string(),
         avatar: default_group_avatar(req.group_type).to_string(),
         group_type: req.group_type,
@@ -2187,7 +2180,7 @@ async fn create_group(
     let created_group_id = created
         .id
         .as_ref()
-        .map(|thing| normalize_group_id(&thing.id.to_raw()))
+        .map(|thing| normalize_group_id(&thing_key_string(thing)))
         .ok_or_else(|| AuthError::DatabaseError("Created social_group missing id".to_string()))?;
 
     create_social_group_members(
@@ -2297,8 +2290,8 @@ async fn list_direct_messages(
         .into_iter()
         .next()
         .ok_or_else(|| AuthError::NotFound("Conversation not found".to_string()))?;
-    let left_id = normalize_user_id(&conversation.user_a.id.to_string());
-    let right_id = normalize_user_id(&conversation.user_b.id.to_string());
+    let left_id = normalize_user_id(&thing_key_string(&conversation.user_a));
+    let right_id = normalize_user_id(&thing_key_string(&conversation.user_b));
     if left_id != current_user_id && right_id != current_user_id {
         return Err(AuthError::Forbidden("You are not part of this conversation".to_string()));
     }
@@ -2337,7 +2330,7 @@ async fn send_direct_message(
     let conversation_id = conversation
         .id
         .as_ref()
-        .map(|value| value.id.to_string())
+        .map(thing_key_string)
         .unwrap_or_default();
 
     let now = chrono::Utc::now().timestamp();

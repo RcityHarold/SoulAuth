@@ -10,8 +10,8 @@ CREATE permission:users_read CONTENT {
     resource: "users",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:users_write CONTENT {
@@ -21,8 +21,8 @@ CREATE permission:users_write CONTENT {
     resource: "users",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:users_delete CONTENT {
@@ -32,8 +32,8 @@ CREATE permission:users_delete CONTENT {
     resource: "users",
     action: "delete",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 角色管理权限
@@ -44,8 +44,8 @@ CREATE permission:roles_read CONTENT {
     resource: "roles",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:roles_write CONTENT {
@@ -55,8 +55,8 @@ CREATE permission:roles_write CONTENT {
     resource: "roles",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:roles_delete CONTENT {
@@ -66,8 +66,8 @@ CREATE permission:roles_delete CONTENT {
     resource: "roles",
     action: "delete",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 权限管理权限
@@ -78,8 +78,8 @@ CREATE permission:permissions_read CONTENT {
     resource: "permissions",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:permissions_write CONTENT {
@@ -89,8 +89,8 @@ CREATE permission:permissions_write CONTENT {
     resource: "permissions",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:permissions_delete CONTENT {
@@ -100,8 +100,8 @@ CREATE permission:permissions_delete CONTENT {
     resource: "permissions",
     action: "delete",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 安全管理权限
@@ -112,8 +112,8 @@ CREATE permission:security_read CONTENT {
     resource: "security",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:security_write CONTENT {
@@ -123,8 +123,8 @@ CREATE permission:security_write CONTENT {
     resource: "security",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 审计权限
@@ -135,8 +135,8 @@ CREATE permission:audit_read CONTENT {
     resource: "audit",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 用户档案管理权限
@@ -147,8 +147,8 @@ CREATE permission:profile_read CONTENT {
     resource: "profile",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:profile_write CONTENT {
@@ -158,8 +158,8 @@ CREATE permission:profile_write CONTENT {
     resource: "profile",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 用户偏好设置权限
@@ -170,8 +170,8 @@ CREATE permission:preferences_read CONTENT {
     resource: "preferences",
     action: "read",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 CREATE permission:preferences_write CONTENT {
@@ -181,8 +181,8 @@ CREATE permission:preferences_write CONTENT {
     resource: "preferences",
     action: "write",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 创建系统角色
@@ -192,8 +192,8 @@ CREATE role:admin CONTENT {
     display_name: "系统管理员",
     description: "拥有所有权限的系统管理员",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 用户管理员角色
@@ -202,8 +202,8 @@ CREATE role:user_manager CONTENT {
     display_name: "用户管理员",
     description: "负责用户管理的管理员",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 安全管理员角色
@@ -212,8 +212,8 @@ CREATE role:security_manager CONTENT {
     display_name: "安全管理员",
     description: "负责安全管理的管理员",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 审计员角色
@@ -222,8 +222,8 @@ CREATE role:auditor CONTENT {
     display_name: "审计员",
     description: "只能查看审计日志的角色",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 普通用户角色
@@ -232,8 +232,8 @@ CREATE role:user CONTENT {
     display_name: "普通用户",
     description: "普通用户角色",
     is_system: true,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 为系统用户创建记录（用于权限分配的授权者）
@@ -247,120 +247,120 @@ CREATE user:system CONTENT {
     account_status: "Active",
     last_login_at: NONE,
     last_login_ip: NONE,
-    created_at: time::unix(),
-    updated_at: time::unix()
+    created_at: 0,
+    updated_at: 0
 };
 
 -- 为admin角色分配所有权限
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:users_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:users_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:users_delete,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_delete,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_delete,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:security_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:security_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:audit_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:profile_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:profile_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:preferences_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:admin,
     permission_id: permission:preferences_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
@@ -368,49 +368,49 @@ CREATE role_permission CONTENT {
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_delete,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:profile_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:profile_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:preferences_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:user_manager,
     permission_id: permission:preferences_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
@@ -418,21 +418,21 @@ CREATE role_permission CONTENT {
 CREATE role_permission CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_write,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
 CREATE role_permission CONTENT {
     role_id: role:security_manager,
     permission_id: permission:users_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };
 
@@ -440,6 +440,6 @@ CREATE role_permission CONTENT {
 CREATE role_permission CONTENT {
     role_id: role:auditor,
     permission_id: permission:audit_read,
-    granted_at: time::unix(),
+    granted_at: 0,
     granted_by: user:system
 };

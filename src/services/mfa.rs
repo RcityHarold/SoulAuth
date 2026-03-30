@@ -286,7 +286,7 @@ impl MfaService {
         let query = "SELECT * FROM user_mfa WHERE user_id = $user_id";
         
         let mut result = self.db.query(query)
-            .bind(("user_id", user_id.to_string()))
+            .bind(("user_id", user_id.to_owned()))
             .await?;
         
         let mfa_config: Option<UserMfa> = result.take(0)?;
@@ -297,7 +297,7 @@ impl MfaService {
     /// 保存用户MFA配置到数据库
     async fn save_user_mfa(&self, mfa_config: &UserMfa) -> Result<()> {
         let query = r#"
-            CREATE user_mfa CONTENT {
+            UPSERT type::thing('user_mfa', $user_id) CONTENT {
                 user_id: $user_id,
                 status: $status,
                 method: $method,
@@ -306,7 +306,7 @@ impl MfaService {
                 created_at: $created_at,
                 updated_at: $updated_at,
                 last_used_at: $last_used_at
-            } REPLACE
+            }
         "#;
 
         self.db.query(query)
@@ -328,7 +328,7 @@ impl MfaService {
         let query = "DELETE user_mfa WHERE user_id = $user_id";
         
         self.db.query(query)
-            .bind(("user_id", user_id.to_string()))
+            .bind(("user_id", user_id.to_owned()))
             .await?;
 
         Ok(())
@@ -353,7 +353,7 @@ mod tests {
         // 注意：这需要有效的数据库配置，在实际测试中可能需要模拟
         
         // 测试TOTP代码验证逻辑
-        let secret = Secret::generate_secret();
+        let secret = Secret::Raw((0u8..20).collect());
         let secret_str = secret.to_encoded().to_string();
         
         let totp = TOTP::new(

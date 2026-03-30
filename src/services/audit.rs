@@ -148,7 +148,7 @@ impl AuditService {
             let lockout_query = "SELECT status FROM account_lockout WHERE identifier = $ip AND lockout_type = 'IpAddress' AND locked_until > $now";
             let mut lockout_result = self.db.client.query(lockout_query)
                 .bind(("ip", ip_address.clone()))
-                .bind(("now", Utc::now()))
+                .bind(("now", Utc::now().to_string()))
                 .await
                 .map_err(|e| {
                     error!("Failed to check IP lockout status: {}", e);
@@ -257,8 +257,9 @@ impl AuditService {
 
     // Top Active Users
     pub async fn get_top_active_users(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<UserActivityMetric>> {
-        let query = "SELECT ua.user_id, u.email, count() as activity_count, max(ua.timestamp) as last_activity FROM user_activity ua LEFT JOIN user u ON ua.user_id = u.id WHERE ua.timestamp >= $start_time AND ua.user_id IS NOT NULL GROUP BY ua.user_id, u.email ORDER BY activity_count DESC LIMIT 20";
-        
+        // SurrealDB 3.x: avoid JOIN; aggregate first, then resolve user email map.
+        let query = "SELECT type::string(user_id) as user_id, count() as activity_count, math::max(timestamp) as last_activity FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL GROUP BY user_id ORDER BY activity_count DESC LIMIT 20";
+
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
@@ -267,19 +268,81 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let users: Vec<(String, String, i64, i64)> = result.take(0).unwrap_or_default();
-        
-        Ok(users.into_iter().map(|(user_id, email, activity_count, last_activity_ts)| {
-            let last_activity = DateTime::from_timestamp(last_activity_ts, 0)
-                .unwrap_or_else(|| Utc::now());
-            
+        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+
+        let mut compact_rows: Vec<(String, i64, i64)> = Vec::new();
+        let mut user_keys: Vec<String> = Vec::new();
+        for row in rows {
+            let obj = match row {
+                Value::Object(o) => o,
+                _ => continue,
+            };
+
+            let user_id = obj.get("user_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if user_id.is_empty() {
+                continue;
+            }
+
+            let activity_count = obj.get("activity_count")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+            let last_activity_ts = obj.get("last_activity")
+                .and_then(|v| v.as_i64())
+                .unwrap_or(0);
+
+            // Normalize to `user:<uuid>` for lookup in user table.
+            let normalized = user_id
+                .trim_start_matches("user:")
+                .trim_matches(|c| c == '⟨' || c == '⟩');
+            user_keys.push(format!("user:{}", normalized));
+            compact_rows.push((user_id, activity_count, last_activity_ts));
+        }
+
+        let mut email_map: HashMap<String, String> = HashMap::new();
+        if !user_keys.is_empty() {
+            let user_query = "SELECT type::string(id) as id, email FROM user WHERE type::string(id) IN $user_ids";
+            let mut user_result = self.db.client.query(user_query)
+                .bind(("user_ids", user_keys))
+                .await
+                .map_err(|e| {
+                    error!("Failed to query user emails: {}", e);
+                    AuthError::DatabaseError("Query execution failed".to_string())
+                })?;
+
+            let user_rows: Vec<Value> = user_result.take(0).unwrap_or_default();
+            for row in user_rows {
+                let obj = match row {
+                    Value::Object(o) => o,
+                    _ => continue,
+                };
+                let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let email = obj.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                if !id.is_empty() {
+                    email_map.insert(id, email);
+                }
+            }
+        }
+
+        let users = compact_rows.into_iter().map(|(user_id, activity_count, last_activity_ts)| {
+            let normalized = user_id
+                .trim_start_matches("user:")
+                .trim_matches(|c| c == '⟨' || c == '⟩');
+            let lookup_id = format!("user:{}", normalized);
+            let email = email_map.get(&lookup_id).cloned().unwrap_or_default();
+            let last_activity = DateTime::from_timestamp(last_activity_ts, 0).unwrap_or_else(Utc::now);
+
             UserActivityMetric {
                 user_id,
                 email,
                 activity_count,
                 last_activity,
             }
-        }).collect())
+        }).collect();
+
+        Ok(users)
     }
 
     // Hourly Activity Distribution

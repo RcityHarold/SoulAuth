@@ -93,7 +93,7 @@ impl OidcClientService {
         
         let mut result = self.db.client
             .query(query)
-            .bind(("client_id", client_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
             .await?;
 
         let client: Option<OidcClient> = result.take(0)?;
@@ -190,7 +190,7 @@ impl OidcClientService {
         
         self.db.client
             .query(query)
-            .bind(("client_id", client_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
             .await?;
 
         Ok(())
@@ -206,7 +206,7 @@ impl OidcClientService {
         self.db.client
             .query(query)
             .bind(("hash", client_secret_hash))
-            .bind(("client_id", client_id.to_string()))
+            .bind(("client_id", client_id.to_owned()))
             .await?;
 
         Ok(client_secret)
