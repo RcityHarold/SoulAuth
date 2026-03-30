@@ -41,7 +41,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
 };
 use serde::Deserialize;
-use std::{sync::Arc, net::SocketAddr};
+use std::{sync::Arc, net::SocketAddr, future::Future};
 use crate::{services::database::Database, utils::rate_limit_middleware::check_rate_limit_for_request, AppState};
 use tracing::{error, info};
 use serde_json::json;
@@ -84,6 +84,48 @@ fn get_client_ip(addr: &SocketAddr, headers: &HeaderMap) -> String {
 
     // 回退到连接地址
     addr.ip().to_string()
+}
+
+fn lockout_check_unavailable(scope: &str) -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "Authentication service unavailable",
+            "message": format!("{} lockout check unavailable", scope),
+        })),
+    )
+}
+
+async fn run_lockout_check_with_reauth<T, C, CFut, R, RFut>(
+    scope: &str,
+    check: C,
+    reauth: R,
+) -> std::result::Result<T, (StatusCode, Json<serde_json::Value>)>
+where
+    C: Fn() -> CFut,
+    CFut: Future<Output = Result<T>>,
+    R: Fn() -> RFut,
+    RFut: Future<Output = Result<()>>,
+{
+    match check().await {
+        Ok(result) => Ok(result),
+        Err(e) => {
+            error!("Failed to check {} lockout: {:?}", scope, e);
+            match reauth().await {
+                Ok(_) => match check().await {
+                    Ok(result) => Ok(result),
+                    Err(retry_err) => {
+                        error!("{} lockout check still failed after reauth: {:?}", scope, retry_err);
+                        Err(lockout_check_unavailable(scope))
+                    }
+                },
+                Err(reauth_err) => {
+                    error!("{} lockout check failed while reauthing: {:?}", scope, reauth_err);
+                    Err(lockout_check_unavailable(scope))
+                }
+            }
+        }
+    }
 }
 
 pub fn router(db: Arc<Database>) -> Router {
@@ -198,13 +240,12 @@ async fn login(
     check_rate_limit_for_request(&app_state.rate_limiter, &client_ip, "/api/auth/login").await?;
     
     // 检查IP地址锁定
-    let ip_lockout_result = app_state.lockout_service.check_ip_lockout(&client_ip).await.map_err(|e| {
-        error!("Failed to check IP lockout: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "Internal server error",
-            "message": "Service unavailable"
-        })))
-    })?;
+    let ip_lockout_result = run_lockout_check_with_reauth(
+        "ip lockout",
+        || app_state.lockout_service.check_ip_lockout(&client_ip),
+        || async { app_state.db.reauth().await },
+    )
+    .await?;
     
     if ip_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -216,13 +257,12 @@ async fn login(
     
     // 检查用户账户锁定（如果我们能找到用户）
     // 注意：为了防止用户枚举攻击，我们需要小心处理这个检查
-    let user_lockout_result = app_state.lockout_service.check_user_lockout(&req.email).await.map_err(|e| {
-        error!("Failed to check user lockout: {:?}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-            "error": "Internal server error",
-            "message": "Service unavailable"
-        })))
-    })?;
+    let user_lockout_result = run_lockout_check_with_reauth(
+        "user lockout",
+        || app_state.lockout_service.check_user_lockout(&req.email),
+        || async { app_state.db.reauth().await },
+    )
+    .await?;
     
     if user_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({

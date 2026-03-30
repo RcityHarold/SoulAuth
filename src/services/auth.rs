@@ -571,6 +571,40 @@ impl AuthService {
         self.db.find_record_by_field("user", "id", user_id).await
     }
 
+    pub async fn get_user_by_subject_id(&self, subject_id: &str) -> Result<Option<User>> {
+        let query = "SELECT * FROM user WHERE subject_id = type::thing($subject_id) LIMIT 1";
+        let mut result = self
+            .db
+            .query(query)
+            .bind(("subject_id", subject_id.to_string()))
+            .await
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to query user by subject_id: {}", e)))?;
+
+        let users: Vec<User> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse user by subject_id: {}", e)))?;
+
+        Ok(users.into_iter().next())
+    }
+
+    pub async fn resolve_authenticated_user(&self, claims: &crate::utils::jwt::Claims) -> Result<User> {
+        if claims.sub.starts_with("subject:") {
+            self.get_user_by_subject_id(&claims.sub)
+                .await?
+                .ok_or(AuthError::UserNotFound)
+        } else {
+            self.get_user_by_id(&claims.sub)
+                .await?
+                .ok_or(AuthError::UserNotFound)
+        }
+    }
+
+    pub async fn resolve_authenticated_user_id(&self, claims: &crate::utils::jwt::Claims) -> Result<String> {
+        let user = self.resolve_authenticated_user(claims).await?;
+        let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        Ok(crate::utils::record_id::record_id_key_to_string(user_id))
+    }
+
     pub async fn initialize_password(&self, user_id: &str, password: &str) -> Result<User> {
         let thing: Thing = if let Some((tb, key_raw)) = user_id.split_once(':') {
             Thing::new(tb, key_raw.trim().trim_matches('⟨').trim_matches('⟩'))
