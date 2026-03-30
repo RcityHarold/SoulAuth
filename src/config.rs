@@ -28,6 +28,7 @@ pub struct Config {
     pub smtp_from: String,
     pub smtp_insecure: bool,
     pub app_url: String,
+    pub email_verification_enabled: bool,
 }
 
 impl Config {
@@ -89,6 +90,9 @@ impl Config {
                 .unwrap_or(false),
             app_url: env::var("APP_URL")
                 .expect("APP_URL must be set"),
+            email_verification_enabled: env::var("EMAIL_VERIFICATION_ENABLED")
+                .map(|v| v.parse().unwrap_or(false))
+                .unwrap_or(false),
         };
 
         Ok(config)

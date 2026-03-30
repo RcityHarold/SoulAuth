@@ -184,6 +184,7 @@ SMTP_FROM=noreply@example.com
 
 # 应用配置
 APP_URL=http://localhost:8080
+EMAIL_VERIFICATION_ENABLED=false
 
 # 代理配置（可选）
 PROXY_ENABLED=false
@@ -325,10 +326,10 @@ DEFINE TABLE user_role SCHEMAFULL;
 
 字段:
 - id: Thing - 关联唯一标识符
-- user_id: record(user) - 用户ID
-- role_id: record(role) - 角色ID
+- user_id: record<user> - 用户ID
+- role_id: record<role> - 角色ID
 - assigned_at: number - 分配时间戳
-- assigned_by: record(user) - 分配者用户ID
+- assigned_by: record<user> - 分配者用户ID
 
 ### 角色权限关联表 (role_permission)
 ```sql
@@ -337,10 +338,10 @@ DEFINE TABLE role_permission SCHEMAFULL;
 
 字段:
 - id: Thing - 关联唯一标识符
-- role_id: record(role) - 角色ID
-- permission_id: record(permission) - 权限ID
+- role_id: record<role> - 角色ID
+- permission_id: record<permission> - 权限ID
 - granted_at: number - 授权时间戳
-- granted_by: record(user) - 授权者用户ID
+- granted_by: record<user> - 授权者用户ID
 
 ### 用户档案表 (user_profile)
 ```sql
@@ -349,7 +350,7 @@ DEFINE TABLE user_profile SCHEMAFULL;
 
 字段:
 - id: Thing - 档案唯一标识符
-- user_id: record(user) - 关联的用户ID
+- user_id: record<user> - 关联的用户ID
 - first_name: string - 名字
 - last_name: string - 姓氏
 - display_name: string - 显示名称
@@ -371,7 +372,7 @@ DEFINE TABLE user_preferences SCHEMAFULL;
 
 字段:
 - id: Thing - 偏好唯一标识符
-- user_id: record(user) - 关联的用户ID
+- user_id: record<user> - 关联的用户ID
 - theme: string - 主题（light、dark、auto）
 - language: string - 语言代码
 - email_notifications: bool - 邮件通知开关
@@ -394,7 +395,7 @@ DEFINE TABLE user_activity SCHEMAFULL;
 
 字段:
 - id: Thing - 活动唯一标识符
-- user_id: record(user) - 关联的用户ID
+- user_id: record<user> - 关联的用户ID
 - action: string - 操作名称
 - category: string - 活动分类（Authentication、Profile、Security、Permissions、Data、System）
 - ip_address: string - IP地址
@@ -424,7 +425,7 @@ DEFINE TABLE oidc_client SCHEMAFULL;
 - refresh_token_lifetime: number - 刷新令牌生命周期（秒）
 - id_token_lifetime: number - ID令牌生命周期（秒）
 - is_active: bool - 是否活跃
-- created_by: record(user) - 创建者
+- created_by: record<user> - 创建者
 - created_at: number - 创建时间戳
 - updated_at: number - 更新时间戳
 
@@ -437,7 +438,7 @@ DEFINE TABLE oidc_authorization_code SCHEMAFULL;
 - id: Thing - 授权码唯一标识符
 - code: string - 授权码（唯一）
 - client_id: string - 客户端ID
-- user_id: record(user) - 用户ID
+- user_id: record<user> - 用户ID
 - redirect_uri: string - 重定向URI
 - scope: string - 作用域
 - state: string - 状态参数
@@ -458,7 +459,7 @@ DEFINE TABLE oidc_access_token SCHEMAFULL;
 - token: string - 访问令牌（唯一）
 - token_type: string - 令牌类型（Bearer）
 - client_id: string - 客户端ID
-- user_id: record(user) - 用户ID
+- user_id: record<user> - 用户ID
 - scope: string - 作用域
 - expires_at: number - 过期时间戳
 - created_at: number - 创建时间戳
@@ -472,7 +473,7 @@ DEFINE TABLE oidc_refresh_token SCHEMAFULL;
 - id: Thing - 令牌唯一标识符
 - token: string - 刷新令牌（唯一）
 - client_id: string - 客户端ID
-- user_id: record(user) - 用户ID
+- user_id: record<user> - 用户ID
 - access_token: string - 关联的访问令牌
 - scope: string - 作用域
 - used: bool - 是否已使用
@@ -487,7 +488,7 @@ DEFINE TABLE sso_session SCHEMAFULL;
 字段:
 - id: Thing - 会话唯一标识符
 - session_id: string - 会话ID（唯一）
-- user_id: record(user) - 用户ID
+- user_id: record<user> - 用户ID
 - client_sessions: array - 客户端会话列表
 - created_at: number - 创建时间戳
 - last_accessed_at: number - 最后访问时间戳

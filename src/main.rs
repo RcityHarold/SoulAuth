@@ -23,6 +23,7 @@ use crate::{
         account_lockout::AccountLockoutService,
         oidc::OidcService,
         oidc_client_management::OidcClientService,
+        social_hub::SocialHub,
         sso_session_management::SsoSessionService,
     },
 };
@@ -33,6 +34,91 @@ pub struct AppState {
     pub config: Config,
     pub rate_limiter: Arc<RateLimiter>,
     pub lockout_service: Arc<AccountLockoutService>,
+    pub social_hub: Arc<SocialHub>,
+}
+
+async fn ensure_social_group_schema(db: &Database) -> anyhow::Result<()> {
+    let statements = [
+        "DEFINE TABLE social_group SCHEMAFULL;",
+        "DEFINE FIELD name ON social_group TYPE string;",
+        "DEFINE FIELD avatar ON social_group TYPE string;",
+        "DEFINE FIELD type ON social_group TYPE number;",
+        "DEFINE FIELD level ON social_group TYPE string;",
+        "DEFINE FIELD ownerId ON social_group TYPE string;",
+        "DEFINE FIELD created_at ON social_group TYPE string;",
+        "DEFINE FIELD admin_ids ON social_group TYPE array;",
+        "DEFINE FIELD member_ids ON social_group TYPE array;",
+        "DEFINE FIELD announcement ON social_group TYPE option<string>;",
+        "DEFINE FIELD settings ON social_group TYPE option<object>;",
+        "DEFINE FIELD code ON social_group TYPE option<string>;",
+        "DEFINE FIELD human_member_ids ON social_group TYPE array;",
+        "DEFINE FIELD ai_member_ids ON social_group TYPE array;",
+        "DEFINE FIELD description ON social_group TYPE option<string>;",
+        "DEFINE FIELD max_humans ON social_group TYPE option<number>;",
+        "DEFINE FIELD max_ais ON social_group TYPE option<number>;",
+        "DEFINE FIELD member_user_ids ON social_group TYPE array;",
+        "DEFINE INDEX social_group_owner_idx ON social_group COLUMNS ownerId;",
+        "DEFINE TABLE social_group_member SCHEMAFULL;",
+        "DEFINE FIELD group_id ON social_group_member TYPE string;",
+        "DEFINE FIELD member_id ON social_group_member TYPE string;",
+        "DEFINE FIELD member_kind ON social_group_member TYPE string;",
+        "DEFINE FIELD created_at ON social_group_member TYPE string;",
+        "DEFINE INDEX social_group_member_lookup_idx ON social_group_member COLUMNS group_id, member_id, member_kind UNIQUE;",
+        "DEFINE INDEX social_group_member_member_idx ON social_group_member COLUMNS member_id, member_kind;",
+        "DEFINE TABLE group_thread SCHEMAFULL;",
+        "DEFINE FIELD group_id ON group_thread TYPE string;",
+        "DEFINE FIELD thread_type ON group_thread TYPE string;",
+        "DEFINE FIELD title ON group_thread TYPE string;",
+        "DEFINE FIELD created_by ON group_thread TYPE string;",
+        "DEFINE FIELD status ON group_thread TYPE string;",
+        "DEFINE FIELD created_at ON group_thread TYPE string;",
+        "DEFINE FIELD updated_at ON group_thread TYPE string;",
+        "DEFINE INDEX group_thread_group_idx ON group_thread COLUMNS group_id, updated_at;",
+        "DEFINE TABLE group_thread_message SCHEMAFULL;",
+        "DEFINE FIELD group_id ON group_thread_message TYPE string;",
+        "DEFINE FIELD thread_id ON group_thread_message TYPE string;",
+        "DEFINE FIELD sender_id ON group_thread_message TYPE string;",
+        "DEFINE FIELD sender_kind ON group_thread_message TYPE string;",
+        "DEFINE FIELD message_type ON group_thread_message TYPE string;",
+        "DEFINE FIELD content ON group_thread_message TYPE string;",
+        "DEFINE FIELD reply_to ON group_thread_message TYPE option<string>;",
+        "DEFINE FIELD created_at ON group_thread_message TYPE string;",
+        "DEFINE INDEX group_thread_message_thread_idx ON group_thread_message COLUMNS thread_id, created_at;",
+        "DEFINE TABLE group_collab_run SCHEMAFULL;",
+        "DEFINE FIELD group_id ON group_collab_run TYPE string;",
+        "DEFINE FIELD thread_id ON group_collab_run TYPE string;",
+        "DEFINE FIELD scenario_type ON group_collab_run TYPE number;",
+        "DEFINE FIELD triggered_by ON group_collab_run TYPE string;",
+        "DEFINE FIELD strategy_type ON group_collab_run TYPE string;",
+        "DEFINE FIELD status ON group_collab_run TYPE string;",
+        "DEFINE FIELD prompt ON group_collab_run TYPE string;",
+        "DEFINE FIELD participant_ids ON group_collab_run TYPE array;",
+        "DEFINE FIELD metadata ON group_collab_run TYPE option<object>;",
+        "DEFINE FIELD result_summary ON group_collab_run TYPE option<string>;",
+        "DEFINE FIELD result_payload ON group_collab_run TYPE option<object>;",
+        "DEFINE FIELD created_at ON group_collab_run TYPE string;",
+        "DEFINE FIELD updated_at ON group_collab_run TYPE string;",
+        "DEFINE FIELD completed_at ON group_collab_run TYPE option<string>;",
+        "DEFINE INDEX group_collab_run_thread_idx ON group_collab_run COLUMNS thread_id, created_at;",
+    ];
+
+    for statement in statements {
+        if let Err(error) = db.query(statement).await {
+            let message = error.to_string();
+            let already_exists = message.contains("already exists")
+                || message.contains("already defined")
+                || message.contains("duplicate");
+            if !already_exists {
+                return Err(anyhow::anyhow!(
+                    "Failed to ensure social_group schema with `{}`: {}",
+                    statement,
+                    message
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -70,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
     // 初始化数据库连接
     let db = Database::new(&config).await?;
     db.verify_connection().await?;
+    ensure_social_group_schema(&db).await?;
     
     info!("Database connection established. Please ensure database schema is initialized with schema.sql and initial_data.sql");
 
@@ -93,6 +180,7 @@ async fn main() -> anyhow::Result<()> {
     let oidc_service = Arc::new(OidcService::new(shared_db.clone(), config.clone())?);
     let oidc_client_service = Arc::new(OidcClientService::new(shared_db.clone()));
     let sso_session_service = Arc::new(SsoSessionService::new(shared_db.clone()));
+    let social_hub = Arc::new(SocialHub::new());
 
     // 启动定期清理任务
     let cleanup_limiter = rate_limiter.clone();
@@ -114,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         rate_limiter: rate_limiter.clone(),
         lockout_service: lockout_service.clone(),
+        social_hub: social_hub.clone(),
     };
 
     // 创建路由
@@ -128,6 +217,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("", routes::oidc::oidc_routes()) // 为 /.well-known 路径
         .layer(Extension(shared_db))
         .layer(Extension(Arc::new(app_state)))
+        .layer(Extension(social_hub))
         .layer(Extension(config.clone()))  // 添加 Config 扩展
         .layer(Extension(oidc_service))     // 添加 OIDC 服务扩展
         .layer(Extension(oidc_client_service)) // 添加 OIDC 客户端服务扩展
