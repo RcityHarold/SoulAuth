@@ -3,32 +3,25 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
-/// NOTE: This struct is the DB model.
-/// Our `schema.sql` stores timestamps as Unix seconds (numbers),
-/// so these fields are `i64` (not `DateTime`).
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct User {
     pub id: Option<Thing>,
     pub subject_id: Option<Thing>,
     pub email: String,
+    #[serde(default)]
+    pub username: String,
+    #[serde(default)]
+    pub username_normalized: String,
     #[surreal(rename = "password")]
     #[serde(rename = "password")]
     pub password_hash: Option<String>,
-
-    /// Unix timestamp seconds (number in SurrealDB)
     pub created_at: i64,
-    /// Unix timestamp seconds (number in SurrealDB)
     pub updated_at: i64,
-
     #[surreal(rename = "verified")]
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub verification_token: Option<String>,
-
-    /// Stored in SurrealDB as a STRING (matches schema.sql)
     pub account_status: String,
-
-    /// Unix timestamp seconds (number in SurrealDB)
     pub last_login_at: Option<i64>,
     pub last_login_ip: Option<String>,
 }
@@ -92,6 +85,7 @@ impl<'de> serde::Deserialize<'de> for AccountStatus {
 pub struct CreateUserRequest {
     pub email: String,
     pub password: String,
+    pub username: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -110,6 +104,8 @@ pub struct AuthResponse {
 pub struct UserResponse {
     pub id: String,
     pub email: String,
+    #[serde(default)]
+    pub username: String,
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub created_at: DateTime<Utc>,
@@ -178,6 +174,7 @@ impl From<User> for UserResponse {
         Self {
             id: crate::utils::record_id::record_id_key_to_string(&user.id.unwrap()),
             email: user.email,
+            username: user.username,
             is_email_verified: user.is_email_verified,
             created_at,
             has_password: user.password_hash.is_some(),

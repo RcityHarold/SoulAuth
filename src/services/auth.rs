@@ -23,7 +23,6 @@ use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use std::sync::Arc;
-use surrealdb::types::RecordId;
 use surrealdb::types::RecordId as Thing;
 use tracing::{error, info, debug};
 
@@ -45,18 +44,11 @@ pub struct AuthService {
     oauth_service: OAuthService,
 }
 
-impl AuthService {
-    pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
-        let email_service = EmailService::new(config.clone());
-        let oauth_service = OAuthService::new(config.clone())?;
-        Ok(Self {
-            db,
-            config,
-            email_service,
-            oauth_service,
-        })
-    }
+fn new_thing(table: &str) -> Thing {
+    Thing::new(table, Uuid::new_v4().to_string())
+}
 
+impl AuthService {
     async fn create_subject(&self, subject_type: SubjectType) -> Result<Thing> {
         let now = Utc::now().timestamp();
         let subject_id = Thing::new("subject", Uuid::new_v4().to_string());
@@ -93,6 +85,75 @@ impl AuthService {
                 &updated_user,
             )
             .await
+    }
+
+    fn normalize_username(username: &str) -> String {
+        username.trim().to_ascii_lowercase()
+    }
+
+    async fn ensure_username_available(&self, username: &str) -> Result<String> {
+        let normalized = Self::normalize_username(username);
+        if normalized.is_empty() {
+            return Err(AuthError::ValidationError("Username is required".to_string()));
+        }
+
+        if self
+            .db
+            .find_record_by_field::<User>("user", "username_normalized", &normalized)
+            .await?
+            .is_some()
+        {
+            return Err(AuthError::UsernameExists);
+        }
+
+        Ok(normalized)
+    }
+
+    async fn generate_unique_username(&self, base: &str) -> Result<(String, String)> {
+        let fallback = "user";
+        let seed = base.trim();
+        let seed = if seed.is_empty() { fallback } else { seed };
+        let seed = seed
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_' || *ch == '-')
+            .collect::<String>();
+        let seed = if seed.is_empty() {
+            fallback.to_string()
+        } else {
+            seed
+        };
+
+        for attempt in 0..1000 {
+            let candidate = if attempt == 0 {
+                seed.clone()
+            } else {
+                format!("{seed}{attempt}")
+            };
+            let normalized = Self::normalize_username(&candidate);
+            if self
+                .db
+                .find_record_by_field::<User>("user", "username_normalized", &normalized)
+                .await?
+                .is_none()
+            {
+                return Ok((candidate, normalized));
+            }
+        }
+
+        Err(AuthError::ServerError(
+            "Failed to generate a unique username".to_string(),
+        ))
+    }
+
+    pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
+        let email_service = EmailService::new(config.clone());
+        let oauth_service = OAuthService::new(config.clone())?;
+        Ok(Self {
+            db,
+            config,
+            email_service,
+            oauth_service,
+        })
     }
 
     pub fn get_google_auth_url(&self) -> Result<String> {
@@ -138,7 +199,7 @@ impl AuthService {
     }
 
     async fn find_or_create_oauth_user(&self, user_info: OAuthUserInfo) -> Result<User> {
-        debug!("Starting find_or_create_oauth_user for provider: {} and user_id: {}",
+        debug!("Starting find_or_create_oauth_user for provider: {} and user_id: {}", 
             user_info.provider, user_info.provider_user_id);
 
         // 首先通过 identity_provider 查找用户
@@ -150,6 +211,7 @@ impl AuthService {
         ).await?
         {
             debug!("Found existing identity provider record: {:?}", identity);
+            // 如果找到身份提供商记录，返回对应的用户
             let user = self.db.find_record_by_field::<User>(
                 "user",
                 "id",
@@ -169,11 +231,11 @@ impl AuthService {
             &user_info.email,
         ).await?
         {
-            let existing_user = self.ensure_user_subject(existing_user, SubjectType::Human).await?;
             debug!("Found existing user: {:?}", existing_user);
+            // 如果找到用户，创建身份提供商记录
             let now = Utc::now();
             let now_ts = now.timestamp();
-            let provider_id = Thing::new("identity_provider", Uuid::new_v4().to_string());
+            let provider_id = new_thing("identity_provider");
             let identity = IdentityProvider {
                 id: provider_id.clone(),
                 provider: user_info.provider,
@@ -185,24 +247,30 @@ impl AuthService {
             debug!("Creating identity provider record: {:?}", identity);
             self.db.create_record("identity_provider", &identity).await?;
             debug!("Identity provider record created successfully");
-            return Ok(existing_user);
+            return self.ensure_user_subject(existing_user, SubjectType::Human).await;
         }
 
         debug!("No existing user found, creating new user");
+        // 创建新用户
         let now = Utc::now();
-        let id = Thing::new("user", Uuid::new_v4().to_string());
+        let id = new_thing("user");
         let subject_id = self.create_subject(SubjectType::Human).await?;
+        let (username, username_normalized) = self
+            .generate_unique_username(user_info.email.split('@').next().unwrap_or("user"))
+            .await?;
         debug!("Generated new user ID: {:?}", id);
         let user = User {
             id: Some(id.clone()),
             subject_id: Some(subject_id),
             email: user_info.email,
-            password_hash: None,
+            username,
+            username_normalized,
+            password_hash: None, // OAuth 用户没有密码
             created_at: now.timestamp(),
             updated_at: now.timestamp(),
-            is_email_verified: true,
+            is_email_verified: true, // OAuth 邮箱已验证
             verification_token: None,
-            account_status: "Active".to_string(),
+            account_status: crate::models::user::AccountStatus::Active.to_string(),
             last_login_at: Some(now.timestamp()),
             last_login_ip: Some("0.0.0.0".to_string()),
         };
@@ -211,9 +279,10 @@ impl AuthService {
         let created_user = self.db.create_record("user", &user).await?;
         debug!("User created successfully: {:?}", created_user);
 
+        // 创建身份提供商记录
         let now = Utc::now();
         let now_ts = now.timestamp();
-        let provider_id = Thing::new("identity_provider", Uuid::new_v4().to_string());
+        let provider_id = new_thing("identity_provider");
         let identity = IdentityProvider {
             id: provider_id.clone(),
             provider: user_info.provider,
@@ -240,6 +309,15 @@ impl AuthService {
             return Err(AuthError::EmailExists);
         }
 
+        let username = req
+            .username
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AuthError::ValidationError("Username is required".to_string()))?
+            .to_string();
+        let username_normalized = self.ensure_username_available(&username).await?;
+
         // 生成密码哈希
         let salt = SaltString::generate(&mut OsRng);
         let argon2 = Argon2::default();
@@ -250,33 +328,43 @@ impl AuthService {
 
         // 创建用户
         let now = Utc::now();
-        let verification_token = Uuid::new_v4().to_string();
-        let id = Thing::new("user", Uuid::new_v4().to_string());
+        let verification_token = if self.config.email_verification_enabled {
+            Some(Uuid::new_v4().to_string())
+        } else {
+            None
+        };
+        let id = new_thing("user");
         let subject_id = self.create_subject(SubjectType::Human).await?;
         let user = User {
             id: Some(id),
             subject_id: Some(subject_id),
             email: req.email.clone(),
+            username,
+            username_normalized,
             password_hash: Some(hashed_password),
             created_at: now.timestamp(),
             updated_at: now.timestamp(),
-            is_email_verified: false,
-            verification_token: Some(verification_token.clone()),
-            account_status: "Active".to_string(),
+            is_email_verified: !self.config.email_verification_enabled,
+            verification_token: verification_token.clone(),
+            account_status: crate::models::user::AccountStatus::Active.to_string(),
             last_login_at: Some(now.timestamp()),
             last_login_ip: None,
         };
 
         let created_user = self.db.create_record("user", &user).await?;
-        
-        // 发送验证邮件
-        self.email_service.send_verification_email(&req.email, &verification_token).await?;
-        
-        // 不立即创建会话，而是返回成功消息
-        Ok(AuthResponse {
-            token: "".to_string(), // 空令牌，表示需要验证邮箱
-            user: created_user.into(),
-        })
+
+        if self.config.email_verification_enabled {
+            if let Some(token) = verification_token {
+                self.email_service.send_verification_email(&req.email, &token).await?;
+            }
+
+            Ok(AuthResponse {
+                token: "".to_string(),
+                user: created_user.into(),
+            })
+        } else {
+            self.create_session(created_user).await
+        }
     }
 
     pub async fn login(&self, email: String, password: String) -> Result<AuthResponse> {
@@ -300,49 +388,39 @@ impl AuthService {
             .map_err(|_| AuthError::InvalidCredentials)?;
 
         // 检查邮箱验证状态
-        if !user.is_email_verified {
+        if self.config.email_verification_enabled && !user.is_email_verified {
             return Err(AuthError::EmailNotVerified);
         }
 
-        // 检查账户状态 (stored as string in DB)
+        // 检查账户状态
         match user.account_status.as_str() {
             "Suspended" => return Err(AuthError::AccountSuspended),
             "Inactive" => return Err(AuthError::AccountInactive),
             "PendingDeletion" | "Deleted" => return Err(AuthError::AccountDeleted),
-            _ => {
-                // Active or unknown -> allow login
-            }
+            _ => {}
         }
-
-        user = self.ensure_user_subject(user, SubjectType::Human).await?;
 
         // 更新最后登录信息
         let now = Utc::now();
+        user = self.ensure_user_subject(user, SubjectType::Human).await?;
         user.last_login_at = Some(now.timestamp());
         user.last_login_ip = Some("0.0.0.0".to_string()); // 这里应该从请求中获取真实IP
         user.updated_at = now.timestamp();
 
         // 更新用户记录
         let user_thing = user.id.as_ref().unwrap();
-        let mut updated_user = self
+        let updated_user = self
             .db
-            .client
-            .query(
-                "UPDATE user SET last_login_at = $last_login_at, last_login_ip = $last_login_ip, updated_at = $updated_at WHERE id = $user_id RETURN *",
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &user,
             )
-            .bind(("last_login_at", now.timestamp()))
-            .bind(("last_login_ip", "0.0.0.0".to_string()))
-            .bind(("updated_at", now.timestamp()))
-            .bind(("user_id", user_thing.clone()))
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update login info: {}", e)))?;
-        let updated_user: Vec<User> = updated_user
-            .take(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated user: {}", e)))?;
-        let updated_user = updated_user
-            .into_iter()
-            .next()
-            .unwrap_or(user.clone());
+            .await?;
 
         // 创建会话
         self.create_session(updated_user).await
@@ -357,7 +435,7 @@ impl AuthService {
         let exp = now + Duration::hours(24); // 24小时后过期
 
         // 创建会话记录
-        let session_id = Thing::new("session", Uuid::new_v4().to_string());
+        let session_id = new_thing("session");
 
         let session = Session {
             id: Some(session_id.clone()),
@@ -404,7 +482,7 @@ impl AuthService {
         let exp = now + Duration::hours(24); // 24小时后过期
 
         // 创建会话记录
-        let session_id = Thing::new("session", Uuid::new_v4().to_string());
+        let session_id = new_thing("session");
 
         let user_thing: Thing = if let Some((tb, key_raw)) = user_id.split_once(':') {
             Thing::new(tb, key_raw.trim().trim_matches('⟨').trim_matches('⟩'))
@@ -469,28 +547,21 @@ impl AuthService {
         updated_user.is_email_verified = true;
         updated_user.verification_token = None;
         updated_user.updated_at = Utc::now().timestamp();
-        // 保持原始 id
         updated_user.id = user.id.clone();
 
-        let now = Utc::now();
-        let updated_at = now.timestamp();
-        let mut result = self
+        let user_thing = user.id.as_ref().unwrap();
+        let verified_user = self
             .db
-            .client
-            .query(
-                "UPDATE user SET verified = true, verification_token = NONE, updated_at = $updated_at WHERE verification_token = $verify_token RETURN *",
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &updated_user,
             )
-            .bind(("verify_token", token))
-            .bind(("updated_at", updated_at))
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to update verification: {}", e)))?;
-        let verified_users: Vec<User> = result
-            .take(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse verified user: {}", e)))?;
-        let verified_user = verified_users
-            .into_iter()
-            .next()
-            .ok_or(AuthError::DatabaseError("Record not found".into()))?;
+            .await?;
 
         // 验证成功后创建会话
         self.create_session(verified_user).await
@@ -552,7 +623,7 @@ impl AuthService {
         let now = Utc::now();
         let expires_at = now + Duration::hours(1); // 1小时后过期
 
-        let id = Thing::new("password_reset_token", Uuid::new_v4().to_string());
+        let id = new_thing("password_reset_token");
 
         let token_record = PasswordResetToken {
             id: Some(id),
@@ -592,9 +663,7 @@ impl AuthService {
         }
 
         // 查找用户
-        let mut user = self
-            .db
-            .find_record_by_field::<User>(
+        let mut user = self.db.find_record_by_field::<User>(
             "user",
             "email",
             &reset_token.email,

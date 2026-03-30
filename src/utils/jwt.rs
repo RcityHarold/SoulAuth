@@ -1,4 +1,5 @@
 use std::sync::Arc;
+
 use crate::{
     error::{AuthError, Result},
     models::{subject::SubjectType, user::User},
@@ -25,39 +26,8 @@ pub struct Claims {
     pub subject_type: Option<SubjectType>,
 }
 
-#[async_trait]
-impl<S> FromRequestParts<S> for Claims
-where
-    S: Send + Sync,
-{
-    type Rejection = AuthError;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self> {
-        // 从请求头中提取 Bearer token
-        let TypedHeader(Authorization(bearer)) = parts
-            .extract::<TypedHeader<Authorization<Bearer>>>()
-            .await
-            .map_err(|_| AuthError::InvalidToken)?;
-
-        // 验证 JWT
-        let jwt_secret = std::env::var("JWT_SECRET")
-            .map_err(|_| AuthError::InvalidToken)?;
-        
-        let token_data = decode::<Claims>(
-            bearer.token(),
-            &DecodingKey::from_secret(jwt_secret.as_bytes()),
-            &Validation::default(),
-        )
-        .map_err(|_| AuthError::InvalidToken)?;
-
-        Ok(token_data.claims)
-    }
-}
-
-pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User> {
-    // 验证 JWT
-    let jwt_secret = std::env::var("JWT_SECRET")
-        .map_err(|_| AuthError::InvalidToken)?;
+pub fn decode_token_claims(token: &str) -> Result<Claims> {
+    let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| AuthError::InvalidToken)?;
 
     let token_data = decode::<Claims>(
         token,
@@ -66,15 +36,39 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
     )
     .map_err(|_| AuthError::InvalidToken)?;
 
-    // 从数据库获取用户
+    Ok(token_data.claims)
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for Claims
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self> {
+        let TypedHeader(Authorization(bearer)) = parts
+            .extract::<TypedHeader<Authorization<Bearer>>>()
+            .await
+            .map_err(|_| AuthError::InvalidToken)?;
+
+        decode_token_claims(bearer.token())
+    }
+}
+
+pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User> {
+    let claims = decode_token_claims(token)?;
+
     let query = "SELECT * FROM user WHERE id = $user_id";
-    let mut result = db.client
+    let mut result = db
+        .client
         .query(query)
-        .bind(("user_id", token_data.claims.sub.clone()))
+        .bind(("user_id", claims.sub.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
-    let user: Option<User> = result.take(0)
+    let user: Option<User> = result
+        .take(0)
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
     user.ok_or(AuthError::UserNotFound)
@@ -94,7 +88,8 @@ mod tests {
             "session_id": "session:legacy"
         });
 
-        let claims: Claims = serde_json::from_value(old_claims).expect("old claims should deserialize");
+        let claims: Claims =
+            serde_json::from_value(old_claims).expect("old claims should deserialize");
         assert_eq!(claims.sub, "user:legacy");
         assert_eq!(claims.subject_type, None);
     }
@@ -109,7 +104,8 @@ mod tests {
             "subject_type": "human"
         });
 
-        let claims: Claims = serde_json::from_value(new_claims).expect("new claims should deserialize");
+        let claims: Claims =
+            serde_json::from_value(new_claims).expect("new claims should deserialize");
         assert_eq!(claims.subject_type, Some(SubjectType::Human));
     }
 }
