@@ -10,12 +10,23 @@ pub enum FriendRequestStatus {
     Cancelled,
 }
 
+impl FriendRequestStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "Pending",
+            Self::Accepted => "Accepted",
+            Self::Rejected => "Rejected",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct FriendRequest {
     pub id: Option<Thing>,
     pub requester_id: Thing,
     pub addressee_id: Thing,
-    pub status: FriendRequestStatus,
+    pub status: String,
     pub message: Option<String>,
     pub created_at: i64,
     pub responded_at: Option<i64>,
@@ -44,7 +55,7 @@ pub struct RespondFriendRequestRequest {
 #[derive(Debug, Serialize)]
 pub struct FriendRequestActionResponse {
     pub request_id: String,
-    pub status: FriendRequestStatus,
+    pub status: String,
     pub message: String,
 }
 
@@ -55,7 +66,7 @@ pub struct FriendRequestView {
     pub requester_username: String,
     pub addressee_id: String,
     pub addressee_username: String,
-    pub status: FriendRequestStatus,
+    pub status: String,
     pub message: Option<String>,
     pub created_at: i64,
     pub responded_at: Option<i64>,
