@@ -455,16 +455,16 @@ fn thing_key_string(thing: &Thing) -> String {
 }
 
 fn surreal_user_id_string(user_id: &str) -> String {
-    format!("user:⟨{}⟩", normalize_user_id(user_id))
+    format!("user:`{}`", normalize_user_id(user_id))
 }
 
 fn surreal_request_id_string(request_id: &str) -> String {
-    format!("friend_request:⟨{}⟩", normalize_request_id(request_id))
+    format!("friend_request:`{}`", normalize_request_id(request_id))
 }
 
 fn surreal_direct_conversation_id_string(conversation_id: &str) -> String {
     format!(
-        "direct_conversation:⟨{}⟩",
+        "direct_conversation:`{}`",
         normalize_direct_conversation_id(conversation_id)
     )
 }
@@ -531,7 +531,7 @@ async fn persist_social_group_members(
 ) -> Result<SocialGroup> {
     let mut result = db
         .query(
-            "UPDATE type::thing('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids RETURN AFTER"
+            "UPDATE type::record('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids RETURN AFTER"
         )
         .bind(("group_id", group_id.to_string()))
         .bind(("member_ids", member_ids.to_vec()))
@@ -558,25 +558,37 @@ async fn create_social_group_members(
     created_at: &str,
 ) -> Result<()> {
     for member_id in human_member_ids {
-        let membership = SocialGroupMember {
-            id: Some(Thing::new("social_group_member", Uuid::new_v4().to_string())),
-            group_id: group_id.to_string(),
-            member_id: member_id.clone(),
-            member_kind: "human".to_string(),
-            created_at: created_at.to_string(),
-        };
-        let _: SocialGroupMember = db.create_record("social_group_member", &membership).await?;
+        let membership_id = Uuid::new_v4().to_string();
+        db.query(
+            "CREATE type::record('social_group_member', $membership_id) SET
+                group_id = $group_id,
+                member_id = $member_id,
+                member_kind = 'human',
+                created_at = $created_at"
+        )
+        .bind(("membership_id", membership_id))
+        .bind(("group_id", group_id.to_string()))
+        .bind(("member_id", member_id.clone()))
+        .bind(("created_at", created_at.to_string()))
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to create human social_group_member: {}", e)))?;
     }
 
     for member_id in ai_member_ids {
-        let membership = SocialGroupMember {
-            id: Some(Thing::new("social_group_member", Uuid::new_v4().to_string())),
-            group_id: group_id.to_string(),
-            member_id: member_id.clone(),
-            member_kind: "ai".to_string(),
-            created_at: created_at.to_string(),
-        };
-        let _: SocialGroupMember = db.create_record("social_group_member", &membership).await?;
+        let membership_id = Uuid::new_v4().to_string();
+        db.query(
+            "CREATE type::record('social_group_member', $membership_id) SET
+                group_id = $group_id,
+                member_id = $member_id,
+                member_kind = 'ai',
+                created_at = $created_at"
+        )
+        .bind(("membership_id", membership_id))
+        .bind(("group_id", group_id.to_string()))
+        .bind(("member_id", member_id.clone()))
+        .bind(("created_at", created_at.to_string()))
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to create ai social_group_member: {}", e)))?;
     }
 
     Ok(())
@@ -719,7 +731,7 @@ async fn ensure_group_thread_access(
     }
 
     let mut result = db
-        .query("SELECT * FROM group_thread WHERE id = type::thing('group_thread', $thread_id) AND group_id = $group_id LIMIT 1")
+        .query("SELECT * FROM group_thread WHERE id = type::record('group_thread', $thread_id) AND group_id = $group_id LIMIT 1")
         .bind(("thread_id", thread_id.to_string()))
         .bind(("group_id", group_id.to_string()))
         .await
@@ -736,17 +748,38 @@ async fn ensure_group_thread_access(
 
 async fn create_default_group_thread(db: &Database, group_id: &str, created_by: &str) -> Result<GroupThread> {
     let now = chrono::Utc::now().to_rfc3339();
-    let thread = GroupThread {
-        id: Some(Thing::new("group_thread", Uuid::new_v4().to_string())),
-        group_id: group_id.to_string(),
-        thread_type: "chat".to_string(),
-        title: "主会话".to_string(),
-        created_by: created_by.to_string(),
-        status: "active".to_string(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    db.create_record("group_thread", &thread).await
+    let thread_id = Uuid::new_v4().to_string();
+    let mut result = db
+        .query(
+            "CREATE type::record('group_thread', $thread_id) SET
+                group_id = $group_id,
+                thread_type = $thread_type,
+                title = $title,
+                created_by = $created_by,
+                status = $status,
+                created_at = $created_at,
+                updated_at = $updated_at
+             RETURN AFTER",
+        )
+        .bind(("thread_id", thread_id))
+        .bind(("group_id", group_id.to_string()))
+        .bind(("thread_type", "chat".to_string()))
+        .bind(("title", "主会话".to_string()))
+        .bind(("created_by", created_by.to_string()))
+        .bind(("status", "active".to_string()))
+        .bind(("created_at", now.clone()))
+        .bind(("updated_at", now))
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to create default group_thread: {}", e)))?;
+
+    let threads: Vec<GroupThread> = result
+        .take(0)
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse created default group_thread: {}", e)))?;
+
+    threads
+        .into_iter()
+        .next()
+        .ok_or_else(|| AuthError::DatabaseError("Created default group_thread not found".to_string()))
 }
 
 async fn ensure_group_access(
@@ -755,7 +788,7 @@ async fn ensure_group_access(
     group_id: &str,
 ) -> Result<SocialGroup> {
     let mut result = db
-        .query("SELECT * FROM social_group WHERE id = type::thing('social_group', $group_id) LIMIT 1")
+        .query("SELECT * FROM social_group WHERE id = type::record('social_group', $group_id) LIMIT 1")
         .bind(("group_id", group_id.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
@@ -791,7 +824,7 @@ async fn ensure_group_admin_access(
 
 async fn load_group_by_id(db: &Database, group_id: &str) -> Result<SocialGroup> {
     let mut result = db
-        .query("SELECT * FROM social_group WHERE id = type::thing('social_group', $group_id) LIMIT 1")
+        .query("SELECT * FROM social_group WHERE id = type::record('social_group', $group_id) LIMIT 1")
         .bind(("group_id", group_id.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
@@ -840,7 +873,7 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
 
     let mut result = db
         .query(
-            "CREATE type::thing('social_group', $group_id) SET
+            "CREATE type::record('social_group', $group_id) SET
                 name = $name,
                 avatar = $avatar,
                 type = $group_type,
@@ -933,17 +966,36 @@ async fn create_group_thread(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    let thread = GroupThread {
-        id: Some(Thing::new("group_thread", Uuid::new_v4().to_string())),
-        group_id: group_id.clone(),
-        thread_type: "chat".to_string(),
-        title: title.to_string(),
-        created_by: current_user_id.clone(),
-        status: "active".to_string(),
-        created_at: now.clone(),
-        updated_at: now,
-    };
-    let created: GroupThread = db.create_record("group_thread", &thread).await?;
+    let thread_id = Uuid::new_v4().to_string();
+    let mut result = db
+        .query(
+            "CREATE type::record('group_thread', $thread_id) SET
+                group_id = $group_id,
+                thread_type = $thread_type,
+                title = $title,
+                created_by = $created_by,
+                status = $status,
+                created_at = $created_at,
+                updated_at = $updated_at
+             RETURN AFTER",
+        )
+        .bind(("thread_id", thread_id))
+        .bind(("group_id", group_id.clone()))
+        .bind(("thread_type", "chat".to_string()))
+        .bind(("title", title.to_string()))
+        .bind(("created_by", current_user_id.clone()))
+        .bind(("status", "active".to_string()))
+        .bind(("created_at", now.clone()))
+        .bind(("updated_at", now))
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to create group_thread: {}", e)))?;
+    let threads: Vec<GroupThread> = result
+        .take(0)
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse created group_thread: {}", e)))?;
+    let created = threads
+        .into_iter()
+        .next()
+        .ok_or_else(|| AuthError::DatabaseError("Created group_thread not found".to_string()))?;
     let view = map_group_thread_view(created);
 
     for member_id in group.member_user_ids.iter() {
@@ -1002,21 +1054,42 @@ async fn send_group_thread_message(
     }
 
     let now = chrono::Utc::now().to_rfc3339();
-    let message = GroupThreadMessage {
-        id: Some(Thing::new("group_thread_message", Uuid::new_v4().to_string())),
-        group_id: group_id.clone(),
-        thread_id: thread_id.clone(),
-        sender_id: current_user_id.clone(),
-        sender_kind: "human".to_string(),
-        message_type: "text".to_string(),
-        content: content.to_string(),
-        reply_to: req.reply_to,
-        created_at: now.clone(),
-    };
-    let created: GroupThreadMessage = db.create_record("group_thread_message", &message).await?;
+    let message_id = Uuid::new_v4().to_string();
+    let reply_to = req.reply_to;
+    let mut result = db
+        .query(
+            "CREATE type::record('group_thread_message', $message_id) SET
+                group_id = $group_id,
+                thread_id = $thread_id,
+                sender_id = $sender_id,
+                sender_kind = $sender_kind,
+                message_type = $message_type,
+                content = $content,
+                reply_to = $reply_to,
+                created_at = $created_at
+             RETURN AFTER",
+        )
+        .bind(("message_id", message_id))
+        .bind(("group_id", group_id.clone()))
+        .bind(("thread_id", thread_id.clone()))
+        .bind(("sender_id", current_user_id.clone()))
+        .bind(("sender_kind", "human".to_string()))
+        .bind(("message_type", "text".to_string()))
+        .bind(("content", content.to_string()))
+        .bind(("reply_to", reply_to))
+        .bind(("created_at", now.clone()))
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to create group_thread_message: {}", e)))?;
+    let messages: Vec<GroupThreadMessage> = result
+        .take(0)
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse created group_thread_message: {}", e)))?;
+    let created = messages
+        .into_iter()
+        .next()
+        .ok_or_else(|| AuthError::DatabaseError("Created group_thread_message not found".to_string()))?;
 
     let _ = db
-        .query("UPDATE group_thread SET updated_at = $updated_at WHERE id = type::thing('group_thread', $thread_id)")
+        .query("UPDATE group_thread SET updated_at = $updated_at WHERE id = type::record('group_thread', $thread_id)")
         .bind(("updated_at", now))
         .bind(("thread_id", thread_id.clone()))
         .await;
@@ -1145,7 +1218,7 @@ async fn complete_group_collab_run(
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut result = db
-        .query("UPDATE type::thing('group_collab_run', $run_id) SET status = $status, result_summary = $result_summary, result_payload = $result_payload, updated_at = $updated_at, completed_at = $completed_at RETURN AFTER")
+        .query("UPDATE type::record('group_collab_run', $run_id) SET status = $status, result_summary = $result_summary, result_payload = $result_payload, updated_at = $updated_at, completed_at = $completed_at RETURN AFTER")
         .bind(("run_id", run_id.clone()))
         .bind(("status", status.to_string()))
         .bind(("result_summary", req.result_summary.clone()))
@@ -1471,7 +1544,7 @@ async fn send_friend_request(
         id: Some(Thing::new("friend_request", request_id.clone())),
         requester_id: user_thing(&requester_id),
         addressee_id: user_thing(&target_user_id),
-        status: FriendRequestStatus::Pending,
+        status: FriendRequestStatus::Pending.as_str().to_string(),
         message: req.message.filter(|value| !value.trim().is_empty()),
         created_at: chrono::Utc::now().timestamp(),
         responded_at: None,
@@ -1493,7 +1566,7 @@ async fn send_friend_request(
 
     Ok(Json(FriendRequestActionResponse {
         request_id,
-        status: FriendRequestStatus::Pending,
+        status: FriendRequestStatus::Pending.as_str().to_string(),
         message: "Friend request sent. Waiting for approval.".to_string(),
     }))
 }
@@ -1561,14 +1634,14 @@ async fn respond_friend_request(
     if normalize_user_id(&thing_key_string(&request.addressee_id)) != current_user_id {
         return Err(AuthError::Forbidden("You can only respond to your own incoming requests".to_string()));
     }
-    if request.status != FriendRequestStatus::Pending {
+    if request.status != FriendRequestStatus::Pending.as_str() {
         return Err(AuthError::ValidationError("This friend request has already been processed".to_string()));
     }
 
     let new_status = if req.accept {
-        FriendRequestStatus::Accepted
+        FriendRequestStatus::Accepted.as_str().to_string()
     } else {
-        FriendRequestStatus::Rejected
+        FriendRequestStatus::Rejected.as_str().to_string()
     };
     let responded_at = chrono::Utc::now().timestamp();
 
@@ -1794,7 +1867,7 @@ async fn update_group_admin(
     }
 
     let mut result = db
-        .query("UPDATE type::thing('social_group', $group_id) SET admin_ids = $admin_ids RETURN AFTER")
+        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids RETURN AFTER")
         .bind(("group_id", group_id.clone()))
         .bind(("admin_ids", admin_ids))
         .await
@@ -1841,7 +1914,7 @@ async fn remove_group_member(
         .cloned()
         .collect();
     let _ = db
-        .query("UPDATE type::thing('social_group', $group_id) SET admin_ids = $admin_ids")
+        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
         .bind(("group_id", group_id.clone()))
         .bind(("admin_ids", new_admin_ids))
         .await
@@ -1901,7 +1974,7 @@ async fn transfer_group_ownership(
 
     let mut result = db
         .query(
-            "UPDATE type::thing('social_group', $group_id)
+            "UPDATE type::record('social_group', $group_id)
              SET ownerId = $new_owner_id, admin_ids = $admin_ids
              RETURN AFTER",
         )
@@ -1947,7 +2020,7 @@ async fn leave_group(
         .cloned()
         .collect();
     let _ = db
-        .query("UPDATE type::thing('social_group', $group_id) SET admin_ids = $admin_ids")
+        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
         .bind(("group_id", group_id.clone()))
         .bind(("admin_ids", new_admin_ids))
         .await
@@ -1989,7 +2062,7 @@ async fn update_group_settings(
     };
 
     let mut result = db
-        .query("UPDATE type::thing('social_group', $group_id) SET settings = $settings RETURN AFTER")
+        .query("UPDATE type::record('social_group', $group_id) SET settings = $settings RETURN AFTER")
         .bind(("group_id", group_id.clone()))
         .bind(("settings", settings))
         .await
@@ -2029,7 +2102,7 @@ async fn update_group_announcement(
     let announcement = req.announcement.trim().to_string();
 
     let mut result = db
-        .query("UPDATE type::thing('social_group', $group_id) SET announcement = $announcement RETURN AFTER")
+        .query("UPDATE type::record('social_group', $group_id) SET announcement = $announcement RETURN AFTER")
         .bind(("group_id", group_id.clone()))
         .bind(("announcement", Some(announcement)))
         .await
@@ -2087,7 +2160,7 @@ async fn dissolve_group(
         .bind(("group_id", group_id.clone()))
         .await;
     let _ = db
-        .query("DELETE type::thing('social_group', $group_id)")
+        .query("DELETE type::record('social_group', $group_id)")
         .bind(("group_id", group_id.clone()))
         .await;
 
@@ -2215,7 +2288,10 @@ async fn create_group(
         member_user_ids,
     };
 
-    let mut created = create_social_group_record(&db, &group).await?;
+    let mut created = create_social_group_record(&db, &group).await.map_err(|e| {
+        tracing::error!("create_group failed while creating social_group record: {}", e);
+        e
+    })?;
 
     let created_group_id = created
         .id
@@ -2230,7 +2306,11 @@ async fn create_group(
         &group.ai_member_ids,
         &group.created_at,
     )
-    .await?;
+    .await
+    .map_err(|e| {
+        tracing::error!("create_group failed while creating social_group_member rows for {}: {}", created_group_id, e);
+        e
+    })?;
 
     let needs_repair = created.member_ids != group.member_ids
         || created.human_member_ids != group.human_member_ids
@@ -2249,14 +2329,26 @@ async fn create_group(
             &group.human_member_ids,
             &group.member_user_ids,
         )
-        .await?;
+        .await
+        .map_err(|e| {
+            tracing::error!("create_group failed while repairing social_group member fields for {}: {}", created_group_id, e);
+            e
+        })?;
     }
 
     if group_supports_threads(created.group_type) {
-        let _ = create_default_group_thread(&db, &created_group_id, &created.owner_id).await?;
+        let _ = create_default_group_thread(&db, &created_group_id, &created.owner_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("create_group failed while creating default thread for {}: {}", created_group_id, e);
+                e
+            })?;
     }
 
-    created = hydrate_social_group(&db, created).await?;
+    created = hydrate_social_group(&db, created).await.map_err(|e| {
+        tracing::error!("create_group failed while hydrating social_group {}: {}", created_group_id, e);
+        e
+    })?;
     for member_id in created.member_user_ids.iter() {
         let _ = social_hub
             .publish(
@@ -2562,6 +2654,12 @@ async fn get_sessions(
 // 错误处理中间件
 impl axum::response::IntoResponse for AuthError {
     fn into_response(self) -> axum::response::Response {
+        if matches!(
+            self,
+            AuthError::DatabaseError(_) | AuthError::ServerError(_) | AuthError::InternalServerError(_)
+        ) {
+            tracing::error!("AuthError response: {}", self);
+        }
         let (status, message) = match &self {
             AuthError::DatabaseError(_) => (
                 axum::http::StatusCode::INTERNAL_SERVER_ERROR,
