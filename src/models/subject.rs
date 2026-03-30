@@ -27,7 +27,7 @@ impl Default for SubjectType {
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct Subject {
     pub id: Option<Thing>,
-    pub subject_type: SubjectType,
+    pub subject_type: String,
     pub created_at: i64,
     pub updated_at: i64,
 }

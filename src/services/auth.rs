@@ -54,7 +54,7 @@ impl AuthService {
         let subject_id = Thing::new("subject", Uuid::new_v4().to_string());
         let subject = Subject {
             id: Some(subject_id.clone()),
-            subject_type,
+            subject_type: subject_type.as_str().to_string(),
             created_at: now,
             updated_at: now,
         };
