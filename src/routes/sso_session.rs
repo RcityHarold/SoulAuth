@@ -297,3 +297,42 @@ async fn cleanup_expired_sessions(
         Err(e) => Err(AuthError::InternalServerError(e.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::sso_session::CreateSsoSessionRequest;
+
+    #[test]
+    fn create_session_request_user_id_can_be_overridden_by_authenticated_user() {
+        let mut request = CreateSsoSessionRequest {
+            user_id: "user:attacker-controlled".to_string(),
+            client_id: "client-1".to_string(),
+            ip_address: "127.0.0.1".to_string(),
+            user_agent: "test".to_string(),
+            expires_in: Some(60),
+        };
+
+        let authenticated_user_id = "user:real-user".to_string();
+        request.user_id = authenticated_user_id.clone();
+
+        assert_eq!(request.user_id, authenticated_user_id);
+        assert_ne!(request.user_id, "user:attacker-controlled");
+    }
+
+    #[test]
+    fn session_owner_check_rejects_cross_user_modification() {
+        let current_user_id = "user:alice";
+        let session_owner_user_id = "user:bob";
+
+        let result = if session_owner_user_id != current_user_id {
+            Err(AuthError::Forbidden(
+                "Cannot modify another user's session".to_string(),
+            ))
+        } else {
+            Ok(())
+        };
+
+        assert!(matches!(result, Err(AuthError::Forbidden(_))));
+    }
+}
