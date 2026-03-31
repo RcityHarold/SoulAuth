@@ -18,7 +18,7 @@ use crate::{
         GroupCollabRunView,
     },
     models::group::{
-        AddGroupMembersRequest, CreateGroupRequest, GroupSettings, SocialGroup,
+        AddGroupMembersRequest, CreateGroupRequest, GroupSettings, SocialGroup, SocialGroupResponse,
         TransferGroupOwnershipRequest, UpdateGroupAdminRequest, UpdateGroupAnnouncementRequest,
         UpdateGroupSettingsRequest,
     },
@@ -529,9 +529,8 @@ async fn persist_social_group_members(
     human_member_ids: &[String],
     member_user_ids: &[String],
 ) -> Result<SocialGroup> {
-    let mut result = db
-        .query(
-            "UPDATE type::record('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids RETURN AFTER"
+    db.query(
+            "UPDATE type::record('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids"
         )
         .bind(("group_id", group_id.to_string()))
         .bind(("member_ids", member_ids.to_vec()))
@@ -539,15 +538,7 @@ async fn persist_social_group_members(
         .bind(("member_user_ids", member_user_ids.to_vec()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to persist social_group members: {}", e)))?;
-
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated social_group: {}", e)))?;
-
-    groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::DatabaseError("Updated social_group not found".to_string()))
+    load_group_by_id(db, group_id).await
 }
 
 async fn create_social_group_members(
@@ -707,6 +698,184 @@ fn map_group_collab_run_view(run: GroupCollabRun) -> GroupCollabRunView {
     }
 }
 
+fn map_social_group_response(group: SocialGroup) -> Result<SocialGroupResponse> {
+    let id = group
+        .id
+        .as_ref()
+        .map(thing_key_string)
+        .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
+
+    Ok(SocialGroupResponse {
+        id,
+        name: group.name,
+        avatar: group.avatar,
+        group_type: group.group_type,
+        level: group.level,
+        owner_id: group.owner_id,
+        created_at: group.created_at,
+        admin_ids: group.admin_ids,
+        member_ids: group.member_ids,
+        announcement: group.announcement,
+        settings: group.settings,
+        code: group.code,
+        human_member_ids: group.human_member_ids,
+        ai_member_ids: group.ai_member_ids,
+        description: group.description,
+        max_humans: group.max_humans,
+        max_ais: group.max_ais,
+        member_user_ids: group.member_user_ids,
+    })
+}
+
+fn social_group_from_json(value: serde_json::Value) -> Result<SocialGroup> {
+    let id = value
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|v| Thing::new("social_group", normalize_group_id(v)));
+
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.name missing".to_string()))?
+        .to_string();
+    let avatar = value
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.avatar missing".to_string()))?
+        .to_string();
+    let group_type = value
+        .get("group_type")
+        .or_else(|| value.get("type"))
+        .and_then(|v| v.as_u64())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.group_type missing".to_string()))? as u8;
+    let level = value
+        .get("level")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.level missing".to_string()))?
+        .to_string();
+    let owner_id = value
+        .get("owner_id")
+        .or_else(|| value.get("ownerId"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.owner_id missing".to_string()))?
+        .to_string();
+    let created_at = value
+        .get("created_at")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| AuthError::DatabaseError("social_group.created_at missing".to_string()))?
+        .to_string();
+
+    let admin_ids = value
+        .get("admin_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.admin_ids: {}", e)))?
+        .unwrap_or_default();
+    let member_ids = value
+        .get("member_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.member_ids: {}", e)))?
+        .unwrap_or_default();
+    let announcement = value
+        .get("announcement")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.announcement: {}", e)))?
+        .flatten();
+    let settings = value
+        .get("settings")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.settings: {}", e)))?
+        .flatten();
+    let code = value
+        .get("code")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.code: {}", e)))?
+        .flatten();
+    let human_member_ids = value
+        .get("human_member_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.human_member_ids: {}", e)))?
+        .unwrap_or_default();
+    let ai_member_ids = value
+        .get("ai_member_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.ai_member_ids: {}", e)))?
+        .unwrap_or_default();
+    let description = value
+        .get("description")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.description: {}", e)))?
+        .flatten();
+    let max_humans = value
+        .get("max_humans")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.max_humans: {}", e)))?
+        .flatten();
+    let max_ais = value
+        .get("max_ais")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.max_ais: {}", e)))?
+        .flatten();
+    let member_user_ids = value
+        .get("member_user_ids")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group.member_user_ids: {}", e)))?
+        .unwrap_or_default();
+
+    Ok(SocialGroup {
+        id,
+        name,
+        avatar,
+        group_type,
+        level,
+        owner_id,
+        created_at,
+        admin_ids,
+        member_ids,
+        announcement,
+        settings,
+        code,
+        human_member_ids,
+        ai_member_ids,
+        description,
+        max_humans,
+        max_ais,
+        member_user_ids,
+    })
+}
+
+fn social_groups_from_json(values: Vec<serde_json::Value>) -> Result<Vec<SocialGroup>> {
+    values.into_iter().map(social_group_from_json).collect()
+}
+
+fn social_group_select_query(where_clause: &str) -> String {
+    format!(
+        "SELECT <string>id AS id, name, avatar, group_type, type, level, owner_id, ownerId, created_at, admin_ids, member_ids, announcement, settings, code, human_member_ids, ai_member_ids, description, max_humans, max_ais, member_user_ids FROM social_group {}",
+        where_clause
+    )
+}
+
 fn group_supports_threads(group_type: u8) -> bool {
     matches!(group_type, 2 | 6 | 7 | 9)
 }
@@ -788,13 +957,14 @@ async fn ensure_group_access(
     group_id: &str,
 ) -> Result<SocialGroup> {
     let mut result = db
-        .query("SELECT * FROM social_group WHERE id = type::record('social_group', $group_id) LIMIT 1")
+        .query(&social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"))
         .bind(("group_id", group_id.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
+    let groups: Vec<serde_json::Value> = result
         .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group: {}", e)))?;
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group JSON: {}", e)))?;
+    let groups = social_groups_from_json(groups)?;
     let group = groups
         .into_iter()
         .next()
@@ -824,13 +994,14 @@ async fn ensure_group_admin_access(
 
 async fn load_group_by_id(db: &Database, group_id: &str) -> Result<SocialGroup> {
     let mut result = db
-        .query("SELECT * FROM social_group WHERE id = type::record('social_group', $group_id) LIMIT 1")
+        .query(&social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"))
         .bind(("group_id", group_id.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
+    let groups: Vec<serde_json::Value> = result
         .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group: {}", e)))?;
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse social_group JSON: {}", e)))?;
+    let groups = social_groups_from_json(groups)?;
     let group = groups
         .into_iter()
         .next()
@@ -868,17 +1039,17 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
     let group_id = group
         .id
         .as_ref()
-        .map(thing_key_string)
+        .map(|thing| normalize_group_id(&thing_key_string(thing)))
         .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
+    tracing::info!("create_social_group_record using normalized group_id={}", group_id);
 
-    let mut result = db
-        .query(
+    db.query(
             "CREATE type::record('social_group', $group_id) SET
                 name = $name,
                 avatar = $avatar,
-                type = $group_type,
+                group_type = $group_type,
                 level = $level,
-                ownerId = $owner_id,
+                owner_id = $owner_id,
                 created_at = $created_at,
                 admin_ids = $admin_ids,
                 member_ids = $member_ids,
@@ -890,10 +1061,9 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
                 description = $description,
                 max_humans = $max_humans,
                 max_ais = $max_ais,
-                member_user_ids = $member_user_ids
-             RETURN AFTER"
+                member_user_ids = $member_user_ids"
         )
-        .bind(("group_id", group_id))
+        .bind(("group_id", group_id.clone()))
         .bind(("name", group.name.clone()))
         .bind(("avatar", group.avatar.clone()))
         .bind(("group_type", group.group_type))
@@ -913,15 +1083,7 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
         .bind(("member_user_ids", group.member_user_ids.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create social_group: {}", e)))?;
-
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse created social_group: {}", e)))?;
-
-    groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::DatabaseError("Created social_group not found".to_string()))
+    load_group_by_id(db, &group_id).await
 }
 
 async fn list_group_threads(
@@ -1754,7 +1916,7 @@ async fn list_friends(
 async fn list_groups(
     claims: Claims,
     State(db): State<Arc<Database>>,
-) -> Result<Json<Vec<SocialGroup>>> {
+) -> Result<Json<Vec<SocialGroupResponse>>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let mut membership_result = db
         .query("SELECT * FROM social_group_member WHERE member_id = $member_id AND member_kind = 'human'")
@@ -1773,12 +1935,13 @@ async fn list_groups(
     }
 
     let mut result = db
-        .query("SELECT * FROM social_group")
+        .query(&social_group_select_query(""))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query groups: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
+    let groups: Vec<serde_json::Value> = result
         .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse groups: {}", e)))?;
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse groups JSON: {}", e)))?;
+    let groups = social_groups_from_json(groups)?;
 
     let mut visible_groups = Vec::new();
     for group in groups.into_iter().filter(|group| {
@@ -1792,6 +1955,10 @@ async fn list_groups(
         visible_groups.push(hydrate_social_group(&db, group).await?);
     }
 
+    let visible_groups = visible_groups
+        .into_iter()
+        .map(map_social_group_response)
+        .collect::<Result<Vec<_>>>()?;
     Ok(Json(visible_groups))
 }
 
@@ -1801,14 +1968,14 @@ async fn add_group_members(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<AddGroupMembersRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let group = ensure_group_admin_access(&db, &current_user_id, &group_id).await?;
 
     let mut new_member_ids = normalize_unique_ids(req.member_ids);
     new_member_ids.retain(|member_id| !group.member_user_ids.contains(member_id));
     if new_member_ids.is_empty() {
-        return Ok(Json(group));
+        return Ok(Json(map_social_group_response(group)?));
     }
 
     for member_id in &new_member_ids {
@@ -1828,7 +1995,7 @@ async fn add_group_members(
 
     publish_group_updated(&social_hub, &group_id, &updated.member_user_ids).await;
 
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn update_group_admin(
@@ -1837,7 +2004,7 @@ async fn update_group_admin(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<UpdateGroupAdminRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let group = ensure_group_access(&db, &current_user_id, &group_id).await?;
     if group.group_type != 2 {
@@ -1866,23 +2033,16 @@ async fn update_group_admin(
         admin_ids.retain(|id| id != &target_user_id);
     }
 
-    let mut result = db
-        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids RETURN AFTER")
+    let _ = db
+        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
         .bind(("group_id", group_id.clone()))
         .bind(("admin_ids", admin_ids))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group admins: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated social_group: {}", e)))?;
-    let updated = groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::NotFound("Group not found".to_string()))?;
-    let updated = hydrate_social_group(&db, updated).await?;
+    let updated = load_group_by_id(&db, &group_id).await?;
 
     publish_group_updated(&social_hub, &group_id, &updated.member_user_ids).await;
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn remove_group_member(
@@ -1890,7 +2050,7 @@ async fn remove_group_member(
     Path((group_id, member_id)): Path<(String, String)>,
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let group = ensure_group_admin_access(&db, &current_user_id, &group_id).await?;
     let target_user_id = normalize_user_id(&member_id);
@@ -1933,7 +2093,7 @@ async fn remove_group_member(
         )
         .await;
 
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn transfer_group_ownership(
@@ -1942,7 +2102,7 @@ async fn transfer_group_ownership(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<TransferGroupOwnershipRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let group = ensure_group_access(&db, &current_user_id, &group_id).await?;
     if group.group_type != 2 {
@@ -1972,28 +2132,20 @@ async fn transfer_group_ownership(
         admin_ids.push(current_user_id.clone());
     }
 
-    let mut result = db
+    let _ = db
         .query(
             "UPDATE type::record('social_group', $group_id)
-             SET ownerId = $new_owner_id, admin_ids = $admin_ids
-             RETURN AFTER",
+             SET owner_id = $new_owner_id, admin_ids = $admin_ids",
         )
         .bind(("group_id", group_id.clone()))
         .bind(("new_owner_id", new_owner_id))
         .bind(("admin_ids", admin_ids))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to transfer group ownership: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated social_group: {}", e)))?;
-    let updated = groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::NotFound("Group not found".to_string()))?;
-    let updated = hydrate_social_group(&db, updated).await?;
+    let updated = load_group_by_id(&db, &group_id).await?;
 
     publish_group_updated(&social_hub, &group_id, &updated.member_user_ids).await;
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn leave_group(
@@ -2047,7 +2199,7 @@ async fn update_group_settings(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<UpdateGroupSettingsRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let group = ensure_group_admin_access(&db, &current_user_id, &group_id).await?;
     let join_mode = req.join_mode.trim();
@@ -2061,20 +2213,13 @@ async fn update_group_settings(
         allow_file_upload: req.allow_file_upload,
     };
 
-    let mut result = db
-        .query("UPDATE type::record('social_group', $group_id) SET settings = $settings RETURN AFTER")
+    let _ = db
+        .query("UPDATE type::record('social_group', $group_id) SET settings = $settings")
         .bind(("group_id", group_id.clone()))
         .bind(("settings", settings))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group settings: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated social_group: {}", e)))?;
-    let updated = groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::NotFound("Group not found".to_string()))?;
-    let updated = hydrate_social_group(&db, updated).await?;
+    let updated = load_group_by_id(&db, &group_id).await?;
 
     for member_id in updated.member_user_ids.iter() {
         let _ = social_hub
@@ -2087,7 +2232,7 @@ async fn update_group_settings(
             .await;
     }
 
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn update_group_announcement(
@@ -2096,25 +2241,18 @@ async fn update_group_announcement(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<UpdateGroupAnnouncementRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let _group = ensure_group_admin_access(&db, &current_user_id, &group_id).await?;
     let announcement = req.announcement.trim().to_string();
 
-    let mut result = db
-        .query("UPDATE type::record('social_group', $group_id) SET announcement = $announcement RETURN AFTER")
+    let _ = db
+        .query("UPDATE type::record('social_group', $group_id) SET announcement = $announcement")
         .bind(("group_id", group_id.clone()))
         .bind(("announcement", Some(announcement)))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group announcement: {}", e)))?;
-    let groups: Vec<SocialGroup> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse updated social_group: {}", e)))?;
-    let updated = groups
-        .into_iter()
-        .next()
-        .ok_or_else(|| AuthError::NotFound("Group not found".to_string()))?;
-    let updated = hydrate_social_group(&db, updated).await?;
+    let updated = load_group_by_id(&db, &group_id).await?;
 
     for member_id in updated.member_user_ids.iter() {
         let _ = social_hub
@@ -2127,7 +2265,7 @@ async fn update_group_announcement(
             .await;
     }
 
-    Ok(Json(updated))
+    Ok(Json(map_social_group_response(updated)?))
 }
 
 async fn dissolve_group(
@@ -2183,7 +2321,7 @@ async fn create_group(
     State(db): State<Arc<Database>>,
     Extension(social_hub): Extension<Arc<SocialHub>>,
     Json(req): Json<CreateGroupRequest>,
-) -> Result<Json<SocialGroup>> {
+) -> Result<Json<SocialGroupResponse>> {
     let owner_id = normalize_user_id(&claims.sub);
     let name = req.name.trim();
     if name.is_empty() {
@@ -2360,7 +2498,7 @@ async fn create_group(
             .await;
     }
     tracing::info!("Created social_group persisted as: {:?}", created);
-    Ok(Json(created))
+    Ok(Json(map_social_group_response(created)?))
 }
 
 async fn list_direct_conversations(

@@ -1,16 +1,13 @@
 use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
-
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
-pub struct SocialGroup {
+pub struct SocialGroupRecord {
     pub id: Option<Thing>,
     pub name: String,
     pub avatar: String,
-    #[serde(rename = "type")]
     pub group_type: u8,
     pub level: String,
-    #[serde(rename = "ownerId")]
     pub owner_id: String,
     pub created_at: String,
     #[serde(default)]
@@ -28,6 +25,32 @@ pub struct SocialGroup {
     pub max_humans: Option<usize>,
     pub max_ais: Option<usize>,
     #[serde(default)]
+    pub member_user_ids: Vec<String>,
+}
+
+pub type SocialGroup = SocialGroupRecord;
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SocialGroupResponse {
+    pub id: String,
+    pub name: String,
+    pub avatar: String,
+    #[serde(rename = "type")]
+    pub group_type: u8,
+    pub level: String,
+    #[serde(rename = "ownerId")]
+    pub owner_id: String,
+    pub created_at: String,
+    pub admin_ids: Vec<String>,
+    pub member_ids: Vec<String>,
+    pub announcement: Option<String>,
+    pub settings: Option<GroupSettings>,
+    pub code: Option<String>,
+    pub human_member_ids: Vec<String>,
+    pub ai_member_ids: Vec<String>,
+    pub description: Option<String>,
+    pub max_humans: Option<usize>,
+    pub max_ais: Option<usize>,
     pub member_user_ids: Vec<String>,
 }
 
