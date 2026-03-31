@@ -38,13 +38,39 @@ pub struct AppState {
 }
 
 async fn ensure_social_group_schema(db: &Database) -> anyhow::Result<()> {
+    let cleanup_statements = [
+        "REMOVE INDEX social_group_owner_idx ON social_group;",
+        "UPDATE social_group SET group_type = type WHERE group_type = NONE AND type != NONE;",
+        "UPDATE social_group SET owner_id = ownerId WHERE owner_id = NONE AND ownerId != NONE;",
+        "REMOVE FIELD type ON social_group;",
+        "REMOVE FIELD ownerId ON social_group;",
+    ];
+
+    for statement in cleanup_statements {
+        if let Err(error) = db.query(statement).await {
+            let message = error.to_string();
+            let ignorable = message.contains("already exists")
+                || message.contains("already defined")
+                || message.contains("duplicate")
+                || message.contains("does not exist")
+                || message.contains("not found");
+            if !ignorable {
+                return Err(anyhow::anyhow!(
+                    "Failed to cleanup social_group schema with `{}`: {}",
+                    statement,
+                    message
+                ));
+            }
+        }
+    }
+
     let statements = [
         "DEFINE TABLE social_group SCHEMAFULL;",
         "DEFINE FIELD name ON social_group TYPE string;",
         "DEFINE FIELD avatar ON social_group TYPE string;",
-        "DEFINE FIELD type ON social_group TYPE number;",
+        "DEFINE FIELD group_type ON social_group TYPE number;",
         "DEFINE FIELD level ON social_group TYPE string;",
-        "DEFINE FIELD ownerId ON social_group TYPE string;",
+        "DEFINE FIELD owner_id ON social_group TYPE string;",
         "DEFINE FIELD created_at ON social_group TYPE string;",
         "DEFINE FIELD admin_ids ON social_group TYPE array;",
         "DEFINE FIELD member_ids ON social_group TYPE array;",
@@ -60,7 +86,7 @@ async fn ensure_social_group_schema(db: &Database) -> anyhow::Result<()> {
         "DEFINE FIELD max_humans ON social_group TYPE option<number>;",
         "DEFINE FIELD max_ais ON social_group TYPE option<number>;",
         "DEFINE FIELD member_user_ids ON social_group TYPE array;",
-        "DEFINE INDEX social_group_owner_idx ON social_group COLUMNS ownerId;",
+        "DEFINE INDEX social_group_owner_idx ON social_group COLUMNS owner_id;",
         "DEFINE TABLE social_group_member SCHEMAFULL;",
         "DEFINE FIELD group_id ON social_group_member TYPE string;",
         "DEFINE FIELD member_id ON social_group_member TYPE string;",

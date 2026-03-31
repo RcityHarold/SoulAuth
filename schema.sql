@@ -217,9 +217,9 @@ DEFINE INDEX direct_message_recipient_idx ON direct_message COLUMNS recipient_id
 DEFINE TABLE social_group SCHEMAFULL;
 DEFINE FIELD name ON social_group TYPE string;
 DEFINE FIELD avatar ON social_group TYPE string;
-DEFINE FIELD type ON social_group TYPE number;
+DEFINE FIELD group_type ON social_group TYPE number;
 DEFINE FIELD level ON social_group TYPE string;
-DEFINE FIELD ownerId ON social_group TYPE string;
+DEFINE FIELD owner_id ON social_group TYPE string;
 DEFINE FIELD created_at ON social_group TYPE string;
 DEFINE FIELD admin_ids ON social_group TYPE array;
 DEFINE FIELD member_ids ON social_group TYPE array;
@@ -235,7 +235,7 @@ DEFINE FIELD description ON social_group TYPE option<string>;
 DEFINE FIELD max_humans ON social_group TYPE option<number>;
 DEFINE FIELD max_ais ON social_group TYPE option<number>;
 DEFINE FIELD member_user_ids ON social_group TYPE array;
-DEFINE INDEX social_group_owner_idx ON social_group COLUMNS ownerId;
+DEFINE INDEX social_group_owner_idx ON social_group COLUMNS owner_id;
 
 DEFINE TABLE social_group_member SCHEMAFULL;
 DEFINE FIELD group_id ON social_group_member TYPE string;
