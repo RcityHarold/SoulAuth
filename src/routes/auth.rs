@@ -529,13 +529,16 @@ async fn persist_social_group_members(
     human_member_ids: &[String],
     member_user_ids: &[String],
 ) -> Result<SocialGroup> {
-    db.query(
-            "UPDATE type::record('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids"
+    db.raw_query(
+            "persist_social_group_members",
+            "UPDATE type::record('social_group', $group_id) SET member_ids = $member_ids, human_member_ids = $human_member_ids, member_user_ids = $member_user_ids",
+            json!({
+                "group_id": group_id,
+                "member_ids": member_ids,
+                "human_member_ids": human_member_ids,
+                "member_user_ids": member_user_ids,
+            }),
         )
-        .bind(("group_id", group_id.to_string()))
-        .bind(("member_ids", member_ids.to_vec()))
-        .bind(("human_member_ids", human_member_ids.to_vec()))
-        .bind(("member_user_ids", member_user_ids.to_vec()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to persist social_group members: {}", e)))?;
     load_group_by_id(db, group_id).await
@@ -550,34 +553,40 @@ async fn create_social_group_members(
 ) -> Result<()> {
     for member_id in human_member_ids {
         let membership_id = Uuid::new_v4().to_string();
-        db.query(
+        db.raw_query(
+            "create_social_group_member_human",
             "CREATE type::record('social_group_member', $membership_id) SET
                 group_id = $group_id,
                 member_id = $member_id,
                 member_kind = 'human',
-                created_at = $created_at"
+                created_at = $created_at",
+            json!({
+                "membership_id": membership_id,
+                "group_id": group_id,
+                "member_id": member_id,
+                "created_at": created_at,
+            }),
         )
-        .bind(("membership_id", membership_id))
-        .bind(("group_id", group_id.to_string()))
-        .bind(("member_id", member_id.clone()))
-        .bind(("created_at", created_at.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create human social_group_member: {}", e)))?;
     }
 
     for member_id in ai_member_ids {
         let membership_id = Uuid::new_v4().to_string();
-        db.query(
+        db.raw_query(
+            "create_social_group_member_ai",
             "CREATE type::record('social_group_member', $membership_id) SET
                 group_id = $group_id,
                 member_id = $member_id,
                 member_kind = 'ai',
-                created_at = $created_at"
+                created_at = $created_at",
+            json!({
+                "membership_id": membership_id,
+                "group_id": group_id,
+                "member_id": member_id,
+                "created_at": created_at,
+            }),
         )
-        .bind(("membership_id", membership_id))
-        .bind(("group_id", group_id.to_string()))
-        .bind(("member_id", member_id.clone()))
-        .bind(("created_at", created_at.to_string()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create ai social_group_member: {}", e)))?;
     }
@@ -590,8 +599,11 @@ async fn load_social_group_members(
     group_id: &str,
 ) -> Result<(Vec<String>, Vec<String>)> {
     let mut result = db
-        .query("SELECT * FROM social_group_member WHERE group_id = $group_id")
-        .bind(("group_id", group_id.to_string()))
+        .raw_query(
+            "load_social_group_members",
+            "SELECT * FROM social_group_member WHERE group_id = $group_id",
+            json!({ "group_id": group_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group_member: {}", e)))?;
 
@@ -900,9 +912,11 @@ async fn ensure_group_thread_access(
     }
 
     let mut result = db
-        .query("SELECT * FROM group_thread WHERE id = type::record('group_thread', $thread_id) AND group_id = $group_id LIMIT 1")
-        .bind(("thread_id", thread_id.to_string()))
-        .bind(("group_id", group_id.to_string()))
+        .raw_query(
+            "ensure_group_thread_access",
+            "SELECT * FROM group_thread WHERE id = type::record('group_thread', $thread_id) AND group_id = $group_id LIMIT 1",
+            json!({ "thread_id": thread_id, "group_id": group_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query group_thread: {}", e)))?;
     let threads: Vec<GroupThread> = result
@@ -919,7 +933,8 @@ async fn create_default_group_thread(db: &Database, group_id: &str, created_by: 
     let now = chrono::Utc::now().to_rfc3339();
     let thread_id = Uuid::new_v4().to_string();
     let mut result = db
-        .query(
+        .raw_query(
+            "create_default_group_thread",
             "CREATE type::record('group_thread', $thread_id) SET
                 group_id = $group_id,
                 thread_type = $thread_type,
@@ -929,15 +944,17 @@ async fn create_default_group_thread(db: &Database, group_id: &str, created_by: 
                 created_at = $created_at,
                 updated_at = $updated_at
              RETURN AFTER",
+            json!({
+                "thread_id": thread_id,
+                "group_id": group_id,
+                "thread_type": "chat",
+                "title": "主会话",
+                "created_by": created_by,
+                "status": "active",
+                "created_at": now.clone(),
+                "updated_at": now,
+            }),
         )
-        .bind(("thread_id", thread_id))
-        .bind(("group_id", group_id.to_string()))
-        .bind(("thread_type", "chat".to_string()))
-        .bind(("title", "主会话".to_string()))
-        .bind(("created_by", created_by.to_string()))
-        .bind(("status", "active".to_string()))
-        .bind(("created_at", now.clone()))
-        .bind(("updated_at", now))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create default group_thread: {}", e)))?;
 
@@ -957,8 +974,11 @@ async fn ensure_group_access(
     group_id: &str,
 ) -> Result<SocialGroup> {
     let mut result = db
-        .query(&social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"))
-        .bind(("group_id", group_id.to_string()))
+        .raw_query(
+            "ensure_group_access",
+            &social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"),
+            json!({ "group_id": group_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
     let groups: Vec<serde_json::Value> = result
@@ -994,8 +1014,11 @@ async fn ensure_group_admin_access(
 
 async fn load_group_by_id(db: &Database, group_id: &str) -> Result<SocialGroup> {
     let mut result = db
-        .query(&social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"))
-        .bind(("group_id", group_id.to_string()))
+        .raw_query(
+            "load_group_by_id",
+            &social_group_select_query("WHERE id = type::record('social_group', $group_id) LIMIT 1"),
+            json!({ "group_id": group_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group: {}", e)))?;
     let groups: Vec<serde_json::Value> = result
@@ -1010,9 +1033,11 @@ async fn load_group_by_id(db: &Database, group_id: &str) -> Result<SocialGroup> 
 }
 
 async fn remove_social_group_member(db: &Database, group_id: &str, member_id: &str) -> Result<()> {
-    db.query("DELETE social_group_member WHERE group_id = $group_id AND member_id = $member_id")
-        .bind(("group_id", group_id.to_string()))
-        .bind(("member_id", member_id.to_string()))
+    db.raw_query(
+        "remove_social_group_member",
+        "DELETE social_group_member WHERE group_id = $group_id AND member_id = $member_id",
+        json!({ "group_id": group_id, "member_id": member_id }),
+    )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to delete social_group_member: {}", e)))?;
     Ok(())
@@ -1043,7 +1068,8 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
         .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
     tracing::info!("create_social_group_record using normalized group_id={}", group_id);
 
-    db.query(
+    db.raw_query(
+            "create_social_group_record",
             "CREATE type::record('social_group', $group_id) SET
                 name = $name,
                 avatar = $avatar,
@@ -1061,26 +1087,28 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
                 description = $description,
                 max_humans = $max_humans,
                 max_ais = $max_ais,
-                member_user_ids = $member_user_ids"
+                member_user_ids = $member_user_ids",
+            json!({
+                "group_id": group_id,
+                "name": group.name,
+                "avatar": group.avatar,
+                "group_type": group.group_type,
+                "level": group.level,
+                "owner_id": group.owner_id,
+                "created_at": group.created_at,
+                "admin_ids": group.admin_ids,
+                "member_ids": group.member_ids,
+                "announcement": group.announcement,
+                "settings": group.settings,
+                "code": group.code,
+                "human_member_ids": group.human_member_ids,
+                "ai_member_ids": group.ai_member_ids,
+                "description": group.description,
+                "max_humans": group.max_humans,
+                "max_ais": group.max_ais,
+                "member_user_ids": group.member_user_ids,
+            }),
         )
-        .bind(("group_id", group_id.clone()))
-        .bind(("name", group.name.clone()))
-        .bind(("avatar", group.avatar.clone()))
-        .bind(("group_type", group.group_type))
-        .bind(("level", group.level.clone()))
-        .bind(("owner_id", group.owner_id.clone()))
-        .bind(("created_at", group.created_at.clone()))
-        .bind(("admin_ids", group.admin_ids.clone()))
-        .bind(("member_ids", group.member_ids.clone()))
-        .bind(("announcement", group.announcement.clone()))
-        .bind(("settings", group.settings.clone()))
-        .bind(("code", group.code.clone()))
-        .bind(("human_member_ids", group.human_member_ids.clone()))
-        .bind(("ai_member_ids", group.ai_member_ids.clone()))
-        .bind(("description", group.description.clone()))
-        .bind(("max_humans", group.max_humans))
-        .bind(("max_ais", group.max_ais))
-        .bind(("member_user_ids", group.member_user_ids.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create social_group: {}", e)))?;
     load_group_by_id(db, &group_id).await
@@ -1098,8 +1126,11 @@ async fn list_group_threads(
     }
 
     let mut result = db
-        .query("SELECT * FROM group_thread WHERE group_id = $group_id ORDER BY updated_at DESC")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "list_group_threads",
+            "SELECT * FROM group_thread WHERE group_id = $group_id ORDER BY updated_at DESC",
+            json!({ "group_id": group_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query group_thread: {}", e)))?;
     let threads: Vec<GroupThread> = result
@@ -1130,7 +1161,8 @@ async fn create_group_thread(
     let now = chrono::Utc::now().to_rfc3339();
     let thread_id = Uuid::new_v4().to_string();
     let mut result = db
-        .query(
+        .raw_query(
+            "create_group_thread",
             "CREATE type::record('group_thread', $thread_id) SET
                 group_id = $group_id,
                 thread_type = $thread_type,
@@ -1140,15 +1172,17 @@ async fn create_group_thread(
                 created_at = $created_at,
                 updated_at = $updated_at
              RETURN AFTER",
+            json!({
+                "thread_id": thread_id,
+                "group_id": group_id,
+                "thread_type": "chat",
+                "title": title,
+                "created_by": current_user_id,
+                "status": "active",
+                "created_at": now.clone(),
+                "updated_at": now,
+            }),
         )
-        .bind(("thread_id", thread_id))
-        .bind(("group_id", group_id.clone()))
-        .bind(("thread_type", "chat".to_string()))
-        .bind(("title", title.to_string()))
-        .bind(("created_by", current_user_id.clone()))
-        .bind(("status", "active".to_string()))
-        .bind(("created_at", now.clone()))
-        .bind(("updated_at", now))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create group_thread: {}", e)))?;
     let threads: Vec<GroupThread> = result
@@ -1185,9 +1219,11 @@ async fn list_group_thread_messages(
     let _group = ensure_group_thread_access(&db, &current_user_id, &group_id, &thread_id).await?;
 
     let mut result = db
-        .query("SELECT * FROM group_thread_message WHERE group_id = $group_id AND thread_id = $thread_id ORDER BY created_at ASC")
-        .bind(("group_id", group_id))
-        .bind(("thread_id", thread_id))
+        .raw_query(
+            "list_group_thread_messages",
+            "SELECT * FROM group_thread_message WHERE group_id = $group_id AND thread_id = $thread_id ORDER BY created_at ASC",
+            json!({ "group_id": group_id, "thread_id": thread_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query group_thread_message: {}", e)))?;
     let messages: Vec<GroupThreadMessage> = result
@@ -1219,7 +1255,8 @@ async fn send_group_thread_message(
     let message_id = Uuid::new_v4().to_string();
     let reply_to = req.reply_to;
     let mut result = db
-        .query(
+        .raw_query(
+            "send_group_thread_message",
             "CREATE type::record('group_thread_message', $message_id) SET
                 group_id = $group_id,
                 thread_id = $thread_id,
@@ -1230,16 +1267,18 @@ async fn send_group_thread_message(
                 reply_to = $reply_to,
                 created_at = $created_at
              RETURN AFTER",
+            json!({
+                "message_id": message_id,
+                "group_id": group_id,
+                "thread_id": thread_id,
+                "sender_id": current_user_id,
+                "sender_kind": "human",
+                "message_type": "text",
+                "content": content,
+                "reply_to": reply_to,
+                "created_at": now.clone(),
+            }),
         )
-        .bind(("message_id", message_id))
-        .bind(("group_id", group_id.clone()))
-        .bind(("thread_id", thread_id.clone()))
-        .bind(("sender_id", current_user_id.clone()))
-        .bind(("sender_kind", "human".to_string()))
-        .bind(("message_type", "text".to_string()))
-        .bind(("content", content.to_string()))
-        .bind(("reply_to", reply_to))
-        .bind(("created_at", now.clone()))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create group_thread_message: {}", e)))?;
     let messages: Vec<GroupThreadMessage> = result
@@ -1251,9 +1290,11 @@ async fn send_group_thread_message(
         .ok_or_else(|| AuthError::DatabaseError("Created group_thread_message not found".to_string()))?;
 
     let _ = db
-        .query("UPDATE group_thread SET updated_at = $updated_at WHERE id = type::record('group_thread', $thread_id)")
-        .bind(("updated_at", now))
-        .bind(("thread_id", thread_id.clone()))
+        .raw_query(
+            "touch_group_thread_after_message",
+            "UPDATE group_thread SET updated_at = $updated_at WHERE id = type::record('group_thread', $thread_id)",
+            json!({ "updated_at": now, "thread_id": thread_id }),
+        )
         .await;
 
     let view = map_group_thread_message_view(created);
@@ -1287,9 +1328,11 @@ async fn list_group_collab_runs(
     }
 
     let mut result = db
-        .query("SELECT * FROM group_collab_run WHERE group_id = $group_id AND thread_id = $thread_id ORDER BY created_at DESC")
-        .bind(("group_id", group_id))
-        .bind(("thread_id", thread_id))
+        .raw_query(
+            "list_group_collab_runs",
+            "SELECT * FROM group_collab_run WHERE group_id = $group_id AND thread_id = $thread_id ORDER BY created_at DESC",
+            json!({ "group_id": group_id, "thread_id": thread_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query group_collab_run: {}", e)))?;
     let runs: Vec<GroupCollabRun> = result
@@ -1380,13 +1423,18 @@ async fn complete_group_collab_run(
 
     let now = chrono::Utc::now().to_rfc3339();
     let mut result = db
-        .query("UPDATE type::record('group_collab_run', $run_id) SET status = $status, result_summary = $result_summary, result_payload = $result_payload, updated_at = $updated_at, completed_at = $completed_at RETURN AFTER")
-        .bind(("run_id", run_id.clone()))
-        .bind(("status", status.to_string()))
-        .bind(("result_summary", req.result_summary.clone()))
-        .bind(("result_payload", req.result_payload.clone()))
-        .bind(("updated_at", now.clone()))
-        .bind(("completed_at", Some(now)))
+        .raw_query(
+            "complete_group_collab_run",
+            "UPDATE type::record('group_collab_run', $run_id) SET status = $status, result_summary = $result_summary, result_payload = $result_payload, updated_at = $updated_at, completed_at = $completed_at RETURN AFTER",
+            json!({
+                "run_id": run_id,
+                "status": status,
+                "result_summary": req.result_summary,
+                "result_payload": req.result_payload,
+                "updated_at": now.clone(),
+                "completed_at": Some(now),
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update group_collab_run: {}", e)))?;
     let runs: Vec<GroupCollabRun> = result
@@ -1468,8 +1516,11 @@ fn canonical_friend_pair(left: &str, right: &str) -> (String, String) {
 async fn ensure_user_exists(db: &Arc<Database>, user_id: &str) -> Result<User> {
     let normalized = normalize_user_id(user_id);
     let mut result = db
-        .query("SELECT * FROM user WHERE <string>id = $user_id LIMIT 1")
-        .bind(("user_id", surreal_user_id_string(&normalized)))
+        .raw_query(
+            "ensure_user_exists",
+            "SELECT * FROM user WHERE <string>id = $user_id LIMIT 1",
+            json!({ "user_id": surreal_user_id_string(&normalized) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query user: {}", e)))?;
     let users: Vec<User> = result
@@ -1484,8 +1535,11 @@ async fn ensure_user_exists(db: &Arc<Database>, user_id: &str) -> Result<User> {
 async fn find_friend_request_by_id(db: &Arc<Database>, request_id: &str) -> Result<FriendRequest> {
     let normalized = normalize_request_id(request_id);
     let mut result = db
-        .query("SELECT * FROM friend_request WHERE <string>id = $request_id LIMIT 1")
-        .bind(("request_id", surreal_request_id_string(&normalized)))
+        .raw_query(
+            "find_friend_request_by_id",
+            "SELECT * FROM friend_request WHERE <string>id = $request_id LIMIT 1",
+            json!({ "request_id": surreal_request_id_string(&normalized) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query friend request: {}", e)))?;
     let requests: Vec<FriendRequest> = result
@@ -1501,9 +1555,14 @@ async fn friendship_exists(db: &Arc<Database>, left: &str, right: &str) -> Resul
     let (a, b) = canonical_friend_pair(left, right);
     let query = "SELECT * FROM friendship WHERE <string>user_a = $user_a AND <string>user_b = $user_b LIMIT 1";
     let mut result = db
-        .query(query)
-        .bind(("user_a", surreal_user_id_string(&a)))
-        .bind(("user_b", surreal_user_id_string(&b)))
+        .raw_query(
+            "friendship_exists",
+            query,
+            json!({
+                "user_a": surreal_user_id_string(&a),
+                "user_b": surreal_user_id_string(&b),
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query friendship: {}", e)))?;
     let items: Vec<Friendship> = result
@@ -1520,9 +1579,14 @@ async fn find_direct_conversation(
     let (a, b) = canonical_friend_pair(left, right);
     let query = "SELECT * FROM direct_conversation WHERE <string>user_a = $user_a AND <string>user_b = $user_b LIMIT 1";
     let mut result = db
-        .query(query)
-        .bind(("user_a", surreal_user_id_string(&a)))
-        .bind(("user_b", surreal_user_id_string(&b)))
+        .raw_query(
+            "find_direct_conversation",
+            query,
+            json!({
+                "user_a": surreal_user_id_string(&a),
+                "user_b": surreal_user_id_string(&b),
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query direct conversation: {}", e)))?;
     let items: Vec<DirectConversation> = result
@@ -1567,8 +1631,11 @@ async fn latest_direct_message_content(
         LIMIT 1
     "#;
     let mut result = db
-        .query(query)
-        .bind(("conversation_id", surreal_direct_conversation_id_string(conversation_id)))
+        .raw_query(
+            "latest_direct_message_content",
+            query,
+            json!({ "conversation_id": surreal_direct_conversation_id_string(conversation_id) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query direct messages: {}", e)))?;
     let items: Vec<DirectMessage> = result
@@ -1640,9 +1707,14 @@ async fn pending_request_exists(db: &Arc<Database>, left: &str, right: &str) -> 
         LIMIT 1
     "#;
     let mut result = db
-        .query(query)
-        .bind(("left_user", surreal_user_id_string(&left)))
-        .bind(("right_user", surreal_user_id_string(&right)))
+        .raw_query(
+            "pending_request_exists",
+            query,
+            json!({
+                "left_user": surreal_user_id_string(&left),
+                "right_user": surreal_user_id_string(&right),
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query friend requests: {}", e)))?;
     let items: Vec<FriendRequest> = result
@@ -1743,8 +1815,11 @@ async fn list_incoming_friend_requests(
         ORDER BY created_at DESC
     "#;
     let mut result = db
-        .query(query)
-        .bind(("user_id", surreal_user_id_string(&claims.sub)))
+        .raw_query(
+            "list_incoming_friend_requests",
+            query,
+            json!({ "user_id": surreal_user_id_string(&claims.sub) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query incoming requests: {}", e)))?;
     let requests: Vec<FriendRequest> = result
@@ -1768,8 +1843,11 @@ async fn list_outgoing_friend_requests(
         ORDER BY created_at DESC
     "#;
     let mut result = db
-        .query(query)
-        .bind(("user_id", surreal_user_id_string(&claims.sub)))
+        .raw_query(
+            "list_outgoing_friend_requests",
+            query,
+            json!({ "user_id": surreal_user_id_string(&claims.sub) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query outgoing requests: {}", e)))?;
     let requests: Vec<FriendRequest> = result
@@ -1809,10 +1887,15 @@ async fn respond_friend_request(
 
     let query = "UPDATE $request_id SET status = $status, responded_at = $responded_at";
     let mut result = db
-        .query(query)
-        .bind(("request_id", request_thing(&request_id)))
-        .bind(("status", new_status.clone()))
-        .bind(("responded_at", responded_at))
+        .raw_query(
+            "respond_friend_request",
+            query,
+            json!({
+                "request_id": request_thing(&request_id),
+                "status": new_status.clone(),
+                "responded_at": responded_at,
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update friend request: {}", e)))?;
     let _updated: Vec<FriendRequest> = result
@@ -1888,14 +1971,37 @@ async fn list_friends(
         WHERE <string>user_a = $user_id OR <string>user_b = $user_id
         ORDER BY created_at DESC
     "#;
-    let mut result = db
-        .query(query)
-        .bind(("user_id", surreal_user_id_string(&current_user_id)))
+    let user_id = surreal_user_id_string(&current_user_id);
+    let friendships: Vec<Friendship> = match db
+        .retry_on_unauthorized("list_friends", || {
+            let user_id = user_id.clone();
+            async {
+                let mut result = db
+                    .query(query)
+                    .bind(("user_id", user_id))
+                    .await
+                    .map_err(|e| AuthError::DatabaseError(format!("Failed to query friends: {e}")))?;
+                result
+                    .take(0)
+                    .map_err(|e| AuthError::DatabaseError(format!("Failed to parse friendships: {e}")))
+            }
+        })
         .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to query friends: {}", e)))?;
-    let friendships: Vec<Friendship> = result
-        .take(0)
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse friendships: {}", e)))?;
+    {
+        Ok(rows) => rows,
+        Err(err) if format!("{err}").contains("401") || format!("{err}").contains("Unauthorized") => {
+            let fresh = db.fresh_client().await?;
+            let mut result = fresh
+                .query(query)
+                .bind(("user_id", user_id.clone()))
+                .await
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to query friends: {e}")))?;
+            result
+                .take(0)
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to parse friendships: {e}")))?
+        }
+        Err(err) => return Err(err),
+    };
 
     let mut friends = Vec::with_capacity(friendships.len());
     for friendship in friendships {
@@ -1919,8 +2025,11 @@ async fn list_groups(
 ) -> Result<Json<Vec<SocialGroupResponse>>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let mut membership_result = db
-        .query("SELECT * FROM social_group_member WHERE member_id = $member_id AND member_kind = 'human'")
-        .bind(("member_id", current_user_id.clone()))
+        .raw_query(
+            "list_groups_memberships",
+            "SELECT * FROM social_group_member WHERE member_id = $member_id AND member_kind = 'human'",
+            json!({ "member_id": current_user_id }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query social_group_member: {}", e)))?;
     let memberships: Vec<SocialGroupMember> = membership_result
@@ -1935,7 +2044,7 @@ async fn list_groups(
     }
 
     let mut result = db
-        .query(&social_group_select_query(""))
+        .raw_query("list_groups", &social_group_select_query(""), json!({}))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query groups: {}", e)))?;
     let groups: Vec<serde_json::Value> = result
@@ -2034,9 +2143,11 @@ async fn update_group_admin(
     }
 
     let _ = db
-        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
-        .bind(("group_id", group_id.clone()))
-        .bind(("admin_ids", admin_ids))
+        .raw_query(
+            "update_group_admin",
+            "UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids",
+            json!({ "group_id": group_id, "admin_ids": admin_ids }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group admins: {}", e)))?;
     let updated = load_group_by_id(&db, &group_id).await?;
@@ -2074,9 +2185,11 @@ async fn remove_group_member(
         .cloned()
         .collect();
     let _ = db
-        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
-        .bind(("group_id", group_id.clone()))
-        .bind(("admin_ids", new_admin_ids))
+        .raw_query(
+            "remove_group_member_update_admins",
+            "UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids",
+            json!({ "group_id": group_id, "admin_ids": new_admin_ids }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group admins: {}", e)))?;
 
@@ -2133,13 +2246,16 @@ async fn transfer_group_ownership(
     }
 
     let _ = db
-        .query(
+        .raw_query(
+            "transfer_group_ownership",
             "UPDATE type::record('social_group', $group_id)
              SET owner_id = $new_owner_id, admin_ids = $admin_ids",
+            json!({
+                "group_id": group_id,
+                "new_owner_id": new_owner_id,
+                "admin_ids": admin_ids,
+            }),
         )
-        .bind(("group_id", group_id.clone()))
-        .bind(("new_owner_id", new_owner_id))
-        .bind(("admin_ids", admin_ids))
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to transfer group ownership: {}", e)))?;
     let updated = load_group_by_id(&db, &group_id).await?;
@@ -2172,9 +2288,11 @@ async fn leave_group(
         .cloned()
         .collect();
     let _ = db
-        .query("UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids")
-        .bind(("group_id", group_id.clone()))
-        .bind(("admin_ids", new_admin_ids))
+        .raw_query(
+            "leave_group_update_admins",
+            "UPDATE type::record('social_group', $group_id) SET admin_ids = $admin_ids",
+            json!({ "group_id": group_id, "admin_ids": new_admin_ids }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group admins: {}", e)))?;
     remove_social_group_member(&db, &group_id, &current_user_id).await?;
@@ -2214,9 +2332,11 @@ async fn update_group_settings(
     };
 
     let _ = db
-        .query("UPDATE type::record('social_group', $group_id) SET settings = $settings")
-        .bind(("group_id", group_id.clone()))
-        .bind(("settings", settings))
+        .raw_query(
+            "update_group_settings",
+            "UPDATE type::record('social_group', $group_id) SET settings = $settings",
+            json!({ "group_id": group_id, "settings": settings }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group settings: {}", e)))?;
     let updated = load_group_by_id(&db, &group_id).await?;
@@ -2247,9 +2367,11 @@ async fn update_group_announcement(
     let announcement = req.announcement.trim().to_string();
 
     let _ = db
-        .query("UPDATE type::record('social_group', $group_id) SET announcement = $announcement")
-        .bind(("group_id", group_id.clone()))
-        .bind(("announcement", Some(announcement)))
+        .raw_query(
+            "update_group_announcement",
+            "UPDATE type::record('social_group', $group_id) SET announcement = $announcement",
+            json!({ "group_id": group_id, "announcement": Some(announcement) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update social_group announcement: {}", e)))?;
     let updated = load_group_by_id(&db, &group_id).await?;
@@ -2282,24 +2404,39 @@ async fn dissolve_group(
 
     let member_ids = group.member_user_ids.clone();
     let _ = db
-        .query("DELETE social_group_member WHERE group_id = $group_id")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "dissolve_group_delete_members",
+            "DELETE social_group_member WHERE group_id = $group_id",
+            json!({ "group_id": group_id }),
+        )
         .await;
     let _ = db
-        .query("DELETE group_thread_message WHERE group_id = $group_id")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "dissolve_group_delete_messages",
+            "DELETE group_thread_message WHERE group_id = $group_id",
+            json!({ "group_id": group_id }),
+        )
         .await;
     let _ = db
-        .query("DELETE group_collab_run WHERE group_id = $group_id")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "dissolve_group_delete_collab_runs",
+            "DELETE group_collab_run WHERE group_id = $group_id",
+            json!({ "group_id": group_id }),
+        )
         .await;
     let _ = db
-        .query("DELETE group_thread WHERE group_id = $group_id")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "dissolve_group_delete_threads",
+            "DELETE group_thread WHERE group_id = $group_id",
+            json!({ "group_id": group_id }),
+        )
         .await;
     let _ = db
-        .query("DELETE type::record('social_group', $group_id)")
-        .bind(("group_id", group_id.clone()))
+        .raw_query(
+            "dissolve_group_delete_group",
+            "DELETE type::record('social_group', $group_id)",
+            json!({ "group_id": group_id }),
+        )
         .await;
 
     for member_id in member_ids.iter() {
@@ -2512,8 +2649,11 @@ async fn list_direct_conversations(
         ORDER BY updated_at DESC
     "#;
     let mut result = db
-        .query(query)
-        .bind(("user_id", surreal_user_id_string(&current_user_id)))
+        .raw_query(
+            "list_direct_conversations",
+            query,
+            json!({ "user_id": surreal_user_id_string(&current_user_id) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query direct conversations: {}", e)))?;
     let conversations: Vec<DirectConversation> = result
@@ -2549,8 +2689,11 @@ async fn list_direct_messages(
 ) -> Result<Json<Vec<DirectMessageView>>> {
     let current_user_id = normalize_user_id(&claims.sub);
     let mut conversation_query = db
-        .query("SELECT * FROM direct_conversation WHERE <string>id = $conversation_id LIMIT 1")
-        .bind(("conversation_id", surreal_direct_conversation_id_string(&conversation_id)))
+        .raw_query(
+            "list_direct_messages_conversation",
+            "SELECT * FROM direct_conversation WHERE <string>id = $conversation_id LIMIT 1",
+            json!({ "conversation_id": surreal_direct_conversation_id_string(&conversation_id) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query direct conversation: {}", e)))?;
     let items: Vec<DirectConversation> = conversation_query
@@ -2573,8 +2716,11 @@ async fn list_direct_messages(
         LIMIT 200
     "#;
     let mut result = db
-        .query(query)
-        .bind(("conversation_id", surreal_direct_conversation_id_string(&conversation_id)))
+        .raw_query(
+            "list_direct_messages",
+            query,
+            json!({ "conversation_id": surreal_direct_conversation_id_string(&conversation_id) }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to query direct messages: {}", e)))?;
     let messages: Vec<DirectMessage> = result
@@ -2615,9 +2761,14 @@ async fn send_direct_message(
     let created: DirectMessage = db.create_record("direct_message", &message).await?;
 
     let mut update_result = db
-        .query("UPDATE $conversation_id SET updated_at = $updated_at")
-        .bind(("conversation_id", direct_conversation_thing(&conversation_id)))
-        .bind(("updated_at", now))
+        .raw_query(
+            "send_direct_message_touch_conversation",
+            "UPDATE $conversation_id SET updated_at = $updated_at",
+            json!({
+                "conversation_id": direct_conversation_thing(&conversation_id),
+                "updated_at": now,
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to update conversation timestamp: {}", e)))?;
     let _updated: Vec<DirectConversation> = update_result
