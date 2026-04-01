@@ -1885,13 +1885,13 @@ async fn respond_friend_request(
     };
     let responded_at = chrono::Utc::now().timestamp();
 
-    let query = "UPDATE $request_id SET status = $status, responded_at = $responded_at";
+    let query = "UPDATE type::record('friend_request', $request_id) SET status = $status, responded_at = $responded_at";
     let mut result = db
         .raw_query(
             "respond_friend_request",
             query,
             json!({
-                "request_id": request_thing(&request_id),
+                "request_id": normalize_request_id(&request_id),
                 "status": new_status.clone(),
                 "responded_at": responded_at,
             }),
@@ -2763,9 +2763,9 @@ async fn send_direct_message(
     let mut update_result = db
         .raw_query(
             "send_direct_message_touch_conversation",
-            "UPDATE $conversation_id SET updated_at = $updated_at",
+            "UPDATE type::record('direct_conversation', $conversation_id) SET updated_at = $updated_at",
             json!({
-                "conversation_id": direct_conversation_thing(&conversation_id),
+                "conversation_id": normalize_direct_conversation_id(&conversation_id),
                 "updated_at": now,
             }),
         )
