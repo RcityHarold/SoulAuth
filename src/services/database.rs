@@ -1,5 +1,6 @@
 use std::{env, fmt::Debug};
 use std::time::Duration;
+use serde_json::Value as JsonValue;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 use surrealdb::{Surreal, types::RecordId};
@@ -93,7 +94,7 @@ impl Database {
         msg.contains("401") || msg.contains("Unauthorized")
     }
 
-    async fn fresh_client(&self) -> Result<Surreal<Client>> {
+    pub async fn fresh_client(&self) -> Result<Surreal<Client>> {
         let endpoint_raw = env::var("DATABASE_URL").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
         let endpoint = endpoint_raw.trim().trim_end_matches('/').to_string();
         let with_scheme = Self::endpoint_with_scheme(&endpoint_raw);
@@ -246,7 +247,7 @@ impl Database {
         }))
     }
 
-    async fn retry_on_unauthorized<T, F, Fut>(&self, op_name: &str, f: F) -> Result<T>
+    pub async fn retry_on_unauthorized<T, F, Fut>(&self, op_name: &str, f: F) -> Result<T>
     where
         F: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T>>,
@@ -533,6 +534,7 @@ impl Database {
         updated.ok_or_else(|| AuthError::DatabaseError("Record not found".into()))
     }
 
+
     pub async fn delete_record<T>(&self, table: &str, id: &str) -> Result<Option<T>>
     where
         T: serde::de::DeserializeOwned + Clone + Debug + SurrealValue,
@@ -593,6 +595,40 @@ impl Database {
             .map_err(|e| AuthError::DatabaseError(format!("Failed to parse sessions: {}", e)))?;
             
         Ok(sessions)
+    }
+
+    pub async fn raw_query(
+        &self,
+        op: &str,
+        sql: &str,
+        bindings: JsonValue,
+    ) -> Result<surrealdb::IndexedResults> {
+        let bindings_for_retry = bindings.clone();
+        match self
+            .retry_on_unauthorized(op, || {
+                let bindings = bindings_for_retry.clone();
+                async move {
+                    self.client
+                        .query(sql)
+                        .bind(bindings)
+                        .await
+                        .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))
+                }
+            })
+            .await
+        {
+            Ok(response) => Ok(response),
+            Err(err) if Self::is_unauthorized_error(&err) => {
+                warn!("{op} still unauthorized after reauth, retrying on fresh client");
+                let fresh = self.fresh_client().await?;
+                fresh
+                    .query(sql)
+                    .bind(bindings)
+                    .await
+                    .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// 公开的查询方法，供其他服务使用  
