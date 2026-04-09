@@ -1885,13 +1885,13 @@ async fn respond_friend_request(
     };
     let responded_at = chrono::Utc::now().timestamp();
 
-    let query = "UPDATE $request_id SET status = $status, responded_at = $responded_at";
+    let query = "UPDATE type::record('friend_request', $request_id) SET status = $status, responded_at = $responded_at";
     let mut result = db
         .raw_query(
             "respond_friend_request",
             query,
             json!({
-                "request_id": request_thing(&request_id),
+                "request_id": normalize_request_id(&request_id),
                 "status": new_status.clone(),
                 "responded_at": responded_at,
             }),
@@ -2763,9 +2763,9 @@ async fn send_direct_message(
     let mut update_result = db
         .raw_query(
             "send_direct_message_touch_conversation",
-            "UPDATE $conversation_id SET updated_at = $updated_at",
+            "UPDATE type::record('direct_conversation', $conversation_id) SET updated_at = $updated_at",
             json!({
-                "conversation_id": direct_conversation_thing(&conversation_id),
+                "conversation_id": normalize_direct_conversation_id(&conversation_id),
                 "updated_at": now,
             }),
         )
@@ -2818,6 +2818,7 @@ async fn google_callback(
     Query(params): Query<OAuthCallback>,
 ) -> Result<axum::response::Response> {
     tracing::info!("Starting Google OAuth callback");
+    let frontend_base = config.app_url.trim_end_matches('/').to_string();
     let auth_service = AuthService::new(db, config)?;
     let auth_response = match auth_service.handle_google_callback(params.code).await {
         Ok(response) => response,
@@ -2830,10 +2831,10 @@ async fn google_callback(
     // 检查用户是否有密码
     let redirect_url = if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        format!("http://129.226.169.63:4173/initialize-password?token={}", auth_response.token)
+        format!("{frontend_base}/initialize-password?token={}", auth_response.token)
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        format!("http://129.226.169.63:4173/oauth/callback?token={}", auth_response.token)
+        format!("{frontend_base}/oauth/callback?token={}", auth_response.token)
     };
 
     tracing::info!("OAuth callback completed, redirecting user");
@@ -2856,16 +2857,17 @@ async fn github_callback(
     Extension(config): Extension<Config>,
     Query(params): Query<OAuthCallback>,
 ) -> Result<axum::response::Response> {
+    let frontend_base = config.app_url.trim_end_matches('/').to_string();
     let auth_service = AuthService::new(db, config)?;
     let auth_response = auth_service.handle_github_callback(params.code).await?;
     
     // 检查用户是否有密码
     let redirect_url = if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        format!("http://localhost:5173/initialize-password?token={}", auth_response.token)
+        format!("{frontend_base}/initialize-password?token={}", auth_response.token)
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        format!("http://localhost:5173/oauth/callback?token={}", auth_response.token)
+        format!("{frontend_base}/oauth/callback?token={}", auth_response.token)
     };
 
     Ok(axum::response::Redirect::to(&redirect_url).into_response())
