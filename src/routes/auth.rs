@@ -2818,6 +2818,7 @@ async fn google_callback(
     Query(params): Query<OAuthCallback>,
 ) -> Result<axum::response::Response> {
     tracing::info!("Starting Google OAuth callback");
+    let frontend_base = config.app_url.trim_end_matches('/').to_string();
     let auth_service = AuthService::new(db, config)?;
     let auth_response = match auth_service.handle_google_callback(params.code).await {
         Ok(response) => response,
@@ -2830,10 +2831,10 @@ async fn google_callback(
     // 检查用户是否有密码
     let redirect_url = if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        format!("http://129.226.169.63:4173/initialize-password?token={}", auth_response.token)
+        format!("{frontend_base}/initialize-password?token={}", auth_response.token)
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        format!("http://129.226.169.63:4173/oauth/callback?token={}", auth_response.token)
+        format!("{frontend_base}/oauth/callback?token={}", auth_response.token)
     };
 
     tracing::info!("OAuth callback completed, redirecting user");
@@ -2856,16 +2857,17 @@ async fn github_callback(
     Extension(config): Extension<Config>,
     Query(params): Query<OAuthCallback>,
 ) -> Result<axum::response::Response> {
+    let frontend_base = config.app_url.trim_end_matches('/').to_string();
     let auth_service = AuthService::new(db, config)?;
     let auth_response = auth_service.handle_github_callback(params.code).await?;
     
     // 检查用户是否有密码
     let redirect_url = if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        format!("http://localhost:5173/initialize-password?token={}", auth_response.token)
+        format!("{frontend_base}/initialize-password?token={}", auth_response.token)
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        format!("http://localhost:5173/oauth/callback?token={}", auth_response.token)
+        format!("{frontend_base}/oauth/callback?token={}", auth_response.token)
     };
 
     Ok(axum::response::Redirect::to(&redirect_url).into_response())
