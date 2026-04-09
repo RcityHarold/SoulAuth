@@ -239,6 +239,7 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/auth", routes::auth::router(shared_db.clone()))
         .nest("/api/rbac", routes::rbac::router())
         .nest("/api/users", routes::user_management::router())
+        .nest("/api/ops", routes::ops::router())
         .nest("/api/audit", routes::audit::audit_routes())
         .nest("/api/oidc", routes::oidc::oidc_routes())
         .nest("/api/oidc", routes::oidc_client::oidc_client_routes())

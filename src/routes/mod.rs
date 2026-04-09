@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod auth;
+pub mod ops;
 pub mod rbac;
 pub mod user_management;
 pub mod oidc;
