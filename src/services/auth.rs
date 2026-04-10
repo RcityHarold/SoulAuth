@@ -271,6 +271,8 @@ impl AuthService {
             is_email_verified: true, // OAuth 邮箱已验证
             verification_token: None,
             account_status: crate::models::user::AccountStatus::Active.to_string(),
+            membership_level: "FREE".to_string(),
+            membership_expiry: None,
             last_login_at: Some(now.timestamp()),
             last_login_ip: Some("0.0.0.0".to_string()),
         };
@@ -347,6 +349,8 @@ impl AuthService {
             is_email_verified: !self.config.email_verification_enabled,
             verification_token: verification_token.clone(),
             account_status: crate::models::user::AccountStatus::Active.to_string(),
+            membership_level: "FREE".to_string(),
+            membership_expiry: None,
             last_login_at: Some(now.timestamp()),
             last_login_ip: None,
         };

@@ -10,7 +10,7 @@ use crate::{
     error::AuthError,
     routes::rbac::ApiResponse,
     models::{
-        user::{UpdateAccountStatusRequest, UserListRequest},
+        user::{UpdateAccountStatusRequest, UserListRequest, UpdateMembershipRequest},
         user_profile::{CreateUserProfileRequest, UpdateUserProfileRequest},
         user_preferences::{CreateUserPreferencesRequest, UpdateUserPreferencesRequest},
         user_activity::ActivityLogRequest,
@@ -30,7 +30,9 @@ pub fn router() -> Router {
         .route("/preferences", put(update_user_preferences))
         .route("/activity-log", get(get_user_activity_log))
         .route("/users", get(list_users))
+        .route("/users/:user_id", get(get_user_by_id))
         .route("/users/:user_id/status", put(update_user_account_status))
+        .route("/users/:user_id/membership", put(update_user_membership))
         .route("/users/:user_id/profile", get(get_user_profile_by_id))
         .route("/users/:user_id/preferences", get(get_user_preferences_by_id))
         .route("/users/:user_id/activity-log", get(get_user_activity_log_by_id))
@@ -166,6 +168,37 @@ async fn update_user_account_status(
     let service = UserManagementService::new(db);
     let response = service.update_account_status(&user_id, request, &current_user).await?;
     Ok(Json(ApiResponse::success(response, "Account status updated successfully")))
+}
+
+async fn get_user_by_id(
+    Path(user_id): Path<String>,
+    claims: Claims,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
+) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "users.read");
+
+    let service = UserManagementService::new(db);
+    let user = service.get_user_by_id(&user_id).await?;
+    Ok(Json(ApiResponse::success(user, "User retrieved successfully")))
+}
+
+async fn update_user_membership(
+    Path(user_id): Path<String>,
+    claims: Claims,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
+    Json(request): Json<UpdateMembershipRequest>,
+) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AuthError> {
+    let auth_service = AuthService::new(db.clone(), config)?;
+    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    require_permission!(db, &current_user_id, "users.write");
+
+    let service = UserManagementService::new(db);
+    let user = service.update_membership(&user_id, request).await?;
+    Ok(Json(ApiResponse::success(user, "User membership updated successfully")))
 }
 
 async fn get_user_profile_by_id(
