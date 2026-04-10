@@ -6,12 +6,12 @@ use tracing::{error, info};
 use crate::{
     error::AuthError,
     models::{
-        user::{User, AccountStatus, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse},
+        user::{User, AccountStatus, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse, UpdateMembershipRequest},
         user_profile::{UserProfile, CreateUserProfileRequest, UpdateUserProfileRequest, UserProfileResponse},
         user_preferences::{UserPreferences, CreateUserPreferencesRequest, UpdateUserPreferencesRequest, UserPreferencesResponse},
         user_activity::{UserActivity, ActivityCategory, ActivityStatus, UserActivityResponse, ActivityLogRequest, ActivityLogResponse},
     },
-    services::database::Database,
+    services::{database::Database, rbac::RBACService},
 };
 
 pub struct UserManagementService {
@@ -19,6 +19,13 @@ pub struct UserManagementService {
 }
 
 impl UserManagementService {
+    fn normalize_membership_level(level: &str) -> Result<String, AuthError> {
+        match level.trim().to_ascii_uppercase().as_str() {
+            "FREE" | "PRO" | "PREMIUM" | "ULTIMATE" | "TEAM" => Ok(level.trim().to_ascii_uppercase()),
+            _ => Err(AuthError::ValidationError("Invalid membership level".to_string())),
+        }
+    }
+
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
@@ -580,6 +587,36 @@ impl UserManagementService {
     }
 
     // 用户列表管理
+    pub async fn get_user_by_id(&self, user_id: &str) -> Result<UserResponse, AuthError> {
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
+
+        let mut response = self.db.client
+            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            .bind(("user_id", user_thing))
+            .await
+            .map_err(|e| {
+                error!("Failed to get user by id: {}", e);
+                AuthError::DatabaseError(e.to_string())
+            })?;
+
+        let users: Vec<User> = response.take(0).map_err(|e| {
+            error!("Failed to parse user by id: {}", e);
+            AuthError::DatabaseError(e.to_string())
+        })?;
+
+        let user = users.into_iter().next()
+            .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
+
+        let mut response: UserResponse = user.into();
+        response.is_admin = self.user_has_admin_role(user_id).await?;
+        Ok(response)
+    }
+
+    async fn user_has_admin_role(&self, user_id: &str) -> Result<bool, AuthError> {
+        let rbac = RBACService::new(self.db.clone());
+        rbac.check_user_role(user_id, "admin").await
+    }
+
     pub async fn list_users(&self, request: UserListRequest) -> Result<UserListResponse, AuthError> {
         let page = request.page.unwrap_or(1);
         let limit = request.limit.unwrap_or(50);
@@ -648,12 +685,72 @@ impl UserManagementService {
 
         let total_pages = (total as f64 / limit as f64).ceil() as u32;
 
+        let mut user_responses = Vec::with_capacity(users.len());
+        for user in users {
+            let user_id = crate::utils::record_id::record_id_key_to_string(user.id.as_ref().ok_or_else(|| {
+                AuthError::DatabaseError("User missing id".to_string())
+            })?);
+            let mut response: UserResponse = user.into();
+            response.is_admin = self.user_has_admin_role(&user_id).await?;
+            user_responses.push(response);
+        }
+
         Ok(UserListResponse {
-            users: users.into_iter().map(|u| u.into()).collect(),
+            users: user_responses,
             total,
             page,
             limit,
             total_pages,
         })
+    }
+
+    pub async fn update_membership(
+        &self,
+        user_id: &str,
+        request: UpdateMembershipRequest,
+    ) -> Result<UserResponse, AuthError> {
+        let mut user = self
+            .db
+            .find_record_by_field::<User>("user", "id", user_id)
+            .await?
+            .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
+
+        user.membership_level = Self::normalize_membership_level(&request.membership_level)?;
+        user.membership_expiry = request
+            .membership_expiry
+            .and_then(|value| {
+                let trimmed = value.trim().to_string();
+                if trimmed.is_empty() { None } else { Some(trimmed) }
+            });
+        user.updated_at = chrono::Utc::now().timestamp();
+
+        let user_thing = user
+            .id
+            .as_ref()
+            .ok_or_else(|| AuthError::DatabaseError("User missing id".to_string()))?;
+        let updated = self
+            .db
+            .update_record(
+                "user",
+                &format!(
+                    "{}:{}",
+                    user_thing.table,
+                    crate::utils::record_id::record_id_key_to_string(user_thing)
+                ),
+                &user,
+            )
+            .await?;
+
+        let updated_id = crate::utils::record_id::record_id_key_to_string(
+            updated
+                .id
+                .as_ref()
+                .ok_or_else(|| AuthError::DatabaseError("Updated user missing id".to_string()))?
+        );
+        let mut response: UserResponse = updated.into();
+        response.is_admin = self
+            .user_has_admin_role(&updated_id)
+            .await?;
+        Ok(response)
     }
 }

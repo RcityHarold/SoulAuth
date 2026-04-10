@@ -3,6 +3,10 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
+fn default_membership_level() -> String {
+    "FREE".to_string()
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct User {
     pub id: Option<Thing>,
@@ -22,6 +26,10 @@ pub struct User {
     pub is_email_verified: bool,
     pub verification_token: Option<String>,
     pub account_status: String,
+    #[serde(default = "default_membership_level")]
+    pub membership_level: String,
+    #[serde(default)]
+    pub membership_expiry: Option<String>,
     pub last_login_at: Option<i64>,
     pub last_login_ip: Option<String>,
 }
@@ -106,8 +114,12 @@ pub struct UserResponse {
     pub email: String,
     #[serde(default)]
     pub username: String,
+    #[serde(default)]
+    pub is_admin: bool,
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
+    pub membership_level: String,
+    pub membership_expiry: Option<String>,
     pub created_at: DateTime<Utc>,
     pub has_password: bool,
     pub account_status: AccountStatus,
@@ -154,6 +166,12 @@ pub struct UserListResponse {
     pub total_pages: u32,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateMembershipRequest {
+    pub membership_level: String,
+    pub membership_expiry: Option<String>,
+}
+
 impl From<User> for UserResponse {
     fn from(user: User) -> Self {
         let account_status = match user.account_status.as_str() {
@@ -175,7 +193,10 @@ impl From<User> for UserResponse {
             id: crate::utils::record_id::record_id_key_to_string(&user.id.unwrap()),
             email: user.email,
             username: user.username,
+            is_admin: false,
             is_email_verified: user.is_email_verified,
+            membership_level: user.membership_level,
+            membership_expiry: user.membership_expiry,
             created_at,
             has_password: user.password_hash.is_some(),
             account_status,

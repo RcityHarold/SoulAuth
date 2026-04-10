@@ -30,10 +30,10 @@ impl AuditService {
         &self,
         start_time: DateTime<Utc>,
     ) -> ApiResult<AuthenticationStats> {
-        let successful_query = "SELECT count() as count FROM user_activity WHERE action IN ['login_success', 'oauth_login'] AND timestamp >= $start_time";
-        let failed_query = "SELECT count() as count FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time";
-        let oauth_query = "SELECT count() as count FROM user_activity WHERE action = 'oauth_login' AND timestamp >= $start_time";
-        let reset_query = "SELECT count() as count FROM user_activity WHERE action = 'password_reset' AND timestamp >= $start_time";
+        let successful_query = "SELECT count() as count FROM user_activity WHERE action IN ['login_success', 'oauth_login'] AND timestamp >= $start_time GROUP ALL";
+        let failed_query = "SELECT count() as count FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP ALL";
+        let oauth_query = "SELECT count() as count FROM user_activity WHERE action = 'oauth_login' AND timestamp >= $start_time GROUP ALL";
+        let reset_query = "SELECT count() as count FROM user_activity WHERE action = 'password_reset' AND timestamp >= $start_time GROUP ALL";
 
         let successful_logins = self.execute_count_query(successful_query, start_time).await?;
         let failed_logins = self.execute_count_query(failed_query, start_time).await?;
@@ -58,9 +58,9 @@ impl AuditService {
 
     // Lockout Statistics
     pub async fn get_lockout_stats(&self, start_time: DateTime<Utc>) -> ApiResult<LockoutStats> {
-        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= $start_time";
-        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= $start_time";
-        let active_lockouts_query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now";
+        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= $start_time GROUP ALL";
+        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= $start_time GROUP ALL";
+        let active_lockouts_query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
 
         let user_lockouts = self.execute_count_query(user_lockouts_query, start_time).await?;
         let ip_lockouts = self.execute_count_query(ip_lockouts_query, start_time).await?;
@@ -109,7 +109,7 @@ impl AuditService {
     // Rate Limit Violations (estimated from failed login attempts with high frequency)
     pub async fn get_rate_limit_violations(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
         // Since we don't store rate limit violations directly, we estimate from pattern analysis
-        let query = "SELECT ip_address, count() as count FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address HAVING count > 10";
+        let query = "SELECT ip_address, count() as count FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address";
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
@@ -119,18 +119,18 @@ impl AuditService {
             })?;
 
         let violations: Vec<(String, i64)> = result.take(0).unwrap_or_default();
-        Ok(violations.len() as i64)
+        Ok(violations.into_iter().filter(|(_, count)| *count > 10).count() as i64)
     }
 
     // Permission Denials
     pub async fn get_permission_denials(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        let query = "SELECT count() as count FROM user_activity WHERE action = 'permission_denied' AND timestamp >= $start_time";
+        let query = "SELECT count() as count FROM user_activity WHERE action = 'permission_denied' AND timestamp >= $start_time GROUP ALL";
         self.execute_count_query(query, start_time).await
     }
 
     // Failed Login by IP
     pub async fn get_failed_login_by_ip(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<IpActivityMetric>> {
-        let query = "SELECT ip_address, count() as failed_attempts, max(timestamp) as last_attempt FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address ORDER BY failed_attempts DESC LIMIT 20";
+        let query = "SELECT ip_address, count() as failed_attempts, math::max(timestamp) as last_attempt FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address ORDER BY failed_attempts DESC LIMIT 20";
         
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
@@ -177,7 +177,7 @@ impl AuditService {
         // 2. Login attempts from unusual locations
         // 3. Multiple account access attempts
         
-        let query = "SELECT ip_address, user_id, action, count() as count, min(timestamp) as first_seen, max(timestamp) as last_seen FROM user_activity WHERE timestamp >= $start_time AND (action = 'login_failed' OR action = 'permission_denied') GROUP BY ip_address, user_id, action HAVING count > 5 ORDER BY count DESC LIMIT 20";
+        let query = "SELECT ip_address, user_id, action, count() as count, math::min(timestamp) as first_seen, math::max(timestamp) as last_seen FROM user_activity WHERE timestamp >= $start_time AND (action = 'login_failed' OR action = 'permission_denied') GROUP BY ip_address, user_id, action ORDER BY count DESC LIMIT 50";
         
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
@@ -191,6 +191,9 @@ impl AuditService {
         
         let mut suspicious = Vec::new();
         for (ip_address, user_id, activity_type, count, first_seen_ts, last_seen_ts) in activities {
+            if count <= 5 {
+                continue;
+            }
             let risk_score = self.calculate_risk_score(count, &activity_type);
             let first_seen = DateTime::from_timestamp(first_seen_ts, 0).unwrap_or_else(|| Utc::now());
             let last_seen = DateTime::from_timestamp(last_seen_ts, 0).unwrap_or_else(|| Utc::now());
@@ -476,7 +479,7 @@ impl AuditService {
     }
 
     async fn get_total_users(&self) -> ApiResult<i64> {
-        let query = "SELECT count() as count FROM user WHERE account_status != 'Deleted'";
+        let query = "SELECT count() as count FROM user WHERE account_status != 'Deleted' GROUP ALL";
         let mut result = self.db.client.query(query).await
             .map_err(|e| {
                 error!("Failed to get total users: {}", e);
@@ -492,12 +495,21 @@ impl AuditService {
     }
 
     async fn get_active_users_count(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        let query = "SELECT count(DISTINCT user_id) as count FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL";
-        self.execute_count_query(query, start_time).await
+        let query = "SELECT type::string(user_id) as user_id FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL GROUP BY user_id";
+        let mut result = self.db.client.query(query)
+            .bind(("start_time", start_time.timestamp()))
+            .await
+            .map_err(|e| {
+                error!("Failed to get active users count: {}", e);
+                AuthError::DatabaseError("Query execution failed".to_string())
+            })?;
+
+        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        Ok(rows.len() as i64)
     }
 
     async fn get_security_incidents_count(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        let query = "SELECT count() as count FROM user_activity WHERE category = 'Security' AND status IN ['Failed', 'Warning'] AND timestamp >= $start_time";
+        let query = "SELECT count() as count FROM user_activity WHERE category = 'Security' AND status IN ['Failed', 'Warning'] AND timestamp >= $start_time GROUP ALL";
         self.execute_count_query(query, start_time).await
     }
 
