@@ -612,6 +612,7 @@ impl Database {
                         .query(sql)
                         .bind(bindings)
                         .await
+                        .and_then(|response| response.check())
                         .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))
                 }
             })
@@ -625,6 +626,7 @@ impl Database {
                     .query(sql)
                     .bind(bindings)
                     .await
+                    .and_then(|response| response.check())
                     .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))
             }
             Err(err) => Err(err),

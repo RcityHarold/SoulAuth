@@ -17,6 +17,8 @@ DEFINE FIELD password ON user TYPE option<string>;
 DEFINE FIELD verified ON user TYPE bool DEFAULT false;
 DEFINE FIELD verification_token ON user TYPE option<string>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
+DEFINE FIELD membership_level ON user TYPE string DEFAULT "FREE";
+DEFINE FIELD membership_expiry ON user TYPE option<string>;
 DEFINE FIELD last_login_at ON user TYPE option<number>;
 DEFINE FIELD last_login_ip ON user TYPE option<string>;
 DEFINE FIELD created_at ON user TYPE number;

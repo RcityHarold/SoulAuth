@@ -453,7 +453,7 @@ pub async fn generate_security_report(
 
 // Helper functions for data aggregation (implementation details)
 async fn get_total_users(db: &Database) -> ApiResult<i64> {
-    let query = "SELECT count() as total FROM user WHERE account_status != 'Deleted'";
+    let query = "SELECT count() as total FROM user WHERE account_status != 'Deleted' GROUP ALL";
     let mut result = db.client.query(query).await
         .map_err(|e| {
             tracing::error!("Failed to get total users: {}", e);
@@ -469,7 +469,7 @@ async fn get_total_users(db: &Database) -> ApiResult<i64> {
 }
 
 async fn get_active_sessions_count(db: &Database) -> ApiResult<i64> {
-    let query = "SELECT count() as total FROM session WHERE expires_at > $now";
+    let query = "SELECT count() as total FROM session WHERE expires_at > $now GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("now", Utc::now().timestamp()))
         .await
@@ -487,7 +487,7 @@ async fn get_active_sessions_count(db: &Database) -> ApiResult<i64> {
 }
 
 async fn get_failed_logins_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
-    let query = "SELECT count() as total FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time";
+    let query = "SELECT count() as total FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
@@ -505,7 +505,7 @@ async fn get_failed_logins_count(db: &Database, start_time: DateTime<Utc>) -> Ap
 }
 
 async fn get_locked_accounts_count(db: &Database) -> ApiResult<i64> {
-    let query = "SELECT count() as total FROM account_lockout WHERE status = 'Locked' AND locked_until > $now";
+    let query = "SELECT count() as total FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("now", Utc::now()))
         .await
@@ -523,7 +523,7 @@ async fn get_locked_accounts_count(db: &Database) -> ApiResult<i64> {
 }
 
 async fn get_security_events_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
-    let query = "SELECT count() as total FROM user_activity WHERE category = 'Security' AND timestamp >= $start_time";
+    let query = "SELECT count() as total FROM user_activity WHERE category = 'Security' AND timestamp >= $start_time GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
@@ -609,7 +609,7 @@ async fn get_security_trends(db: &Database, start_time: DateTime<Utc>, days: i64
 // Helper functions - simplified implementations for now
 
 async fn get_total_activities_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
-    let query = "SELECT count() as count FROM user_activity WHERE timestamp >= $start_time";
+    let query = "SELECT count() as count FROM user_activity WHERE timestamp >= $start_time GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
@@ -645,7 +645,7 @@ async fn check_database_health(db: &Database) -> ApiResult<DatabaseHealth> {
 }
 
 async fn get_pending_lockouts_count(db: &Database) -> ApiResult<i64> {
-    let query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now";
+    let query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
     let mut result = db.client.query(query)
         .bind(("now", Utc::now()))
         .await

@@ -27,6 +27,7 @@ use crate::{
     models::password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
     models::session::{LogoutRequest, SessionInfo},
     services::auth::AuthService,
+    services::rbac::RBACService,
     services::social_hub::{SocialEvent, SocialHub},
     utils::record_id::record_id_key_to_string,
     utils::jwt::{decode_token_claims, Claims},
@@ -132,6 +133,7 @@ pub fn router(db: Arc<Database>) -> Router {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/admin/login", post(admin_login))
         .route("/verify-email/:token", get(verify_email))
         .route("/me", get(get_current_user))
         .route("/search-user", get(search_user_by_username))
@@ -178,6 +180,62 @@ pub fn router(db: Arc<Database>) -> Router {
         .route("/login/github", get(github_login))
         .route("/callback/github", get(github_callback))
         .with_state(db)
+}
+
+async fn is_admin_console_user(db: Arc<Database>, user_id: &str) -> std::result::Result<bool, AuthError> {
+    let normalized_user_id = crate::utils::record_id::normalize_user_id(user_id);
+    let user_id_bracketed = format!("user:⟨{}⟩", normalized_user_id);
+    let user_id_plain = format!("user:{}", normalized_user_id);
+    let user_id_quoted = format!("user:`{}`", normalized_user_id);
+
+    let role_check_sql = r#"
+        SELECT count() as count
+        FROM user_role
+        WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+          AND role_id IN (SELECT VALUE id FROM role WHERE name = 'admin')
+        GROUP ALL
+    "#;
+
+    let mut role_check = db
+        .raw_query(
+            "admin_login_role_check",
+            role_check_sql,
+            json!({
+                "user_id_bracketed": user_id_bracketed,
+                "user_id_plain": user_id_plain,
+                "user_id_quoted": user_id_quoted,
+            }),
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to verify admin role: {}", e)))?;
+
+    let role_rows: Vec<serde_json::Value> = role_check
+        .take(0)
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse admin role check: {}", e)))?;
+
+    let has_admin_role = role_rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(|value| value.as_u64())
+        .unwrap_or(0)
+        > 0;
+
+    if has_admin_role {
+        return Ok(true);
+    }
+
+    let rbac_service = RBACService::new(db);
+    for permission in ["users.read", "roles.read", "security.read", "audit.read"] {
+        if rbac_service
+            .check_user_permission(user_id, permission)
+            .await
+            .unwrap_or(false)
+        {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
 }
 
 // 注册处理函数
@@ -333,6 +391,113 @@ async fn login(
         }
     });
     
+    Ok(Json(response))
+}
+
+async fn admin_login(
+    State(db): State<Arc<Database>>,
+    Extension(config): Extension<Config>,
+    Extension(app_state): Extension<Arc<AppState>>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Json(req): Json<LoginRequest>,
+) -> std::result::Result<Json<AuthResponse>, (StatusCode, Json<serde_json::Value>)> {
+    let client_ip = get_client_ip(&addr, &headers);
+    check_rate_limit_for_request(&app_state.rate_limiter, &client_ip, "/api/auth/admin/login").await?;
+
+    let ip_lockout_result = run_lockout_check_with_reauth(
+        "ip lockout",
+        || app_state.lockout_service.check_ip_lockout(&client_ip),
+        || async { app_state.db.reauth().await },
+    )
+    .await?;
+
+    if ip_lockout_result.is_locked {
+        return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
+            "error": "Account locked",
+            "message": ip_lockout_result.message,
+            "locked_until_seconds": ip_lockout_result.remaining_lockout_seconds
+        }))));
+    }
+
+    let user_lockout_result = run_lockout_check_with_reauth(
+        "user lockout",
+        || app_state.lockout_service.check_user_lockout(&req.email),
+        || async { app_state.db.reauth().await },
+    )
+    .await?;
+
+    if user_lockout_result.is_locked {
+        return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
+            "error": "Account locked",
+            "message": user_lockout_result.message,
+            "locked_until_seconds": user_lockout_result.remaining_lockout_seconds
+        }))));
+    }
+
+    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
+        error!("Failed to create auth service: {:?}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+            "error": "Internal server error",
+            "message": "Service unavailable"
+        })))
+    })?;
+
+    let email = req.email.clone();
+    let response = auth_service.login(req.email.clone(), req.password).await.map_err(|e| {
+        error!("Admin login failed: {:?}", e);
+
+        let should_record_failure = matches!(e, AuthError::InvalidCredentials | AuthError::UserNotFound);
+        if should_record_failure {
+            let lockout_service = app_state.lockout_service.clone();
+            let email = email.clone();
+            let ip = client_ip.clone();
+            tokio::spawn(async move {
+                let _ = lockout_service.record_failed_user_attempt(&email).await;
+                let _ = lockout_service.record_failed_ip_attempt(&ip).await;
+            });
+        }
+
+        let (status, message) = match e {
+            AuthError::InvalidCredentials => (StatusCode::UNAUTHORIZED, "Invalid email or password"),
+            AuthError::EmailNotVerified => (StatusCode::FORBIDDEN, "Email not verified"),
+            AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "Invalid email or password"),
+            AuthError::AccountSuspended => (StatusCode::FORBIDDEN, "Account suspended"),
+            AuthError::AccountInactive => (StatusCode::FORBIDDEN, "Account inactive"),
+            AuthError::AccountDeleted => (StatusCode::FORBIDDEN, "Account deleted"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Admin login failed"),
+        };
+
+        (status, Json(json!({
+            "error": "Authentication failed",
+            "message": message
+        })))
+    })?;
+
+    let admin_allowed = is_admin_console_user(db.clone(), &response.user.id)
+        .await
+        .map_err(|e| {
+            error!("Admin permission check failed after login: {:?}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": "Internal server error",
+                "message": "Failed to verify admin permissions"
+            })))
+        })?;
+
+    if !admin_allowed {
+        return Err((StatusCode::FORBIDDEN, Json(json!({
+            "error": "Forbidden",
+            "message": "Current account does not have admin console access"
+        }))));
+    }
+
+    let lockout_service = app_state.lockout_service.clone();
+    let ip = client_ip.clone();
+    tokio::spawn(async move {
+        let _ = lockout_service.reset_user_attempts(&email).await;
+        let _ = lockout_service.reset_ip_attempts(&ip).await;
+    });
+
     Ok(Json(response))
 }
 
@@ -1068,26 +1233,47 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
         .ok_or_else(|| AuthError::DatabaseError("social_group missing id".to_string()))?;
     tracing::info!("create_social_group_record using normalized group_id={}", group_id);
 
+    let mut set_clauses = vec![
+        "name = $name".to_string(),
+        "avatar = $avatar".to_string(),
+        "group_type = $group_type".to_string(),
+        "level = $level".to_string(),
+        "owner_id = $owner_id".to_string(),
+        "created_at = $created_at".to_string(),
+        "admin_ids = $admin_ids".to_string(),
+        "member_ids = $member_ids".to_string(),
+        "human_member_ids = $human_member_ids".to_string(),
+        "ai_member_ids = $ai_member_ids".to_string(),
+        "member_user_ids = $member_user_ids".to_string(),
+    ];
+
+    if group.announcement.is_some() {
+        set_clauses.push("announcement = $announcement".to_string());
+    }
+    if group.settings.is_some() {
+        set_clauses.push("settings = $settings".to_string());
+    }
+    if group.code.is_some() {
+        set_clauses.push("code = $code".to_string());
+    }
+    if group.description.is_some() {
+        set_clauses.push("description = $description".to_string());
+    }
+    if group.max_humans.is_some() {
+        set_clauses.push("max_humans = $max_humans".to_string());
+    }
+    if group.max_ais.is_some() {
+        set_clauses.push("max_ais = $max_ais".to_string());
+    }
+
+    let sql = format!(
+        "CREATE type::record('social_group', $group_id) SET {}",
+        set_clauses.join(",\n                ")
+    );
+
     db.raw_query(
             "create_social_group_record",
-            "CREATE type::record('social_group', $group_id) SET
-                name = $name,
-                avatar = $avatar,
-                group_type = $group_type,
-                level = $level,
-                owner_id = $owner_id,
-                created_at = $created_at,
-                admin_ids = $admin_ids,
-                member_ids = $member_ids,
-                announcement = $announcement,
-                settings = $settings,
-                code = $code,
-                human_member_ids = $human_member_ids,
-                ai_member_ids = $ai_member_ids,
-                description = $description,
-                max_humans = $max_humans,
-                max_ais = $max_ais,
-                member_user_ids = $member_user_ids",
+            &sql,
             json!({
                 "group_id": group_id,
                 "name": group.name,
@@ -1111,7 +1297,12 @@ async fn create_social_group_record(db: &Database, group: &SocialGroup) -> Resul
         )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create social_group: {}", e)))?;
-    load_group_by_id(db, &group_id).await
+
+    // SurrealDB 3.x currently returns inconsistent results when immediately
+    // reloading a freshly-created social_group by record id. The caller already
+    // has the full intended payload, so return that and let the later hydrate
+    // step reconcile persisted member/thread state.
+    Ok(group.clone())
 }
 
 async fn list_group_threads(
@@ -1253,32 +1444,35 @@ async fn send_group_thread_message(
 
     let now = chrono::Utc::now().to_rfc3339();
     let message_id = Uuid::new_v4().to_string();
-    let reply_to = req.reply_to;
+    let mut set_clauses = vec![
+        "group_id = $group_id".to_string(),
+        "thread_id = $thread_id".to_string(),
+        "sender_id = $sender_id".to_string(),
+        "sender_kind = $sender_kind".to_string(),
+        "message_type = $message_type".to_string(),
+        "content = $content".to_string(),
+        "created_at = $created_at".to_string(),
+    ];
+    let mut bindings = json!({
+        "message_id": message_id,
+        "group_id": group_id,
+        "thread_id": thread_id,
+        "sender_id": current_user_id,
+        "sender_kind": "human",
+        "message_type": "text",
+        "content": content,
+        "created_at": now.clone(),
+    });
+    if let Some(reply_to) = req.reply_to {
+        set_clauses.push("reply_to = $reply_to".to_string());
+        bindings["reply_to"] = json!(reply_to);
+    }
+    let query = format!(
+        "CREATE type::record('group_thread_message', $message_id) SET {} RETURN AFTER",
+        set_clauses.join(",\n                ")
+    );
     let mut result = db
-        .raw_query(
-            "send_group_thread_message",
-            "CREATE type::record('group_thread_message', $message_id) SET
-                group_id = $group_id,
-                thread_id = $thread_id,
-                sender_id = $sender_id,
-                sender_kind = $sender_kind,
-                message_type = $message_type,
-                content = $content,
-                reply_to = $reply_to,
-                created_at = $created_at
-             RETURN AFTER",
-            json!({
-                "message_id": message_id,
-                "group_id": group_id,
-                "thread_id": thread_id,
-                "sender_id": current_user_id,
-                "sender_kind": "human",
-                "message_type": "text",
-                "content": content,
-                "reply_to": reply_to,
-                "created_at": now.clone(),
-            }),
-        )
+        .raw_query("send_group_thread_message", &query, bindings)
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to create group_thread_message: {}", e)))?;
     let messages: Vec<GroupThreadMessage> = result

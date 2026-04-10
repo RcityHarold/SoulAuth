@@ -150,6 +150,32 @@ async fn ensure_social_group_schema(db: &Database) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn ensure_user_membership_schema(db: &Database) -> anyhow::Result<()> {
+    let statements = [
+        "DEFINE FIELD membership_level ON user TYPE string;",
+        "DEFINE FIELD membership_expiry ON user TYPE option<string>;",
+        "UPDATE user SET membership_level = 'FREE' WHERE membership_level = NONE;",
+    ];
+
+    for statement in statements {
+        if let Err(error) = db.query(statement).await {
+            let message = error.to_string();
+            let ignorable = message.contains("already exists")
+                || message.contains("already defined")
+                || message.contains("duplicate");
+            if !ignorable {
+                return Err(anyhow::anyhow!(
+                    "Failed to ensure user membership schema with `{}`: {}",
+                    statement,
+                    message
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // 初始化日志
@@ -186,6 +212,7 @@ async fn main() -> anyhow::Result<()> {
     let db = Database::new(&config).await?;
     db.verify_connection().await?;
     ensure_social_group_schema(&db).await?;
+    ensure_user_membership_schema(&db).await?;
     
     info!("Database connection established. Please ensure database schema is initialized with schema.sql and initial_data.sql");
 

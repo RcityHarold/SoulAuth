@@ -8,8 +8,7 @@ pub struct UserRole {
     pub id: Option<Thing>,
     pub user_id: Thing,
     pub role_id: Thing,
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub assigned_at: DateTime<Utc>,
+    pub assigned_at: i64,
     pub assigned_by: Thing, // 分配者的用户ID
 }
 
@@ -18,8 +17,7 @@ pub struct RolePermission {
     pub id: Option<Thing>,
     pub role_id: Thing,
     pub permission_id: Thing,
-    #[serde(with = "chrono::serde::ts_seconds")]
-    pub granted_at: DateTime<Utc>,
+    pub granted_at: i64,
     pub granted_by: Thing, // 授权者的用户ID
 }
 

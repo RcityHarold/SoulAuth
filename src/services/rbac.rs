@@ -356,12 +356,12 @@ impl RBACService {
             id: None,
             user_id: user_thing,
             role_id,
-            assigned_at: Utc::now(),
+            assigned_at: Utc::now().timestamp(),
             assigned_by: assigned_by_thing.clone(),
         };
 
         let query = "CREATE user_role CONTENT $user_role";
-        self.db.client
+        let mut create_response = self.db.client
             .query(query)
             .bind(("user_role", user_role.clone()))
             .await
@@ -369,6 +369,15 @@ impl RBACService {
                 error!("Failed to assign role to user: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
+
+        let created: Vec<UserRole> = create_response.take(0).map_err(|e| {
+            error!("Failed to parse created user role: {}", e);
+            AuthError::DatabaseError(e.to_string())
+        })?;
+
+        if created.is_empty() {
+            return Err(AuthError::DatabaseError("Failed to persist user role".to_string()));
+        }
 
         info!("Role '{}' assigned to user '{}' by '{}'", role_name, user_id, assigned_by.email);
         Ok(())
@@ -580,12 +589,12 @@ impl RBACService {
             id: None,
             role_id,
             permission_id,
-            granted_at: Utc::now(),
+            granted_at: Utc::now().timestamp(),
             granted_by: granted_by_thing.clone(),
         };
 
         let query = "CREATE role_permission CONTENT $role_permission";
-        self.db.client
+        let mut create_response = self.db.client
             .query(query)
             .bind(("role_permission", role_permission.clone()))
             .await
@@ -593,6 +602,15 @@ impl RBACService {
                 error!("Failed to assign permission to role: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
+
+        let created: Vec<RolePermission> = create_response.take(0).map_err(|e| {
+            error!("Failed to parse created role permission: {}", e);
+            AuthError::DatabaseError(e.to_string())
+        })?;
+
+        if created.is_empty() {
+            return Err(AuthError::DatabaseError("Failed to persist role permission".to_string()));
+        }
 
         info!("Permission '{}' assigned to role '{}' by '{}'", permission_name, role_name, granted_by.email);
         Ok(())
