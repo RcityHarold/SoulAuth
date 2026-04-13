@@ -33,6 +33,10 @@ impl AccountLockoutService {
         })
     }
 
+    pub fn max_attempts(&self) -> u32 {
+        self.config.max_attempts
+    }
+
     /// 检查账户是否被锁定（用户维度）
     pub async fn check_user_lockout(&self, user_id: &str) -> Result<LockoutCheckResult> {
         if !self.config.enable_user_lockout {

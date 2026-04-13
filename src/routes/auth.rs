@@ -23,6 +23,7 @@ use crate::{
         UpdateGroupSettingsRequest,
     },
     models::group_member::SocialGroupMember,
+    models::account_lockout::LockoutCheckResult,
     models::user::{CreateUserRequest, LoginRequest, AuthResponse, User, UserResponse, InitializePasswordRequest},
     models::password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
     models::session::{LogoutRequest, SessionInfo},
@@ -87,42 +88,41 @@ fn get_client_ip(addr: &SocketAddr, headers: &HeaderMap) -> String {
     addr.ip().to_string()
 }
 
-fn lockout_check_unavailable(scope: &str) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        Json(json!({
-            "error": "Authentication service unavailable",
-            "message": format!("{} lockout check unavailable", scope),
-        })),
-    )
-}
-
-async fn run_lockout_check_with_reauth<T, C, CFut, R, RFut>(
+async fn run_lockout_check_with_reauth<C, CFut, R, RFut>(
     scope: &str,
+    fallback_remaining_attempts: u32,
     check: C,
     reauth: R,
-) -> std::result::Result<T, (StatusCode, Json<serde_json::Value>)>
+) -> LockoutCheckResult
 where
     C: Fn() -> CFut,
-    CFut: Future<Output = Result<T>>,
+    CFut: Future<Output = Result<LockoutCheckResult>>,
     R: Fn() -> RFut,
     RFut: Future<Output = Result<()>>,
 {
     match check().await {
-        Ok(result) => Ok(result),
+        Ok(result) => result,
         Err(e) => {
             error!("Failed to check {} lockout: {:?}", scope, e);
             match reauth().await {
                 Ok(_) => match check().await {
-                    Ok(result) => Ok(result),
+                    Ok(result) => result,
                     Err(retry_err) => {
-                        error!("{} lockout check still failed after reauth: {:?}", scope, retry_err);
-                        Err(lockout_check_unavailable(scope))
+                        error!(
+                            "{} lockout check still failed after reauth, degrading open: {:?}",
+                            scope,
+                            retry_err
+                        );
+                        LockoutCheckResult::normal(fallback_remaining_attempts)
                     }
                 },
                 Err(reauth_err) => {
-                    error!("{} lockout check failed while reauthing: {:?}", scope, reauth_err);
-                    Err(lockout_check_unavailable(scope))
+                    error!(
+                        "{} lockout check failed while reauthing, degrading open: {:?}",
+                        scope,
+                        reauth_err
+                    );
+                    LockoutCheckResult::normal(fallback_remaining_attempts)
                 }
             }
         }
@@ -300,10 +300,11 @@ async fn login(
     // 检查IP地址锁定
     let ip_lockout_result = run_lockout_check_with_reauth(
         "ip lockout",
+        app_state.lockout_service.max_attempts(),
         || app_state.lockout_service.check_ip_lockout(&client_ip),
         || async { app_state.db.reauth().await },
     )
-    .await?;
+    .await;
     
     if ip_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -317,10 +318,11 @@ async fn login(
     // 注意：为了防止用户枚举攻击，我们需要小心处理这个检查
     let user_lockout_result = run_lockout_check_with_reauth(
         "user lockout",
+        app_state.lockout_service.max_attempts(),
         || app_state.lockout_service.check_user_lockout(&req.email),
         || async { app_state.db.reauth().await },
     )
-    .await?;
+    .await;
     
     if user_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -407,10 +409,11 @@ async fn admin_login(
 
     let ip_lockout_result = run_lockout_check_with_reauth(
         "ip lockout",
+        app_state.lockout_service.max_attempts(),
         || app_state.lockout_service.check_ip_lockout(&client_ip),
         || async { app_state.db.reauth().await },
     )
-    .await?;
+    .await;
 
     if ip_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
@@ -422,10 +425,11 @@ async fn admin_login(
 
     let user_lockout_result = run_lockout_check_with_reauth(
         "user lockout",
+        app_state.lockout_service.max_attempts(),
         || app_state.lockout_service.check_user_lockout(&req.email),
         || async { app_state.db.reauth().await },
     )
-    .await?;
+    .await;
 
     if user_lockout_result.is_locked {
         return Err((StatusCode::TOO_MANY_REQUESTS, Json(json!({
