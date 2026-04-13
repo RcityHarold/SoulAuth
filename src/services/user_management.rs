@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::Utc;
+use serde_json::json;
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -590,19 +591,18 @@ impl UserManagementService {
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<UserResponse, AuthError> {
         let user_thing = crate::utils::record_id::user_record_id(user_id);
 
-        let mut response = self.db.client
-            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
-            .bind(("user_id", user_thing))
+        let users: Vec<User> = self
+            .db
+            .query_take0_vec(
+                "user_management_get_user_by_id",
+                "SELECT * FROM user WHERE id = $user_id LIMIT 1",
+                json!({ "user_id": user_thing }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to get user by id: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
-
-        let users: Vec<User> = response.take(0).map_err(|e| {
-            error!("Failed to parse user by id: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
 
         let user = users.into_iter().next()
             .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
@@ -649,34 +649,26 @@ impl UserManagementService {
             offset
         );
 
-        let mut response = self.db.client
-            .query(&query)
+        let users: Vec<User> = self
+            .db
+            .query_take0_vec("user_management_list_users", &query, json!({}))
             .await
             .map_err(|e| {
                 error!("Failed to list users: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let users: Vec<User> = response.take(0).map_err(|e| {
-            error!("Failed to parse users: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
-
         // 获取总数
         let count_query = format!("SELECT count() as total FROM user {} GROUP ALL", where_clause);
         
-        let mut count_response = self.db.client
-            .query(&count_query)
+        let count_result: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec("user_management_count_users", &count_query, json!({}))
             .await
             .map_err(|e| {
                 error!("Failed to count users: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
-
-        let count_result: Vec<serde_json::Value> = count_response.take(0).map_err(|e| {
-            error!("Failed to parse count: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
 
         let total = count_result.first()
             .and_then(|c| c.get("total"))
