@@ -14,6 +14,7 @@ use axum::{
 };
 use jsonwebtoken::{decode, DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Claims {
@@ -60,15 +61,9 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
     let claims = decode_token_claims(token)?;
 
     let query = "SELECT * FROM user WHERE id = $user_id";
-    let mut result = db
-        .client
-        .query(query)
-        .bind(("user_id", claims.sub.clone()))
+    let user: Option<User> = db
+        .query_take0_option("get_user_from_token", query, json!({ "user_id": claims.sub }))
         .await
-        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-
-    let user: Option<User> = result
-        .take(0)
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
     user.ok_or(AuthError::UserNotFound)

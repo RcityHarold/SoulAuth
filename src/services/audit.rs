@@ -1,4 +1,5 @@
 use chrono::{DateTime, Duration, Utc};
+use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
 use tracing::{error, info, warn};
@@ -462,49 +463,58 @@ impl AuditService {
 
     // Helper methods
     async fn execute_count_query(&self, query: &str, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        let mut result = self.db.client.query(query)
-            .bind(("start_time", start_time.timestamp()))
+        let count_result: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "audit_execute_count_query",
+                query,
+                json!({ "start_time": start_time.timestamp() }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to execute count query: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let count: Option<i64> = result.take("count").map_err(|e| {
-            error!("Failed to extract count from query result: {}", e);
-            AuthError::DatabaseError("Query execution failed".to_string())
-        })?;
-
-        Ok(count.unwrap_or(0))
+        Ok(count_result
+            .first()
+            .and_then(|c| c.get("count"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0))
     }
 
     async fn get_total_users(&self) -> ApiResult<i64> {
         let query = "SELECT count() as count FROM user WHERE account_status != 'Deleted' GROUP ALL";
-        let mut result = self.db.client.query(query).await
+        let count_result: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec_no_bind("audit_get_total_users", query)
+            .await
             .map_err(|e| {
                 error!("Failed to get total users: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let count: Option<i64> = result.take("count").map_err(|e| {
-            error!("Failed to extract total users count: {}", e);
-            AuthError::DatabaseError("Query execution failed".to_string())
-        })?;
-
-        Ok(count.unwrap_or(0))
+        Ok(count_result
+            .first()
+            .and_then(|c| c.get("count"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0))
     }
 
     async fn get_active_users_count(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
         let query = "SELECT type::string(user_id) as user_id FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL GROUP BY user_id";
-        let mut result = self.db.client.query(query)
-            .bind(("start_time", start_time.timestamp()))
+        let rows: Vec<Value> = self
+            .db
+            .query_take0_vec(
+                "audit_get_active_users_count",
+                query,
+                json!({ "start_time": start_time.timestamp() }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to get active users count: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
-
-        let rows: Vec<Value> = result.take(0).unwrap_or_default();
         Ok(rows.len() as i64)
     }
 

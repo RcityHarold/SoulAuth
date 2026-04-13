@@ -21,6 +21,7 @@ use argon2::{
 use chrono::{DateTime, Duration, Utc};
 use jsonwebtoken::{encode, EncodingKey, Header};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use uuid::Uuid;
 use std::sync::Arc;
 use surrealdb::types::RecordId as Thing;
@@ -577,16 +578,15 @@ impl AuthService {
 
     pub async fn get_user_by_subject_id(&self, subject_id: &str) -> Result<Option<User>> {
         let query = "SELECT * FROM user WHERE subject_id = type::thing($subject_id) LIMIT 1";
-        let mut result = self
+        let users: Vec<User> = self
             .db
-            .query(query)
-            .bind(("subject_id", subject_id.to_string()))
+            .query_take0_vec(
+                "get_user_by_subject_id",
+                query,
+                json!({ "subject_id": subject_id }),
+            )
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to query user by subject_id: {}", e)))?;
-
-        let users: Vec<User> = result
-            .take(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse user by subject_id: {}", e)))?;
 
         Ok(users.into_iter().next())
     }

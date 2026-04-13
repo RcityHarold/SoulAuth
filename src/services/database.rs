@@ -1,4 +1,12 @@
-use std::{env, fmt::Debug};
+use std::{
+    env,
+    fmt::Debug,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+    },
+    time::{SystemTime, UNIX_EPOCH},
+};
 use std::time::Duration;
 use serde_json::Value as JsonValue;
 use surrealdb::engine::remote::http::{Client, Http};
@@ -19,9 +27,26 @@ pub struct Database {
     database_pass: String,
     database_namespace: String,
     database_name: String,
+    prefer_fresh_until_epoch: Arc<AtomicU64>,
 }
 
 impl Database {
+    fn unix_now_secs() -> u64 {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0)
+    }
+
+    fn should_prefer_fresh(&self) -> bool {
+        Self::unix_now_secs() < self.prefer_fresh_until_epoch.load(Ordering::Relaxed)
+    }
+
+    fn mark_prefer_fresh_for(&self, seconds: u64) {
+        self.prefer_fresh_until_epoch
+            .store(Self::unix_now_secs() + seconds, Ordering::Relaxed);
+    }
+
     fn endpoint_with_scheme(raw: &str) -> String {
         let ep = raw.trim().trim_end_matches('/');
         if ep.starts_with("http://") || ep.starts_with("https://") {
@@ -91,7 +116,12 @@ impl Database {
 
     fn is_unauthorized_error<E: std::fmt::Display>(err: &E) -> bool {
         let msg = err.to_string();
-        msg.contains("401") || msg.contains("Unauthorized")
+        msg.contains("401")
+            || msg.contains("Unauthorized")
+            || msg.contains("Failed to authenticate")
+            || msg.contains("native signin failed")
+            || msg.contains("rpc authenticate(token) failed")
+            || msg.contains("rpc signin failed")
     }
 
     pub async fn fresh_client(&self) -> Result<Surreal<Client>> {
@@ -258,9 +288,9 @@ impl Database {
                 // SurrealDB may return 401 when the auth token expires.
                 let msg = format!("{e}");
                 if msg.contains("401") || msg.contains("Unauthorized") {
-                    warn!("{op_name} failed with 401, reauth and retry once");
-                    self.reauth().await?;
-                    f().await
+                    self.mark_prefer_fresh_for(300);
+                    warn!("{op_name} failed with 401; caller should retry on fresh client");
+                    Err(e)
                 } else {
                     Err(e)
                 }
@@ -346,12 +376,23 @@ impl Database {
             database_pass: config.database_pass.clone(),
             database_namespace: config.database_namespace.clone(),
             database_name: config.database_name.clone(),
+            prefer_fresh_until_epoch: Arc::new(AtomicU64::new(0)),
         })
     }
 
     /// 验证数据库连接
     /// 注意：数据库schema应该通过schema.sql文件手动创建
     pub async fn verify_connection(&self) -> Result<()> {
+        if self.should_prefer_fresh() {
+            let fresh = self.fresh_client().await?;
+            fresh
+                .query("INFO FOR DB")
+                .await
+                .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
+            debug!("Database connection verified successfully via fresh client");
+            return Ok(());
+        }
+
         self.retry_on_unauthorized("verify_connection", || async {
             // 使用 INFO 查询验证数据库连接
             let query = "INFO FOR DB";
@@ -372,6 +413,16 @@ impl Database {
         T: serde::Serialize + serde::de::DeserializeOwned + Clone + Debug + SurrealValue + 'static,
     {
         debug!("Creating record in table {}: {:?}", table, record);
+
+        if self.should_prefer_fresh() {
+            let fresh = self.fresh_client().await?;
+            let created: Option<T> = fresh
+                .create(table)
+                .content(record.clone())
+                .await
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to create record: {}", e)))?;
+            return created.ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()));
+        }
 
         let created: Option<T> = match self.client.create(table).content(record.clone()).await {
             Ok(created) => created,
@@ -411,6 +462,23 @@ impl Database {
             debug!("执行查询: {}", query);
             debug!("查询参数: value = {:?}", rid);
 
+            if self.should_prefer_fresh() {
+                let fresh = self.fresh_client().await?;
+                let mut result = fresh
+                    .query(&query)
+                    .bind(("value", rid))
+                    .await
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
+                    })?;
+                let records: Vec<T> = result
+                    .take(0)
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
+                    })?;
+                return Ok(records.into_iter().next());
+            }
+
             match self.retry_on_unauthorized("find_record_by_field(id)", || async {
                 let mut result = self
                     .client
@@ -435,7 +503,7 @@ impl Database {
             .await {
                 Ok(result) => Ok(result),
                 Err(err) if Self::is_unauthorized_error(&err) => {
-                    warn!("find_record_by_field(id) still unauthorized after reauth, retrying on fresh client");
+                    warn!("find_record_by_field(id) retrying on fresh client");
                     let fresh = self.fresh_client().await?;
                     let mut result = fresh
                         .query(&query)
@@ -458,6 +526,19 @@ impl Database {
             debug!("执行查询: {}", query);
             debug!("查询参数: value = {}", value);
 
+            if self.should_prefer_fresh() {
+                let fresh = self.fresh_client().await?;
+                let mut result = fresh
+                    .query(&query)
+                    .bind(("value", value.to_string()))
+                    .await
+                    .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
+                let records: Vec<T> = result
+                    .take(0)
+                    .map_err(|e| AuthError::DatabaseError(format!("Failed to parse records: {e}")))?;
+                return Ok(records.into_iter().next());
+            }
+
             match self.retry_on_unauthorized("find_record_by_field", || async {
                 let mut result = self
                     .client
@@ -478,7 +559,7 @@ impl Database {
             .await {
                 Ok(result) => Ok(result),
                 Err(err) if Self::is_unauthorized_error(&err) => {
-                    warn!("find_record_by_field still unauthorized after reauth, retrying on fresh client");
+                    warn!("find_record_by_field retrying on fresh client");
                     let fresh = self.fresh_client().await?;
                     let mut result = fresh
                         .query(&query)
@@ -503,6 +584,21 @@ impl Database {
             "Updating record in table {} with id {}: {:?}",
             table, id, record
         );
+
+        if self.should_prefer_fresh() {
+            let fresh = self.fresh_client().await?;
+            let updated = if let Some((tb, key_raw)) = id.split_once(':') {
+                let key = key_raw.trim().trim_matches('⟨').trim_matches('⟩');
+                let rid = RecordId::new(tb, key);
+                fresh.update(rid).content(record.clone()).await
+            } else {
+                let rid = RecordId::new(table, id);
+                fresh.update(rid).content(record.clone()).await
+            }
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?;
+
+            return updated.ok_or_else(|| AuthError::DatabaseError("Record not found".into()));
+        }
 
         let updated = match if let Some((tb, key_raw)) = id.split_once(':') {
             let key = key_raw.trim().trim_matches('⟨').trim_matches('⟩');
@@ -603,6 +699,16 @@ impl Database {
         sql: &str,
         bindings: JsonValue,
     ) -> Result<surrealdb::IndexedResults> {
+        if self.should_prefer_fresh() {
+            let fresh = self.fresh_client().await?;
+            return fresh
+                .query(sql)
+                .bind(bindings)
+                .await
+                .and_then(|response| response.check())
+                .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")));
+        }
+
         let bindings_for_retry = bindings.clone();
         match self
             .retry_on_unauthorized(op, || {
@@ -620,7 +726,7 @@ impl Database {
         {
             Ok(response) => Ok(response),
             Err(err) if Self::is_unauthorized_error(&err) => {
-                warn!("{op} still unauthorized after reauth, retrying on fresh client");
+                warn!("{op} retrying on fresh client");
                 let fresh = self.fresh_client().await?;
                 fresh
                     .query(sql)
@@ -631,6 +737,68 @@ impl Database {
             }
             Err(err) => Err(err),
         }
+    }
+
+    pub async fn raw_query_no_bind(
+        &self,
+        op: &str,
+        sql: &str,
+    ) -> Result<surrealdb::IndexedResults> {
+        self.raw_query(op, sql, JsonValue::Object(Default::default())).await
+    }
+
+    pub async fn query_take0_vec<T>(
+        &self,
+        op: &str,
+        sql: &str,
+        bindings: JsonValue,
+    ) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+    {
+        let mut response = self.raw_query(op, sql, bindings).await?;
+        response
+            .take::<Vec<T>>(0usize)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse query result: {e}")))
+    }
+
+    pub async fn query_take0_option<T>(
+        &self,
+        op: &str,
+        sql: &str,
+        bindings: JsonValue,
+    ) -> Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+    {
+        let mut response = self.raw_query(op, sql, bindings).await?;
+        response
+            .take::<Option<T>>(0usize)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse query result: {e}")))
+    }
+
+    pub async fn query_take0_vec_no_bind<T>(
+        &self,
+        op: &str,
+        sql: &str,
+    ) -> Result<Vec<T>>
+    where
+        T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+    {
+        self.query_take0_vec(op, sql, JsonValue::Object(Default::default()))
+            .await
+    }
+
+    pub async fn query_take0_option_no_bind<T>(
+        &self,
+        op: &str,
+        sql: &str,
+    ) -> Result<Option<T>>
+    where
+        T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
+    {
+        self.query_take0_option(op, sql, JsonValue::Object(Default::default()))
+            .await
     }
 
     /// 公开的查询方法，供其他服务使用  

@@ -242,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
     let cleanup_limiter = rate_limiter.clone();
     let cleanup_lockout = lockout_service.clone();
     let cleanup_sso = sso_session_service.clone();
+    let keepalive_db = shared_db.clone();
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(3600)); // 每小时清理一次
         loop {
@@ -249,6 +250,16 @@ async fn main() -> anyhow::Result<()> {
             cleanup_limiter.cleanup_expired_records().await;
             let _ = cleanup_lockout.cleanup_expired_lockouts().await;
             let _ = cleanup_sso.cleanup_expired_sessions().await;
+        }
+    });
+
+    tokio::spawn(async move {
+        let mut interval = interval(Duration::from_secs(60)); // 每分钟保活一次，避免 Surreal HTTP 鉴权态空闲过期
+        loop {
+            interval.tick().await;
+            if let Err(error) = keepalive_db.verify_connection().await {
+                tracing::warn!("Database keepalive failed: {}", error);
+            }
         }
     });
 

@@ -1,6 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
+use serde_json::json;
 use tracing::{error, info, warn};
 use surrealdb_types::SurrealValue;
 
@@ -659,16 +660,21 @@ impl RBACService {
             GROUP ALL
         "#;
 
-        let mut response = self.db.client
-            .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
-            .bind(("user_id_quoted", user_id_quoted))
-            .bind(("permission_name", permission_name.to_owned()))
+        let mut response = self.db
+            .raw_query(
+                "check_user_permission",
+                query,
+                json!({
+                    "user_id_bracketed": user_id_bracketed,
+                    "user_id_plain": user_id_plain,
+                    "user_id_quoted": user_id_quoted,
+                    "permission_name": permission_name,
+                }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to check user permission: {}", e);
-                AuthError::DatabaseError(e.to_string())
+                e
             })?;
 
         let count_result: Vec<serde_json::Value> = response.take(0).map_err(|e| {
@@ -700,16 +706,21 @@ impl RBACService {
             GROUP ALL
         "#;
 
-        let mut response = self.db.client
-            .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
-            .bind(("user_id_quoted", user_id_quoted))
-            .bind(("role_name", role_name.to_owned()))
+        let mut response = self.db
+            .raw_query(
+                "check_user_role",
+                query,
+                json!({
+                    "user_id_bracketed": user_id_bracketed,
+                    "user_id_plain": user_id_plain,
+                    "user_id_quoted": user_id_quoted,
+                    "role_name": role_name,
+                }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to check user role: {}", e);
-                AuthError::DatabaseError(e.to_string())
+                e
             })?;
 
         let count_result: Vec<serde_json::Value> = response.take(0).map_err(|e| {
