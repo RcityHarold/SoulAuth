@@ -310,9 +310,13 @@ async fn validate_authorize_request(
     "#;
 
     let mut result = db
-        .client
-        .query(query)
-        .bind(("client_id", request.client_id.clone()))
+        .raw_query(
+            "validate_oidc_client",
+            query,
+            json!({
+                "client_id": request.client_id,
+            }),
+        )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to validate OIDC client: {e}")))?;
 
@@ -363,12 +367,34 @@ async fn resolve_existing_user_id(
     db: &Arc<Database>,
     user_id: &str,
 ) -> Result<String, AuthError> {
-    let mut result = db
+    let query = "SELECT * FROM user WHERE id = $user_id LIMIT 1";
+    let mut result = match db
         .client
-        .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+        .query(query)
         .bind(("user_id", user_record_id(user_id)))
         .await
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to resolve session user: {e}")))?;
+    {
+        Ok(result) => result,
+        Err(err) => {
+            let msg = err.to_string();
+            if msg.contains("401") || msg.contains("Unauthorized") {
+                let fresh = db.fresh_client().await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to refresh database client: {e}"))
+                })?;
+                fresh
+                    .query(query)
+                    .bind(("user_id", user_record_id(user_id)))
+                    .await
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to resolve session user: {e}"))
+                    })?
+            } else {
+                return Err(AuthError::DatabaseError(format!(
+                    "Failed to resolve session user: {err}"
+                )));
+            }
+        }
+    };
 
     let users: Vec<User> = result
         .take(0)

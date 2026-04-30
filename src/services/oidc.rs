@@ -490,12 +490,11 @@ impl OidcService {
             LIMIT 1
         "#;
 
-        let mut result = self
-            .db
-            .client
-            .query(query)
-            .bind(("client_id", client_id.to_owned()))
-            .await?;
+        let mut result = self.db.raw_query(
+            "oidc_get_client",
+            query,
+            serde_json::json!({ "client_id": client_id }),
+        ).await?;
 
         let clients: Vec<OidcClient> = result.take(0)?;
         clients
@@ -505,12 +504,28 @@ impl OidcService {
     }
 
     async fn get_user_by_id(&self, user_id: &str) -> Result<User> {
-        let mut result = self
+        let query = "SELECT * FROM user WHERE id = $user_id LIMIT 1";
+        let mut result = match self
             .db
             .client
-            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            .query(query)
             .bind(("user_id", user_record_id(user_id)))
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("401") || msg.contains("Unauthorized") {
+                    let fresh = self.db.fresh_client().await?;
+                    fresh
+                        .query(query)
+                        .bind(("user_id", user_record_id(user_id)))
+                        .await?
+                } else {
+                    return Err(err.into());
+                }
+            }
+        };
 
         let users: Vec<User> = result.take(0)?;
         users
@@ -537,8 +552,7 @@ impl OidcService {
             }
         "#;
 
-        self.db
-            .client
+        match self.db.client
             .query(query)
             .bind(("code", code.code.clone()))
             .bind(("client_id", code.client_id.clone()))
@@ -552,7 +566,33 @@ impl OidcService {
             .bind(("used", code.used))
             .bind(("expires_at", code.expires_at))
             .bind(("created_at", code.created_at))
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("401") || msg.contains("Unauthorized") {
+                    let fresh = self.db.fresh_client().await?;
+                    fresh
+                        .query(query)
+                        .bind(("code", code.code.clone()))
+                        .bind(("client_id", code.client_id.clone()))
+                        .bind(("user_id", user_record_id(&code.user_id)))
+                        .bind(("redirect_uri", code.redirect_uri.clone()))
+                        .bind(("scope", code.scope.clone()))
+                        .bind(("state", code.state.clone()))
+                        .bind(("nonce", code.nonce.clone()))
+                        .bind(("code_challenge", code.code_challenge.clone()))
+                        .bind(("code_challenge_method", code.code_challenge_method.clone()))
+                        .bind(("used", code.used))
+                        .bind(("expires_at", code.expires_at))
+                        .bind(("created_at", code.created_at))
+                        .await?;
+                } else {
+                    return Err(err.into());
+                }
+            }
+        }
 
         Ok(())
     }
@@ -578,12 +618,11 @@ impl OidcService {
             LIMIT 1
         "#;
 
-        let mut result = self
-            .db
-            .client
-            .query(query)
-            .bind(("code", code.to_owned()))
-            .await?;
+        let mut result = self.db.raw_query(
+            "oidc_get_authorization_code",
+            query,
+            serde_json::json!({ "code": code }),
+        ).await?;
 
         let codes: Vec<serde_json::Value> = result.take(0)?;
         codes
@@ -596,14 +635,13 @@ impl OidcService {
     }
 
     async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
-        let mut result = self
-            .db
-            .client
-            .query(
-                "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN AFTER",
-            )
-            .bind(("code", code.code.clone()))
-            .await?;
+        let query =
+            "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN AFTER";
+        let mut result = self.db.raw_query(
+            "oidc_update_authorization_code",
+            query,
+            serde_json::json!({ "code": code.code }),
+        ).await?;
 
         let updated_codes: Vec<serde_json::Value> = result.take(0)?;
         if updated_codes.len() == 1 {
@@ -626,8 +664,7 @@ impl OidcService {
             }
         "#;
 
-        self.db
-            .client
+        match self.db.client
             .query(query)
             .bind(("token", token.token.clone()))
             .bind(("token_type", token.token_type.clone()))
@@ -636,7 +673,28 @@ impl OidcService {
             .bind(("scope", token.scope.clone()))
             .bind(("expires_at", token.expires_at))
             .bind(("created_at", token.created_at))
-            .await?;
+            .await
+        {
+            Ok(_) => {}
+            Err(err) => {
+                let msg = err.to_string();
+                if msg.contains("401") || msg.contains("Unauthorized") {
+                    let fresh = self.db.fresh_client().await?;
+                    fresh
+                        .query(query)
+                        .bind(("token", token.token.clone()))
+                        .bind(("token_type", token.token_type.clone()))
+                        .bind(("client_id", token.client_id.clone()))
+                        .bind(("user_id", user_record_id(&token.user_id)))
+                        .bind(("scope", token.scope.clone()))
+                        .bind(("expires_at", token.expires_at))
+                        .bind(("created_at", token.created_at))
+                        .await?;
+                } else {
+                    return Err(err.into());
+                }
+            }
+        }
 
         Ok(())
     }
@@ -657,12 +715,11 @@ impl OidcService {
             LIMIT 1
         "#;
 
-        let mut result = self
-            .db
-            .client
-            .query(query)
-            .bind(("token", token.to_owned()))
-            .await?;
+        let mut result = self.db.raw_query(
+            "oidc_get_access_token",
+            query,
+            serde_json::json!({ "token": token }),
+        ).await?;
 
         let tokens: Vec<serde_json::Value> = result.take(0)?;
         tokens
@@ -675,11 +732,11 @@ impl OidcService {
     }
 
     async fn revoke_access_token(&self, token: &str) -> Result<()> {
-        self.db
-            .client
-            .query("DELETE oidc_access_token WHERE token = $token")
-            .bind(("token", token.to_owned()))
-            .await?;
+        self.db.raw_query(
+            "oidc_revoke_access_token",
+            "DELETE oidc_access_token WHERE token = $token",
+            serde_json::json!({ "token": token }),
+        ).await?;
 
         Ok(())
     }
