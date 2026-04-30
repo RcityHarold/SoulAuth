@@ -269,9 +269,12 @@ async fn authorize(
     }
 
     // 用户未登录，保存原始 OIDC 请求并重定向到 Google 登录
-    let return_token = create_oidc_return_token(&original_uri.to_string(), &config.jwt_secret)?;
+    let auth_base = config.app_url.trim_end_matches('/');
+    let return_url = format!("{auth_base}{original_uri}");
+    let return_token = create_oidc_return_token(&return_url, &config.jwt_secret)?;
     let return_cookie = build_cookie(OIDC_RETURN_COOKIE, &return_token, 600);
-    let mut response = Redirect::to("/api/auth/login/google").into_response();
+    let google_login_url = format!("{auth_base}/api/auth/login/google");
+    let mut response = Redirect::to(&google_login_url).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
         HeaderValue::from_str(&return_cookie)
