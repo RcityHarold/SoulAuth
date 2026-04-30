@@ -320,8 +320,13 @@ async fn validate_authorize_request(
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to validate OIDC client: {e}")))?;
 
-    let clients: Vec<OidcClient> = result
+    let clients: Vec<serde_json::Value> = result
         .take(0)
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse OIDC client: {e}")))?;
+    let clients: Vec<OidcClient> = clients
+        .into_iter()
+        .map(serde_json::from_value)
+        .collect::<Result<Vec<_>, _>>()
         .map_err(|e| AuthError::DatabaseError(format!("Failed to parse OIDC client: {e}")))?;
     let client = clients
         .into_iter()

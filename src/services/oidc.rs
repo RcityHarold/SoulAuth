@@ -496,7 +496,11 @@ impl OidcService {
             serde_json::json!({ "client_id": client_id }),
         ).await?;
 
-        let clients: Vec<OidcClient> = result.take(0)?;
+        let clients: Vec<serde_json::Value> = result.take(0)?;
+        let clients: Vec<OidcClient> = clients
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
         clients
             .into_iter()
             .next()
