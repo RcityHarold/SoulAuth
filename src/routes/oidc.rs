@@ -2,15 +2,17 @@ use std::sync::Arc;
 use std::collections::HashMap;
 
 use axum::{
-    extract::{Extension, Query, Form},
-    http::{HeaderMap, header},
-    response::{Redirect, Json},
+    extract::{Extension, Query, Form, OriginalUri},
+    http::{HeaderMap, header, HeaderValue},
+    response::{Redirect, Json, IntoResponse, Response},
     routing::{get, post},
     Router,
 };
 use serde::{Deserialize};
 use serde_json::json;
 use base64::{Engine as _, engine::general_purpose};
+use chrono::Utc;
+use jsonwebtoken::{decode, encode, DecodingKey, EncodingKey, Header, Validation};
 
 use crate::{
     config::Config,
@@ -24,6 +26,79 @@ use crate::{
     error::AuthError,
     utils::jwt::get_user_from_token,
 };
+
+pub(crate) const SOULAUTH_SESSION_COOKIE: &str = "soulauth_session";
+pub(crate) const OIDC_RETURN_COOKIE: &str = "soulauth_oidc_return";
+pub(crate) const SESSION_TTL_SECONDS: i64 = 86400;
+
+#[derive(Debug, serde::Serialize, Deserialize)]
+struct BrowserSessionClaims {
+    sub: String,
+    exp: i64,
+    iat: i64,
+}
+
+pub(crate) fn build_cookie(name: &str, value: &str, max_age_seconds: i64) -> String {
+    format!(
+        "{}={}; Path=/; Max-Age={}; HttpOnly; Secure; SameSite=Lax",
+        name,
+        urlencoding::encode(value),
+        max_age_seconds
+    )
+}
+
+pub(crate) fn build_expired_cookie(name: &str) -> String {
+    build_cookie(name, "", 0)
+}
+
+pub(crate) fn create_browser_session_token(
+    user_id: &str,
+    jwt_secret: &str,
+) -> Result<String, AuthError> {
+    let now = Utc::now().timestamp();
+    let claims = BrowserSessionClaims {
+        sub: user_id.to_string(),
+        exp: now + SESSION_TTL_SECONDS,
+        iat: now,
+    };
+
+    encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(jwt_secret.as_bytes()),
+    )
+    .map_err(|e| AuthError::TokenError(e.to_string()))
+}
+
+pub(crate) fn decode_browser_session_token(
+    token: &str,
+    jwt_secret: &str,
+) -> Result<String, AuthError> {
+    let token_data = decode::<BrowserSessionClaims>(
+        token,
+        &DecodingKey::from_secret(jwt_secret.as_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| AuthError::InvalidToken)?;
+
+    Ok(token_data.claims.sub)
+}
+
+pub(crate) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|cookie_header| cookie_header.split(';'))
+        .filter_map(|cookie| cookie.trim().split_once('='))
+        .find_map(|(cookie_name, cookie_value)| {
+            if cookie_name == name {
+                urlencoding::decode(cookie_value).ok().map(|value| value.into_owned())
+            } else {
+                None
+            }
+        })
+}
 
 pub fn oidc_routes() -> Router {
     Router::new()
@@ -58,10 +133,12 @@ async fn jwks(
 // 授权端点
 async fn authorize(
     Query(params): Query<HashMap<String, String>>,
+    OriginalUri(original_uri): OriginalUri,
     Extension(oidc_service): Extension<Arc<OidcService>>,
     Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
     headers: HeaderMap,
-) -> Result<impl axum::response::IntoResponse, AuthError> {
+) -> Result<Response, AuthError> {
     // 解析授权请求参数
     let request = AuthorizeRequest {
         response_type: params.get("response_type")
@@ -89,29 +166,50 @@ async fn authorize(
                 let token = &auth_str[7..];
                 if let Ok(user) = get_user_from_token(token, &db).await {
                     // 用户已登录，生成授权码
-                    match oidc_service.create_authorization_code(&request, &crate::utils::record_id::record_id_key_to_string(&user.id.unwrap())).await {
-                        Ok(code) => {
-                            let mut redirect_url = format!("{}?code={}", request.redirect_uri, code);
-                            if let Some(state) = request.state {
-                                redirect_url.push_str(&format!("&state={}", state));
-                            }
-                            return Ok(Redirect::to(&redirect_url));
-                        }
-                        Err(e) => {
-                            let error_url = format!("{}?error=server_error&error_description={}", 
-                                                   request.redirect_uri, 
-                                                   urlencoding::encode(&e.to_string()));
-                            return Ok(Redirect::to(&error_url));
-                        }
-                    }
+                    let user_id = crate::utils::record_id::record_id_key_to_string(&user.id.unwrap());
+                    return create_authorize_response(&oidc_service, &request, &user_id).await;
                 }
             }
         }
     }
 
-    // 用户未登录，重定向到登录页面
-    let login_url = format!("/login?{}", serde_urlencoded::to_string(&params).unwrap_or_default());
-    Ok(Redirect::to(&login_url))
+    if let Some(session_token) = cookie_value(&headers, SOULAUTH_SESSION_COOKIE) {
+        if let Ok(user_id) = decode_browser_session_token(&session_token, &config.jwt_secret) {
+            return create_authorize_response(&oidc_service, &request, &user_id).await;
+        }
+    }
+
+    // 用户未登录，保存原始 OIDC 请求并重定向到 Google 登录
+    let return_cookie = build_cookie(OIDC_RETURN_COOKIE, &original_uri.to_string(), 600);
+    let mut response = Redirect::to("/api/auth/login/google").into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&return_cookie)
+            .map_err(|e| AuthError::BadRequest(format!("Invalid return cookie: {e}")))?,
+    );
+    Ok(response)
+}
+
+async fn create_authorize_response(
+    oidc_service: &OidcService,
+    request: &AuthorizeRequest,
+    user_id: &str,
+) -> Result<Response, AuthError> {
+    match oidc_service.create_authorization_code(request, user_id).await {
+        Ok(code) => {
+            let mut redirect_url = format!("{}?code={}", request.redirect_uri, code);
+            if let Some(state) = &request.state {
+                redirect_url.push_str(&format!("&state={}", state));
+            }
+            Ok(Redirect::to(&redirect_url).into_response())
+        }
+        Err(e) => {
+            let error_url = format!("{}?error=server_error&error_description={}",
+                                   request.redirect_uri,
+                                   urlencoding::encode(&e.to_string()));
+            Ok(Redirect::to(&error_url).into_response())
+        }
+    }
 }
 
 // 令牌端点
@@ -232,4 +330,56 @@ async fn authenticate_client(
     }
 
     Err(AuthError::Unauthorized("Missing client credentials".to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        build_cookie, build_expired_cookie, create_browser_session_token,
+        decode_browser_session_token, OIDC_RETURN_COOKIE, SOULAUTH_SESSION_COOKIE,
+    };
+
+    #[test]
+    fn build_cookie_encodes_value_and_sets_browser_security_attributes() {
+        let cookie = build_cookie(OIDC_RETURN_COOKIE, "/api/oidc/authorize?state=a b", 60);
+
+        assert_eq!(
+            cookie,
+            "soulauth_oidc_return=%2Fapi%2Foidc%2Fauthorize%3Fstate%3Da%20b; Path=/; Max-Age=60; HttpOnly; Secure; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn build_expired_cookie_clears_value() {
+        let cookie = build_expired_cookie(OIDC_RETURN_COOKIE);
+
+        assert_eq!(
+            cookie,
+            "soulauth_oidc_return=; Path=/; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+        );
+    }
+
+    #[test]
+    fn browser_session_token_round_trips_user_id() {
+        let secret = "test-secret";
+        let token = create_browser_session_token("user-123", secret).expect("token");
+
+        let user_id = decode_browser_session_token(&token, secret).expect("decoded user id");
+
+        assert_eq!(user_id, "user-123");
+    }
+
+    #[test]
+    fn browser_session_token_rejects_wrong_secret() {
+        let token = create_browser_session_token("user-123", "correct-secret").expect("token");
+
+        let result = decode_browser_session_token(&token, "wrong-secret");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn browser_session_cookie_name_is_stable() {
+        assert_eq!(SOULAUTH_SESSION_COOKIE, "soulauth_session");
+    }
 }

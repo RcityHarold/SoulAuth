@@ -27,6 +27,10 @@ use crate::{
     models::user::{CreateUserRequest, LoginRequest, AuthResponse, User, UserResponse, InitializePasswordRequest},
     models::password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
     models::session::{LogoutRequest, SessionInfo},
+    routes::oidc::{
+        build_cookie, build_expired_cookie, cookie_value, create_browser_session_token,
+        OIDC_RETURN_COOKIE, SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
+    },
     services::auth::AuthService,
     services::rbac::RBACService,
     services::social_hub::{SocialEvent, SocialHub},
@@ -40,7 +44,7 @@ use axum::{
     Json, Router,
     Extension,
     response::IntoResponse,
-    http::{HeaderMap, StatusCode},
+    http::{header, HeaderMap, HeaderValue, StatusCode},
 };
 use serde::Deserialize;
 use std::{sync::Arc, net::SocketAddr, future::Future};
@@ -3014,10 +3018,11 @@ async fn google_callback(
     State(db): State<Arc<Database>>,
     Extension(config): Extension<Config>,
     Query(params): Query<OAuthCallback>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     tracing::info!("Starting Google OAuth callback");
     let frontend_base = config.app_url.trim_end_matches('/').to_string();
-    let auth_service = AuthService::new(db, config)?;
+    let auth_service = AuthService::new(db, config.clone())?;
     let auth_response = match auth_service.handle_google_callback(params.code).await {
         Ok(response) => response,
         Err(e) => {
@@ -3025,18 +3030,38 @@ async fn google_callback(
             return Err(e);
         }
     };
+
+    let session_token = create_browser_session_token(&auth_response.user.id, &config.jwt_secret)?;
+    let session_cookie = build_cookie(SOULAUTH_SESSION_COOKIE, &session_token, SESSION_TTL_SECONDS);
     
     // 检查用户是否有密码
-    let redirect_url = if !auth_response.user.has_password {
+    let (redirect_url, clear_return_cookie) = if let Some(return_url) = cookie_value(&headers, OIDC_RETURN_COOKIE) {
+        (return_url, true)
+    } else if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        format!("{frontend_base}/initialize-password?token={}", auth_response.token)
+        (format!("{frontend_base}/initialize-password?token={}", auth_response.token), false)
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        format!("{frontend_base}/oauth/callback?token={}", auth_response.token)
+        (format!("{frontend_base}/oauth/callback?token={}", auth_response.token), false)
     };
 
     tracing::info!("OAuth callback completed, redirecting user");
-    Ok(axum::response::Redirect::to(&redirect_url).into_response())
+    let mut response = axum::response::Redirect::to(&redirect_url).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie)
+            .map_err(|e| AuthError::BadRequest(format!("Invalid session cookie: {e}")))?,
+    );
+    if clear_return_cookie {
+        let return_cookie = build_expired_cookie(OIDC_RETURN_COOKIE);
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&return_cookie)
+                .map_err(|e| AuthError::BadRequest(format!("Invalid return cookie: {e}")))?,
+        );
+    }
+
+    Ok(response)
 }
 
 // GitHub 登录
