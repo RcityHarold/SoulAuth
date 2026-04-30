@@ -161,6 +161,10 @@ impl AuthService {
         self.oauth_service.get_google_auth_url()
     }
 
+    pub fn get_google_auth_url_with_state(&self, state: Option<&str>) -> Result<String> {
+        self.oauth_service.get_google_auth_url_with_state(state)
+    }
+
     pub async fn handle_google_callback(&self, code: String) -> Result<AuthResponse> {
         debug!("Starting Google OAuth callback process");
         

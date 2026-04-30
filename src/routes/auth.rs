@@ -3007,9 +3007,11 @@ async fn send_direct_message(
 async fn google_login(
     State(db): State<Arc<Database>>,
     Extension(config): Extension<Config>,
+    headers: HeaderMap,
 ) -> Result<axum::response::Redirect> {
     let auth_service = AuthService::new(db, config)?;
-    let auth_url = auth_service.get_google_auth_url()?;
+    let oidc_return_state = cookie_value(&headers, OIDC_RETURN_COOKIE);
+    let auth_url = auth_service.get_google_auth_url_with_state(oidc_return_state.as_deref())?;
     Ok(axum::response::Redirect::to(&auth_url))
 }
 
@@ -3034,10 +3036,19 @@ async fn google_callback(
     let session_token = create_browser_session_token(&auth_response.user.id, &config.jwt_secret)?;
     let session_cookie = build_cookie(SOULAUTH_SESSION_COOKIE, &session_token, SESSION_TTL_SECONDS);
     
+    let oidc_return = cookie_value(&headers, OIDC_RETURN_COOKIE)
+        .and_then(|return_token| decode_oidc_return_token(&return_token, &config.jwt_secret).ok())
+        .or_else(|| {
+            params
+                .state
+                .as_deref()
+                .and_then(|state| decode_oidc_return_token(state, &config.jwt_secret).ok())
+        });
+
     // 检查用户是否有密码
-    let (redirect_url, clear_return_cookie) = if let Some(return_token) =
-        cookie_value(&headers, OIDC_RETURN_COOKIE)
-    {
+    let (redirect_url, clear_return_cookie) = if let Some(return_url) = oidc_return {
+        (return_url, true)
+    } else if let Some(return_token) = cookie_value(&headers, OIDC_RETURN_COOKIE) {
         match decode_oidc_return_token(&return_token, &config.jwt_secret) {
             Ok(return_url) => (return_url, true),
             Err(_) if !auth_response.user.has_password => (

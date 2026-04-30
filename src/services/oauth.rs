@@ -49,6 +49,53 @@ pub struct OAuthService {
     github_client: BasicClient,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::OAuthService;
+    use crate::config::Config;
+
+    fn test_config() -> Config {
+        Config {
+            database_url: "http://localhost:8000".to_string(),
+            database_user: "root".to_string(),
+            database_pass: "root".to_string(),
+            database_namespace: "auth".to_string(),
+            database_name: "main".to_string(),
+            database_connection_timeout: 30,
+            database_max_connections: 10,
+            jwt_secret: "test-secret".to_string(),
+            jwt_expiration: 3600,
+            google_client_id: "google-client".to_string(),
+            google_client_secret: "google-secret".to_string(),
+            github_client_id: "github-client".to_string(),
+            github_client_secret: "github-secret".to_string(),
+            oauth_redirect_url: "https://auth.example/api/auth/callback".to_string(),
+            proxy_enabled: false,
+            proxy_url: None,
+            smtp_host: "localhost".to_string(),
+            smtp_port: 1025,
+            smtp_username: "smtp-user".to_string(),
+            smtp_password: "smtp-pass".to_string(),
+            smtp_from: "noreply@example.com".to_string(),
+            smtp_insecure: true,
+            app_url: "https://auth.example".to_string(),
+            email_verification_enabled: false,
+        }
+    }
+
+    #[test]
+    fn google_auth_url_can_preserve_oidc_return_token_in_state() {
+        let service = OAuthService::new(test_config()).expect("service");
+        let oidc_return_token = "eyJhbGciOiJIUzI1NiJ9.oidc-return.sig";
+
+        let url = service
+            .get_google_auth_url_with_state(Some(oidc_return_token))
+            .expect("auth url");
+
+        assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.oidc-return.sig"));
+    }
+}
+
 impl OAuthService {
     pub fn new(config: Config) -> Result<Self> {
         let google_client = BasicClient::new(
@@ -110,8 +157,15 @@ impl OAuthService {
     }
 
     pub fn get_google_auth_url(&self) -> Result<String> {
+        self.get_google_auth_url_with_state(None)
+    }
+
+    pub fn get_google_auth_url_with_state(&self, state: Option<&str>) -> Result<String> {
+        let csrf_token = state
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let (auth_url, _) = self.google_client
-            .authorize_url(|| CsrfToken::new(uuid::Uuid::new_v4().to_string()))
+            .authorize_url(|| CsrfToken::new(csrf_token))
             .add_scope(Scope::new(
                 "https://www.googleapis.com/auth/userinfo.email".to_string(),
             ))
