@@ -238,7 +238,7 @@ impl OidcService {
             }
         }
 
-        // 标记授权码为已使用
+        // 标记授权码为已使用. The guarded update prevents concurrent redemptions.
         auth_code.used = true;
         self.update_authorization_code(&auth_code).await?;
 
@@ -438,6 +438,21 @@ impl OidcService {
         method: Option<&str>,
         code_verifier: &str,
     ) -> Result<bool> {
+        if !(43..=128).contains(&code_verifier.len()) {
+            return Err(anyhow!(
+                "Invalid code verifier: length must be between 43 and 128 characters"
+            ));
+        }
+
+        if !code_verifier
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+        {
+            return Err(anyhow!(
+                "Invalid code verifier: contains characters outside RFC 7636 charset"
+            ));
+        }
+
         match method.unwrap_or("plain") {
             "S256" => {
                 let hash = Sha256::digest(code_verifier.as_bytes());
@@ -581,14 +596,21 @@ impl OidcService {
     }
 
     async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
-        self.db
+        let mut result = self
+            .db
             .client
-            .query("UPDATE oidc_authorization_code SET used = $used WHERE code = $code")
+            .query(
+                "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN AFTER",
+            )
             .bind(("code", code.code.clone()))
-            .bind(("used", code.used))
             .await?;
 
-        Ok(())
+        let updated_codes: Vec<serde_json::Value> = result.take(0)?;
+        if updated_codes.len() == 1 {
+            Ok(())
+        } else {
+            Err(anyhow!("Authorization code already used"))
+        }
     }
 
     async fn save_access_token(&self, token: &OidcAccessToken) -> Result<()> {
@@ -694,7 +716,7 @@ mod tests {
 
     #[test]
     fn verifies_s256_pkce_challenge() {
-        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let verifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
         let challenge =
             general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let result = OidcService::verify_pkce_value(&challenge, Some("S256"), verifier);
@@ -706,15 +728,35 @@ mod tests {
         let result = OidcService::verify_pkce_value(
             "wrong",
             Some("S256"),
-            "abcdefghijklmnopqrstuvwxyz0123456789",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~",
         );
         assert!(!result.expect("pkce verification should return false"));
     }
 
     #[test]
     fn verifies_plain_pkce_challenge() {
-        let result =
-            OidcService::verify_pkce_value("plain-verifier", Some("plain"), "plain-verifier");
+        let verifier = "plain-verifier-abcdefghijklmnopqrstuvwxyz012345";
+        let result = OidcService::verify_pkce_value(verifier, Some("plain"), verifier);
         assert!(result.expect("plain pkce should pass"));
+    }
+
+    #[test]
+    fn rejects_pkce_verifier_shorter_than_rfc_minimum() {
+        let result =
+            OidcService::verify_pkce_value("short-verifier", Some("plain"), "short-verifier");
+        assert!(result
+            .expect_err("short verifier should be rejected")
+            .to_string()
+            .contains("Invalid code verifier"));
+    }
+
+    #[test]
+    fn rejects_pkce_verifier_with_invalid_charset() {
+        let verifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._!";
+        let result = OidcService::verify_pkce_value(verifier, Some("plain"), verifier);
+        assert!(result
+            .expect_err("invalid verifier charset should be rejected")
+            .to_string()
+            .contains("Invalid code verifier"));
     }
 }
