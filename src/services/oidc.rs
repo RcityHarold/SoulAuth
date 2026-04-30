@@ -1,27 +1,25 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
-use base64::{Engine as _, engine::general_purpose};
-use chrono::{Duration, Utc};
-use jsonwebtoken::{decode, encode, Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use base64::{engine::general_purpose, Engine as _};
+use chrono::Utc;
+use jsonwebtoken::{encode, Algorithm, DecodingKey, EncodingKey, Header};
 use rand::{distributions::Alphanumeric, Rng};
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{
     config::Config,
     models::{
-        oidc_client::{OidcClient, ClientType, GrantType, ResponseType},
+        oidc_client::{ClientType, GrantType, OidcClient, ResponseType},
         oidc_token::{
-            OidcAuthorizationCode, OidcAccessToken, OidcRefreshToken,
-            TokenResponse, TokenRequest, AuthorizeRequest, IdTokenClaims, UserInfoResponse
+            AuthorizeRequest, IdTokenClaims, OidcAccessToken, OidcAuthorizationCode,
+            OidcRefreshToken, TokenRequest, TokenResponse, UserInfoResponse,
         },
-        sso_session::SsoSession,
         user::User,
     },
     services::database::Database,
-    error::AuthError,
+    utils::record_id::user_record_id,
 };
 
 #[derive(Clone)]
@@ -80,7 +78,7 @@ impl OidcService {
     // OIDC Discovery Endpoint
     pub fn get_configuration(&self) -> OidcConfiguration {
         let base_url = &self.config.app_url;
-        
+
         OidcConfiguration {
             issuer: base_url.clone(),
             authorization_endpoint: format!("{}/api/oidc/authorize", base_url),
@@ -126,7 +124,8 @@ impl OidcService {
         }
 
         // 验证响应类型
-        let response_types: Vec<ResponseType> = request.response_type
+        let response_types: Vec<ResponseType> = request
+            .response_type
             .split_whitespace()
             .map(|rt| match rt {
                 "code" => Ok(ResponseType::Code),
@@ -149,7 +148,10 @@ impl OidcService {
         // 生成授权码
         let code = generate_random_string(32);
         let expires_at = Utc::now().timestamp() + 600; // 10分钟过期
-        let scope = request.scope.clone().unwrap_or_else(|| "openid".to_string());
+        let scope = request
+            .scope
+            .clone()
+            .unwrap_or_else(|| "openid".to_string());
 
         let auth_code = OidcAuthorizationCode {
             id: None,
@@ -174,10 +176,7 @@ impl OidcService {
     }
 
     // 令牌端点 - 交换授权码获取令牌
-    pub async fn exchange_code_for_tokens(
-        &self,
-        request: &TokenRequest,
-    ) -> Result<TokenResponse> {
+    pub async fn exchange_code_for_tokens(&self, request: &TokenRequest) -> Result<TokenResponse> {
         match request.grant_type.as_str() {
             "authorization_code" => self.handle_authorization_code_grant(request).await,
             "refresh_token" => self.handle_refresh_token_grant(request).await,
@@ -189,8 +188,14 @@ impl OidcService {
         &self,
         request: &TokenRequest,
     ) -> Result<TokenResponse> {
-        let code = request.code.as_ref().ok_or_else(|| anyhow!("Missing authorization code"))?;
-        let redirect_uri = request.redirect_uri.as_ref().ok_or_else(|| anyhow!("Missing redirect URI"))?;
+        let code = request
+            .code
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing authorization code"))?;
+        let redirect_uri = request
+            .redirect_uri
+            .as_ref()
+            .ok_or_else(|| anyhow!("Missing redirect URI"))?;
 
         // 验证客户端
         let client = self.get_client(&request.client_id).await?;
@@ -219,10 +224,16 @@ impl OidcService {
 
         // 验证 PKCE
         if let Some(code_challenge) = &auth_code.code_challenge {
-            let code_verifier = request.code_verifier.as_ref()
+            let code_verifier = request
+                .code_verifier
+                .as_ref()
                 .ok_or_else(|| anyhow!("Code verifier required"))?;
-            
-            if !self.verify_pkce(code_challenge, &auth_code.code_challenge_method, code_verifier)? {
+
+            if !self.verify_pkce(
+                code_challenge,
+                &auth_code.code_challenge_method,
+                code_verifier,
+            )? {
                 return Err(anyhow!("Invalid code verifier"));
             }
         }
@@ -232,14 +243,19 @@ impl OidcService {
         self.update_authorization_code(&auth_code).await?;
 
         // 生成令牌
-        self.generate_tokens(&client, &auth_code.user_id, &auth_code.scope, auth_code.nonce.as_deref()).await
+        self.generate_tokens(
+            &client,
+            &auth_code.user_id,
+            &auth_code.scope,
+            auth_code.nonce.as_deref(),
+        )
+        .await
     }
 
-    async fn handle_refresh_token_grant(
-        &self,
-        request: &TokenRequest,
-    ) -> Result<TokenResponse> {
-        let refresh_token = request.refresh_token.as_ref()
+    async fn handle_refresh_token_grant(&self, request: &TokenRequest) -> Result<TokenResponse> {
+        let refresh_token = request
+            .refresh_token
+            .as_ref()
             .ok_or_else(|| anyhow!("Missing refresh token"))?;
 
         // 获取并验证刷新令牌
@@ -267,11 +283,16 @@ impl OidcService {
         self.update_refresh_token(&stored_refresh_token).await?;
 
         // 使旧的访问令牌失效
-        self.revoke_access_token(&stored_refresh_token.access_token).await?;
+        self.revoke_access_token(&stored_refresh_token.access_token)
+            .await?;
 
         // 生成新的令牌
-        let scope = request.scope.as_deref().unwrap_or(&stored_refresh_token.scope);
-        self.generate_tokens(&client, &stored_refresh_token.user_id, scope, None).await
+        let scope = request
+            .scope
+            .as_deref()
+            .unwrap_or(&stored_refresh_token.scope);
+        self.generate_tokens(&client, &stored_refresh_token.user_id, scope, None)
+            .await
     }
 
     async fn generate_tokens(
@@ -282,11 +303,11 @@ impl OidcService {
         nonce: Option<&str>,
     ) -> Result<TokenResponse> {
         let now = Utc::now().timestamp();
-        
+
         // 生成访问令牌
         let access_token = generate_random_string(32);
         let access_token_expires_at = now + client.access_token_lifetime;
-        
+
         let oidc_access_token = OidcAccessToken {
             id: None,
             token: access_token.clone(),
@@ -297,14 +318,17 @@ impl OidcService {
             expires_at: access_token_expires_at,
             created_at: now,
         };
-        
+
         self.save_access_token(&oidc_access_token).await?;
 
         // 生成刷新令牌
-        let refresh_token = if client.allowed_grant_types.contains(&GrantType::RefreshToken) {
+        let refresh_token = if client
+            .allowed_grant_types
+            .contains(&GrantType::RefreshToken)
+        {
             let token = generate_random_string(32);
             let refresh_token_expires_at = now + client.refresh_token_lifetime;
-            
+
             let oidc_refresh_token = OidcRefreshToken {
                 id: None,
                 token: token.clone(),
@@ -316,7 +340,7 @@ impl OidcService {
                 expires_at: refresh_token_expires_at,
                 created_at: now,
             };
-            
+
             self.save_refresh_token(&oidc_refresh_token).await?;
             Some(token)
         } else {
@@ -379,7 +403,7 @@ impl OidcService {
         }
 
         let user = self.get_user_by_id(&token.user_id).await?;
-        
+
         Ok(UserInfoResponse {
             sub: crate::utils::record_id::record_id_key_to_string(&user.id.unwrap()),
             email: Some(user.email.clone()),
@@ -406,55 +430,235 @@ impl OidcService {
         method: &Option<String>,
         code_verifier: &str,
     ) -> Result<bool> {
-        match method.as_deref().unwrap_or("plain") {
+        Self::verify_pkce_value(code_challenge, method.as_deref(), code_verifier)
+    }
+
+    pub(crate) fn verify_pkce_value(
+        code_challenge: &str,
+        method: Option<&str>,
+        code_verifier: &str,
+    ) -> Result<bool> {
+        match method.unwrap_or("plain") {
             "S256" => {
                 let hash = Sha256::digest(code_verifier.as_bytes());
                 let encoded = general_purpose::URL_SAFE_NO_PAD.encode(hash);
                 Ok(encoded == code_challenge)
             }
             "plain" => Ok(code_verifier == code_challenge),
-            _ => Err(anyhow!("Unsupported code challenge method")),
+            other => Err(anyhow!("Unsupported code challenge method: {}", other)),
         }
     }
 
-    // 数据库操作方法（需要实现）
     async fn get_client(&self, client_id: &str) -> Result<OidcClient> {
-        // TODO: 实现数据库查询
-        Err(anyhow!("Not implemented"))
+        let query = r#"
+            SELECT
+                <string>id AS id,
+                client_id,
+                client_secret_hash,
+                client_name,
+                client_type,
+                redirect_uris,
+                post_logout_redirect_uris,
+                allowed_scopes,
+                allowed_grant_types,
+                allowed_response_types,
+                require_pkce,
+                access_token_lifetime,
+                refresh_token_lifetime,
+                id_token_lifetime,
+                is_active,
+                <string>created_by AS created_by,
+                created_at,
+                updated_at
+            FROM oidc_client
+            WHERE client_id = $client_id AND is_active = true
+            LIMIT 1
+        "#;
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
+            .bind(("client_id", client_id.to_owned()))
+            .await?;
+
+        let clients: Vec<OidcClient> = result.take(0)?;
+        clients
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Client not found"))
     }
 
     async fn get_user_by_id(&self, user_id: &str) -> Result<User> {
-        // TODO: 实现数据库查询
-        Err(anyhow!("Not implemented"))
+        let mut result = self
+            .db
+            .client
+            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            .bind(("user_id", user_record_id(user_id)))
+            .await?;
+
+        let users: Vec<User> = result.take(0)?;
+        users
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("User not found"))
     }
 
-    async fn save_authorization_code(&self, _code: &OidcAuthorizationCode) -> Result<()> {
-        // TODO: 实现数据库保存
+    async fn save_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
+        let query = r#"
+            CREATE oidc_authorization_code CONTENT {
+                code: $code,
+                client_id: $client_id,
+                user_id: $user_id,
+                redirect_uri: $redirect_uri,
+                scope: $scope,
+                state: $state,
+                nonce: $nonce,
+                code_challenge: $code_challenge,
+                code_challenge_method: $code_challenge_method,
+                used: $used,
+                expires_at: $expires_at,
+                created_at: $created_at
+            }
+        "#;
+
+        self.db
+            .client
+            .query(query)
+            .bind(("code", code.code.clone()))
+            .bind(("client_id", code.client_id.clone()))
+            .bind(("user_id", user_record_id(&code.user_id)))
+            .bind(("redirect_uri", code.redirect_uri.clone()))
+            .bind(("scope", code.scope.clone()))
+            .bind(("state", code.state.clone()))
+            .bind(("nonce", code.nonce.clone()))
+            .bind(("code_challenge", code.code_challenge.clone()))
+            .bind(("code_challenge_method", code.code_challenge_method.clone()))
+            .bind(("used", code.used))
+            .bind(("expires_at", code.expires_at))
+            .bind(("created_at", code.created_at))
+            .await?;
+
         Ok(())
     }
 
-    async fn get_authorization_code(&self, _code: &str) -> Result<OidcAuthorizationCode> {
-        // TODO: 实现数据库查询
-        Err(anyhow!("Not implemented"))
+    async fn get_authorization_code(&self, code: &str) -> Result<OidcAuthorizationCode> {
+        let query = r#"
+            SELECT
+                <string>id AS id,
+                code,
+                client_id,
+                <string>user_id AS user_id,
+                redirect_uri,
+                scope,
+                state,
+                nonce,
+                code_challenge,
+                code_challenge_method,
+                used,
+                expires_at,
+                created_at
+            FROM oidc_authorization_code
+            WHERE code = $code
+            LIMIT 1
+        "#;
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
+            .bind(("code", code.to_owned()))
+            .await?;
+
+        let codes: Vec<serde_json::Value> = result.take(0)?;
+        codes
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<OidcAuthorizationCode>, _>>()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Authorization code not found"))
     }
 
-    async fn update_authorization_code(&self, _code: &OidcAuthorizationCode) -> Result<()> {
-        // TODO: 实现数据库更新
+    async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
+        self.db
+            .client
+            .query("UPDATE oidc_authorization_code SET used = $used WHERE code = $code")
+            .bind(("code", code.code.clone()))
+            .bind(("used", code.used))
+            .await?;
+
         Ok(())
     }
 
-    async fn save_access_token(&self, _token: &OidcAccessToken) -> Result<()> {
-        // TODO: 实现数据库保存
+    async fn save_access_token(&self, token: &OidcAccessToken) -> Result<()> {
+        let query = r#"
+            CREATE oidc_access_token CONTENT {
+                token: $token,
+                token_type: $token_type,
+                client_id: $client_id,
+                user_id: $user_id,
+                scope: $scope,
+                expires_at: $expires_at,
+                created_at: $created_at
+            }
+        "#;
+
+        self.db
+            .client
+            .query(query)
+            .bind(("token", token.token.clone()))
+            .bind(("token_type", token.token_type.clone()))
+            .bind(("client_id", token.client_id.clone()))
+            .bind(("user_id", user_record_id(&token.user_id)))
+            .bind(("scope", token.scope.clone()))
+            .bind(("expires_at", token.expires_at))
+            .bind(("created_at", token.created_at))
+            .await?;
+
         Ok(())
     }
 
-    async fn get_access_token(&self, _token: &str) -> Result<OidcAccessToken> {
-        // TODO: 实现数据库查询
-        Err(anyhow!("Not implemented"))
+    async fn get_access_token(&self, token: &str) -> Result<OidcAccessToken> {
+        let query = r#"
+            SELECT
+                <string>id AS id,
+                token,
+                token_type,
+                client_id,
+                <string>user_id AS user_id,
+                scope,
+                expires_at,
+                created_at
+            FROM oidc_access_token
+            WHERE token = $token
+            LIMIT 1
+        "#;
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
+            .bind(("token", token.to_owned()))
+            .await?;
+
+        let tokens: Vec<serde_json::Value> = result.take(0)?;
+        tokens
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<Vec<OidcAccessToken>, _>>()?
+            .into_iter()
+            .next()
+            .ok_or_else(|| anyhow!("Access token not found"))
     }
 
-    async fn revoke_access_token(&self, _token: &str) -> Result<()> {
-        // TODO: 实现令牌撤销
+    async fn revoke_access_token(&self, token: &str) -> Result<()> {
+        self.db
+            .client
+            .query("DELETE oidc_access_token WHERE token = $token")
+            .bind(("token", token.to_owned()))
+            .await?;
+
         Ok(())
     }
 
@@ -480,4 +684,37 @@ fn generate_random_string(length: usize) -> String {
         .take(length)
         .map(char::from)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OidcService;
+    use base64::{engine::general_purpose, Engine as _};
+    use sha2::{Digest, Sha256};
+
+    #[test]
+    fn verifies_s256_pkce_challenge() {
+        let verifier = "abcdefghijklmnopqrstuvwxyz0123456789";
+        let challenge =
+            general_purpose::URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+        let result = OidcService::verify_pkce_value(&challenge, Some("S256"), verifier);
+        assert!(result.expect("pkce verification should succeed"));
+    }
+
+    #[test]
+    fn rejects_wrong_s256_pkce_challenge() {
+        let result = OidcService::verify_pkce_value(
+            "wrong",
+            Some("S256"),
+            "abcdefghijklmnopqrstuvwxyz0123456789",
+        );
+        assert!(!result.expect("pkce verification should return false"));
+    }
+
+    #[test]
+    fn verifies_plain_pkce_challenge() {
+        let result =
+            OidcService::verify_pkce_value("plain-verifier", Some("plain"), "plain-verifier");
+        assert!(result.expect("plain pkce should pass"));
+    }
 }
