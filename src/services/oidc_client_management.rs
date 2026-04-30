@@ -248,12 +248,12 @@ impl OidcClientService {
             .bind(("client_id", client.client_id.clone()))
             .bind(("client_secret_hash", client.client_secret_hash.clone()))
             .bind(("client_name", client.client_name.clone()))
-            .bind(("client_type", client.client_type.clone()))
+            .bind(("client_type", client_type_value(&client.client_type)))
             .bind(("redirect_uris", client.redirect_uris.clone()))
             .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
             .bind(("allowed_scopes", client.allowed_scopes.clone()))
-            .bind(("allowed_grant_types", client.allowed_grant_types.clone()))
-            .bind(("allowed_response_types", client.allowed_response_types.clone()))
+            .bind(("allowed_grant_types", grant_type_values(&client.allowed_grant_types)))
+            .bind(("allowed_response_types", response_type_values(&client.allowed_response_types)))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
@@ -290,12 +290,12 @@ impl OidcClientService {
             .query(query)
             .bind(("client_id", client.client_id.clone()))
             .bind(("client_name", client.client_name.clone()))
-            .bind(("client_type", client.client_type.clone()))
+            .bind(("client_type", client_type_value(&client.client_type)))
             .bind(("redirect_uris", client.redirect_uris.clone()))
             .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
             .bind(("allowed_scopes", client.allowed_scopes.clone()))
-            .bind(("allowed_grant_types", client.allowed_grant_types.clone()))
-            .bind(("allowed_response_types", client.allowed_response_types.clone()))
+            .bind(("allowed_grant_types", grant_type_values(&client.allowed_grant_types)))
+            .bind(("allowed_response_types", response_type_values(&client.allowed_response_types)))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
@@ -328,4 +328,33 @@ fn generate_client_secret() -> String {
 
 fn hash_client_secret(secret: &str) -> String {
     format!("{:x}", Sha256::digest(secret.as_bytes()))
+}
+
+fn client_type_value(value: &ClientType) -> &'static str {
+    match value {
+        ClientType::Public => "public",
+        ClientType::Confidential => "confidential",
+    }
+}
+
+fn grant_type_values(values: &[GrantType]) -> Vec<&'static str> {
+    values
+        .iter()
+        .map(|value| match value {
+            GrantType::AuthorizationCode => "authorization_code",
+            GrantType::RefreshToken => "refresh_token",
+            GrantType::ClientCredentials => "client_credentials",
+        })
+        .collect()
+}
+
+fn response_type_values(values: &[ResponseType]) -> Vec<&'static str> {
+    values
+        .iter()
+        .map(|value| match value {
+            ResponseType::Code => "code",
+            ResponseType::IdToken => "id_token",
+            ResponseType::CodeIdToken => "code id_token",
+        })
+        .collect()
 }
