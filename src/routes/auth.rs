@@ -29,7 +29,7 @@ use crate::{
     models::session::{LogoutRequest, SessionInfo},
     routes::oidc::{
         build_cookie, build_expired_cookie, cookie_value, create_browser_session_token,
-        OIDC_RETURN_COOKIE, SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
+        decode_oidc_return_token, OIDC_RETURN_COOKIE, SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
     },
     services::auth::AuthService,
     services::rbac::RBACService,
@@ -3035,8 +3035,20 @@ async fn google_callback(
     let session_cookie = build_cookie(SOULAUTH_SESSION_COOKIE, &session_token, SESSION_TTL_SECONDS);
     
     // 检查用户是否有密码
-    let (redirect_url, clear_return_cookie) = if let Some(return_url) = cookie_value(&headers, OIDC_RETURN_COOKIE) {
-        (return_url, true)
+    let (redirect_url, clear_return_cookie) = if let Some(return_token) =
+        cookie_value(&headers, OIDC_RETURN_COOKIE)
+    {
+        match decode_oidc_return_token(&return_token, &config.jwt_secret) {
+            Ok(return_url) => (return_url, true),
+            Err(_) if !auth_response.user.has_password => (
+                format!("{frontend_base}/initialize-password?token={}", auth_response.token),
+                true,
+            ),
+            Err(_) => (
+                format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
+                true,
+            ),
+        }
     } else if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
         (format!("{frontend_base}/initialize-password?token={}", auth_response.token), false)
