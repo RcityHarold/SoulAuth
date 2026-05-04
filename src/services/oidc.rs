@@ -656,14 +656,14 @@ impl OidcService {
 
     async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
         let query =
-            "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN AFTER";
+            "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN VALUE code";
         let mut result = self.db.raw_query(
             "oidc_update_authorization_code",
             query,
             serde_json::json!({ "code": code.code }),
         ).await?;
 
-        let updated_codes: Vec<serde_json::Value> = result.take(0)?;
+        let updated_codes: Vec<String> = result.take(0)?;
         if updated_codes.len() == 1 {
             Ok(())
         } else {
