@@ -61,6 +61,33 @@ pub struct OAuthCallback {
     state: Option<String>,
 }
 
+fn soulbook_base_from_auth_base(frontend_base: &str) -> Option<&str> {
+    frontend_base.strip_suffix("/auth")
+}
+
+fn soulbook_oidc_start_url(frontend_base: &str) -> Option<String> {
+    soulbook_base_from_auth_base(frontend_base)
+        .map(|base| format!("{base}/api/docs/auth/soulauth/start"))
+}
+
+fn direct_oauth_fallback_url(frontend_base: &str, auth_response: &AuthResponse) -> (String, &'static str) {
+    if let Some(base) = soulbook_base_from_auth_base(frontend_base) {
+        return (format!("{base}/docs/login"), "soulbook_login_missing_oidc_return");
+    }
+
+    if auth_response.user.has_password {
+        (
+            format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
+            "oauth_callback",
+        )
+    } else {
+        (
+            format!("{frontend_base}/initialize-password?token={}", auth_response.token),
+            "initialize_password",
+        )
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SearchUserQuery {
     username: String,
@@ -3009,8 +3036,19 @@ async fn google_login(
     Extension(config): Extension<Config>,
     headers: HeaderMap,
 ) -> Result<axum::response::Redirect> {
-    let auth_service = AuthService::new(db, config)?;
+    let frontend_base = config.app_url.trim_end_matches('/').to_string();
     let oidc_return_state = cookie_value(&headers, OIDC_RETURN_COOKIE);
+    if oidc_return_state.is_none() {
+        if let Some(start_url) = soulbook_oidc_start_url(&frontend_base) {
+            warn!(
+                redirect_url = %start_url,
+                "Direct Google login without OIDC return; redirecting to SoulBook OIDC start"
+            );
+            return Ok(axum::response::Redirect::to(&start_url));
+        }
+    }
+
+    let auth_service = AuthService::new(db, config)?;
     let auth_url = auth_service.get_google_auth_url_with_state(oidc_return_state.as_deref())?;
     Ok(axum::response::Redirect::to(&auth_url))
 }
@@ -3082,31 +3120,16 @@ async fn google_callback(
     } else if let Some(return_token) = cookie_value(&headers, OIDC_RETURN_COOKIE) {
         match decode_oidc_return_token(&return_token, &config.jwt_secret) {
             Ok(return_url) => (return_url, true, "oidc_return"),
-            Err(_) if !auth_response.user.has_password => (
-                format!("{frontend_base}/initialize-password?token={}", auth_response.token),
-                true,
-                "initialize_password",
-            ),
-            Err(_) => (
-                format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
-                true,
-                "oauth_callback",
-            ),
+            Err(_) => {
+                let (fallback_url, fallback_kind) =
+                    direct_oauth_fallback_url(&frontend_base, &auth_response);
+                (fallback_url, true, fallback_kind)
+            }
         }
-    } else if !auth_response.user.has_password {
-        // 重定向到设置密码页面，并传递 token
-        (
-            format!("{frontend_base}/initialize-password?token={}", auth_response.token),
-            false,
-            "initialize_password",
-        )
     } else {
-        // 正常重定向到OAuth回调页面，并传递 token
-        (
-            format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
-            false,
-            "oauth_callback",
-        )
+        let (fallback_url, fallback_kind) =
+            direct_oauth_fallback_url(&frontend_base, &auth_response);
+        (fallback_url, false, fallback_kind)
     };
 
     tracing::info!(redirect_kind, clear_return_cookie, "OAuth callback completed, redirecting user");
