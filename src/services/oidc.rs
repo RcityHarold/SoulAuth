@@ -467,7 +467,7 @@ impl OidcService {
     async fn get_client(&self, client_id: &str) -> Result<OidcClient> {
         let query = r#"
             SELECT
-                <string>id AS id,
+                type::string(id) AS id,
                 client_id,
                 client_secret_hash,
                 client_name,
@@ -482,7 +482,7 @@ impl OidcService {
                 refresh_token_lifetime,
                 id_token_lifetime,
                 is_active,
-                <string>created_by AS created_by,
+                type::string(created_by) AS created_by,
                 created_at,
                 updated_at
             FROM oidc_client
@@ -604,10 +604,10 @@ impl OidcService {
     async fn get_authorization_code(&self, code: &str) -> Result<OidcAuthorizationCode> {
         let query = r#"
             SELECT
-                <string>id AS id,
+                type::string(id) AS id,
                 code,
                 client_id,
-                <string>user_id AS user_id,
+                type::string(user_id) AS user_id,
                 redirect_uri,
                 scope,
                 state,
@@ -706,11 +706,11 @@ impl OidcService {
     async fn get_access_token(&self, token: &str) -> Result<OidcAccessToken> {
         let query = r#"
             SELECT
-                <string>id AS id,
+                type::string(id) AS id,
                 token,
                 token_type,
                 client_id,
-                <string>user_id AS user_id,
+                type::string(user_id) AS user_id,
                 scope,
                 expires_at,
                 created_at

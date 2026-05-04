@@ -288,7 +288,7 @@ async fn validate_authorize_request(
 ) -> Result<(), AuthError> {
     let query = r#"
         SELECT
-            <string>id AS id,
+            type::string(id) AS id,
             client_id,
             client_secret_hash,
             client_name,
@@ -303,7 +303,7 @@ async fn validate_authorize_request(
             refresh_token_lifetime,
             id_token_lifetime,
             is_active,
-            <string>created_by AS created_by,
+            type::string(created_by) AS created_by,
             created_at,
             updated_at
         FROM oidc_client
