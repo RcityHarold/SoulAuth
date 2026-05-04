@@ -674,7 +674,7 @@ impl OidcService {
     async fn save_access_token(&self, token: &OidcAccessToken) -> Result<()> {
         let query = r#"
             CREATE oidc_access_token CONTENT {
-                token: $token,
+                token: $access_token_value,
                 token_type: $token_type,
                 client_id: $client_id,
                 user_id: $user_id,
@@ -686,7 +686,7 @@ impl OidcService {
 
         match self.db.client
             .query(query)
-            .bind(("token", token.token.clone()))
+            .bind(("access_token_value", token.token.clone()))
             .bind(("token_type", token.token_type.clone()))
             .bind(("client_id", token.client_id.clone()))
             .bind(("user_id", user_record_id(&token.user_id)))
@@ -702,7 +702,7 @@ impl OidcService {
                     let fresh = self.db.fresh_client().await?;
                     fresh
                         .query(query)
-                        .bind(("token", token.token.clone()))
+                        .bind(("access_token_value", token.token.clone()))
                         .bind(("token_type", token.token_type.clone()))
                         .bind(("client_id", token.client_id.clone()))
                         .bind(("user_id", user_record_id(&token.user_id)))
@@ -731,14 +731,14 @@ impl OidcService {
                 expires_at,
                 created_at
             FROM oidc_access_token
-            WHERE token = $token
+            WHERE token = $access_token_value
             LIMIT 1
         "#;
 
         let mut result = self.db.raw_query(
             "oidc_get_access_token",
             query,
-            serde_json::json!({ "token": token }),
+            serde_json::json!({ "access_token_value": token }),
         ).await?;
 
         let tokens: Vec<serde_json::Value> = result.take(0)?;
@@ -754,8 +754,8 @@ impl OidcService {
     async fn revoke_access_token(&self, token: &str) -> Result<()> {
         self.db.raw_query(
             "oidc_revoke_access_token",
-            "DELETE oidc_access_token WHERE token = $token",
-            serde_json::json!({ "token": token }),
+            "DELETE oidc_access_token WHERE token = $access_token_value",
+            serde_json::json!({ "access_token_value": token }),
         ).await?;
 
         Ok(())
