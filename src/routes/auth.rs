@@ -49,7 +49,7 @@ use axum::{
 use serde::Deserialize;
 use std::{sync::Arc, net::SocketAddr, future::Future};
 use crate::{services::database::Database, utils::rate_limit_middleware::check_rate_limit_for_request, AppState};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use serde_json::json;
 use surrealdb::types::RecordId as Thing;
 use tokio::sync::broadcast;
@@ -3035,40 +3035,81 @@ async fn google_callback(
 
     let session_token = create_browser_session_token(&auth_response.user.id, &config.jwt_secret)?;
     let session_cookie = build_cookie(SOULAUTH_SESSION_COOKIE, &session_token, SESSION_TTL_SECONDS);
-    
-    let oidc_return = cookie_value(&headers, OIDC_RETURN_COOKIE)
-        .and_then(|return_token| decode_oidc_return_token(&return_token, &config.jwt_secret).ok())
-        .or_else(|| {
-            params
-                .state
-                .as_deref()
-                .and_then(|state| decode_oidc_return_token(state, &config.jwt_secret).ok())
+
+    let oidc_return_cookie = cookie_value(&headers, OIDC_RETURN_COOKIE);
+    let oidc_return_from_cookie = oidc_return_cookie
+        .as_deref()
+        .and_then(|return_token| match decode_oidc_return_token(return_token, &config.jwt_secret) {
+            Ok(return_url) => {
+                info!(source = "cookie", "Decoded OIDC return target");
+                Some(return_url)
+            }
+            Err(err) => {
+                warn!(source = "cookie", error = ?err, "Failed to decode OIDC return target");
+                None
+            }
         });
+    let oidc_return_from_state = params
+        .state
+        .as_deref()
+        .and_then(|state| match decode_oidc_return_token(state, &config.jwt_secret) {
+            Ok(return_url) => {
+                info!(source = "google_state", "Decoded OIDC return target");
+                Some(return_url)
+            }
+            Err(err) => {
+                warn!(
+                    source = "google_state",
+                    state_len = state.len(),
+                    error = ?err,
+                    "Failed to decode OIDC return target"
+                );
+                None
+            }
+        });
+    let oidc_return = oidc_return_from_cookie.or(oidc_return_from_state);
+    info!(
+        has_oidc_return_cookie = oidc_return_cookie.is_some(),
+        has_google_state = params.state.is_some(),
+        google_state_len = params.state.as_ref().map(|state| state.len()).unwrap_or(0),
+        resolved_oidc_return = oidc_return.is_some(),
+        "Google callback OIDC return resolution completed"
+    );
 
     // 检查用户是否有密码
-    let (redirect_url, clear_return_cookie) = if let Some(return_url) = oidc_return {
-        (return_url, true)
+    let (redirect_url, clear_return_cookie, redirect_kind) = if let Some(return_url) = oidc_return {
+        (return_url, true, "oidc_return")
     } else if let Some(return_token) = cookie_value(&headers, OIDC_RETURN_COOKIE) {
         match decode_oidc_return_token(&return_token, &config.jwt_secret) {
-            Ok(return_url) => (return_url, true),
+            Ok(return_url) => (return_url, true, "oidc_return"),
             Err(_) if !auth_response.user.has_password => (
                 format!("{frontend_base}/initialize-password?token={}", auth_response.token),
                 true,
+                "initialize_password",
             ),
             Err(_) => (
                 format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
                 true,
+                "oauth_callback",
             ),
         }
     } else if !auth_response.user.has_password {
         // 重定向到设置密码页面，并传递 token
-        (format!("{frontend_base}/initialize-password?token={}", auth_response.token), false)
+        (
+            format!("{frontend_base}/initialize-password?token={}", auth_response.token),
+            false,
+            "initialize_password",
+        )
     } else {
         // 正常重定向到OAuth回调页面，并传递 token
-        (format!("{frontend_base}/oauth/callback?token={}", auth_response.token), false)
+        (
+            format!("{frontend_base}/oauth/callback?token={}", auth_response.token),
+            false,
+            "oauth_callback",
+        )
     };
 
-    tracing::info!("OAuth callback completed, redirecting user");
+    tracing::info!(redirect_kind, clear_return_cookie, "OAuth callback completed, redirecting user");
     let mut response = axum::response::Redirect::to(&redirect_url).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
