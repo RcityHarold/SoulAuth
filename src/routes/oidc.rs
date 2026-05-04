@@ -439,6 +439,7 @@ async fn token(
     match oidc_service.exchange_code_for_tokens(&request).await {
         Ok(token_response) => Ok(Json(serde_json::to_value(token_response)?)),
         Err(e) => {
+            tracing::warn!(error = %e, "OIDC token exchange failed");
             let error_response = json!({
                 "error": "invalid_request",
                 "error_description": e.to_string()

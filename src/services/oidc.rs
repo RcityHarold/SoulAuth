@@ -113,7 +113,10 @@ impl OidcService {
         user_id: &str,
     ) -> Result<String> {
         // 验证客户端
-        let client = self.get_client(&request.client_id).await?;
+        let client = self
+            .get_client(&request.client_id)
+            .await
+            .map_err(|e| anyhow!("get client failed: {e}"))?;
         if !client.is_active {
             return Err(anyhow!("Client is not active"));
         }
@@ -208,7 +211,10 @@ impl OidcService {
         }
 
         // 获取并验证授权码
-        let mut auth_code = self.get_authorization_code(code).await?;
+        let mut auth_code = self
+            .get_authorization_code(code)
+            .await
+            .map_err(|e| anyhow!("get authorization code failed: {e}"))?;
         if auth_code.used {
             return Err(anyhow!("Authorization code already used"));
         }
@@ -240,7 +246,9 @@ impl OidcService {
 
         // 标记授权码为已使用. The guarded update prevents concurrent redemptions.
         auth_code.used = true;
-        self.update_authorization_code(&auth_code).await?;
+        self.update_authorization_code(&auth_code)
+            .await
+            .map_err(|e| anyhow!("mark authorization code used failed: {e}"))?;
 
         // 生成令牌
         self.generate_tokens(
@@ -250,6 +258,7 @@ impl OidcService {
             auth_code.nonce.as_deref(),
         )
         .await
+        .map_err(|e| anyhow!("generate tokens failed: {e}"))
     }
 
     async fn handle_refresh_token_grant(&self, request: &TokenRequest) -> Result<TokenResponse> {
@@ -319,7 +328,9 @@ impl OidcService {
             created_at: now,
         };
 
-        self.save_access_token(&oidc_access_token).await?;
+        self.save_access_token(&oidc_access_token)
+            .await
+            .map_err(|e| anyhow!("save access token failed: {e}"))?;
 
         // 生成刷新令牌
         let refresh_token = if client
@@ -341,7 +352,9 @@ impl OidcService {
                 created_at: now,
             };
 
-            self.save_refresh_token(&oidc_refresh_token).await?;
+            self.save_refresh_token(&oidc_refresh_token)
+                .await
+                .map_err(|e| anyhow!("save refresh token failed: {e}"))?;
             Some(token)
         } else {
             None
@@ -349,7 +362,10 @@ impl OidcService {
 
         // 生成 ID 令牌（如果 scope 包含 openid）
         let id_token = if scope.contains("openid") {
-            let user = self.get_user_by_id(user_id).await?;
+            let user = self
+                .get_user_by_id(user_id)
+                .await
+                .map_err(|e| anyhow!("get id token user failed: {e}"))?;
             Some(self.generate_id_token(client, &user, nonce).await?)
         } else {
             None
