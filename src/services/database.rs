@@ -124,6 +124,10 @@ impl Database {
             || msg.contains("rpc signin failed")
     }
 
+    fn should_retry_verify_with_fresh<E: std::fmt::Display>(err: &E) -> bool {
+        Self::is_unauthorized_error(err)
+    }
+
     pub async fn fresh_client(&self) -> Result<Surreal<Client>> {
         let endpoint_raw = env::var("DATABASE_URL").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
         let endpoint = endpoint_raw.trim().trim_end_matches('/').to_string();
@@ -393,7 +397,7 @@ impl Database {
             return Ok(());
         }
 
-        self.retry_on_unauthorized("verify_connection", || async {
+        match self.retry_on_unauthorized("verify_connection", || async {
             // 使用 INFO 查询验证数据库连接
             let query = "INFO FOR DB";
             self.client
@@ -402,7 +406,20 @@ impl Database {
                 .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
             Ok(())
         })
-        .await?;
+        .await
+        {
+            Ok(()) => {}
+            Err(err) if Self::should_retry_verify_with_fresh(&err) => {
+                let fresh = self.fresh_client().await?;
+                fresh
+                    .query("INFO FOR DB")
+                    .await
+                    .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
+                debug!("Database connection verified successfully via fresh client after auth refresh");
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        }
 
         debug!("Database connection verified successfully");
         Ok(())
@@ -804,5 +821,19 @@ impl Database {
     /// 公开的查询方法，供其他服务使用  
     pub fn query<'a>(&'a self, sql: &'a str) -> surrealdb::method::Query<'a, Client> {
         self.client.query(sql)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn verify_connection_retries_with_fresh_client_for_expired_auth() {
+        let error = AuthError::DatabaseError(
+            "Database connection failed: HTTP status client error (401 Unauthorized)".to_string(),
+        );
+
+        assert!(Database::should_retry_verify_with_fresh(&error));
     }
 }
