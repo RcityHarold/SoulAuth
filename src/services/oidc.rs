@@ -626,10 +626,13 @@ impl OidcService {
                 user_id: type::record('user', $user_key),
                 redirect_uri: $redirect_uri,
                 scope: $scope,
-                state: $state,
-                nonce: $nonce,
-                code_challenge: $code_challenge,
-                code_challenge_method: $code_challenge_method,
+                -- `Option::None` 经 JSON 绑定会变成 NULL，而 `option<string>` 列
+                -- 只接受 NONE（报 "Expected `none | string` but found `NULL`"）。
+                -- `?? NONE` 把两者归一。
+                state: $state ?? NONE,
+                nonce: $nonce ?? NONE,
+                code_challenge: $code_challenge ?? NONE,
+                code_challenge_method: $code_challenge_method ?? NONE,
                 used: $used,
                 expires_at: $expires_at,
                 created_at: $created_at

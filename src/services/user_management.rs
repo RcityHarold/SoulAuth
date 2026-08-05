@@ -10,9 +10,17 @@ use crate::{
         user::{User, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse, UpdateMembershipRequest},
         user_profile::{UserProfile, CreateUserProfileRequest, UpdateUserProfileRequest, UserProfileResponse},
         user_preferences::{UserPreferences, CreateUserPreferencesRequest, UpdateUserPreferencesRequest, UserPreferencesResponse},
-        user_activity::{UserActivity, ActivityCategory, ActivityStatus, ActivityLogRequest, ActivityLogResponse},
+        user_activity::{
+            ActivityCategory, ActivityLogRequest, ActivityLogResponse, ActivityStatus,
+            UserActivityResponse, UserActivityRow,
+        },
     },
-    services::{auth::RequestContext, database::Database, rbac::RBACService},
+    services::{
+        audit_logger::{AuditEvent, AuditLogger},
+        auth::RequestContext,
+        database::Database,
+        rbac::RBACService,
+    },
 };
 
 pub struct UserManagementService {
@@ -475,119 +483,130 @@ impl UserManagementService {
     }
 
     // 用户活动日志
+    /// 记录一条用户活动。
+    ///
+    /// 直接复用 `AuditLogger` 的写入路径，**不再自己拼一套**。以前这里用
+    /// `.bind(("activity", ...))` 走 SurrealValue 编码，而 `audit_logger`
+    /// 走 serde（枚举存成纯字符串），同一张 `user_activity` 表上出现了两种
+    /// 互不兼容的编码：读取端只认其中一种，另一种写进去的行读不出来
+    /// —— 而且 SurrealValue 编码的枚举很可能根本过不了 `TYPE string` 的校验。
+    ///
+    /// 写入是 fire-and-forget，失败只记日志：不能因为写不进审计日志
+    /// 就让改档案 / 改状态这类业务操作整体失败。
     pub async fn log_user_activity(
         &self,
         user_id: &str,
-        action: &str,
+        action: &'static str,
         category: ActivityCategory,
         status: ActivityStatus,
         ip_address: &str,
         user_agent: &str,
         details: serde_json::Value,
     ) -> Result<(), AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
-
-        let activity = UserActivity {
-            id: None,
-            user_id: Some(user_thing),
-            action: action.to_string(),
-            category,
-            ip_address: ip_address.to_string(),
-            user_agent: user_agent.to_string(),
-            details,
-            status,
-            timestamp: Utc::now().timestamp(),
-        };
-
-        // 审计写入失败只记录、不冒泡：不能因为写不进日志就让改档案/改状态整体失败。
-        if let Err(e) = self
-            .db
-            .client
-            .query("CREATE user_activity CONTENT $activity")
-            .bind(("activity", activity.clone()))
-            .await
-        {
-            error!("Failed to log user activity: {}", e);
-        }
+        AuditLogger::new(self.db.clone()).record(
+            AuditEvent::new(action, category, status, ip_address, user_agent)
+                .with_user(user_id)
+                .with_details(details),
+        );
 
         Ok(())
     }
 
-    pub async fn get_user_activity_log(&self, user_id: &str, request: ActivityLogRequest) -> Result<ActivityLogResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
-        let page = request.page.unwrap_or(1);
-        let limit = request.limit.unwrap_or(50);
+    /// 查询某用户的活动日志。
+    ///
+    /// 读取走 serde（与 `AuditLogger` 的写入编码一致）。以前这里用
+    /// `take::<Vec<UserActivity>>` 走 SurrealValue 解码，而写入端存的是
+    /// 纯字符串枚举，两边对不上会直接解码失败。
+    ///
+    /// 过滤条件全部走绑定参数：`category` / `status` 虽然是枚举（不可注入），
+    /// 但没有理由再留一处字符串拼接。
+    pub async fn get_user_activity_log(
+        &self,
+        user_id: &str,
+        request: ActivityLogRequest,
+    ) -> Result<ActivityLogResponse, AuthError> {
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
         let offset = (page - 1) * limit;
 
-        let mut where_clauses = vec!["user_id = $user_id".to_string()];
-        
-        if let Some(category) = &request.category {
-            where_clauses.push(format!("category = '{:?}'", category));
+        let mut where_clauses = vec!["user_id = type::record('user', $user_key)".to_string()];
+        if request.category.is_some() {
+            where_clauses.push("category = $category".to_string());
         }
-        if let Some(status) = &request.status {
-            where_clauses.push(format!("status = '{:?}'", status));
+        if request.status.is_some() {
+            where_clauses.push("status = $status".to_string());
         }
-        if let Some(start_date) = request.start_date {
-            where_clauses.push(format!("timestamp >= {}", start_date.timestamp()));
+        if request.start_date.is_some() {
+            where_clauses.push("timestamp >= $start_ts".to_string());
         }
-        if let Some(end_date) = request.end_date {
-            where_clauses.push(format!("timestamp <= {}", end_date.timestamp()));
+        if request.end_date.is_some() {
+            where_clauses.push("timestamp <= $end_ts".to_string());
         }
+        let where_clause = where_clauses.join(" AND ");
 
+        let bindings = json!({
+            "user_key": crate::utils::record_id::normalize_user_id(user_id),
+            "category": request.category.as_ref().map(|c| format!("{c:?}")),
+            "status": request.status.as_ref().map(|s| format!("{s:?}")),
+            "start_ts": request.start_date.map(|d| d.timestamp()),
+            "end_ts": request.end_date.map(|d| d.timestamp()),
+            "limit": limit,
+            "offset": offset,
+        });
+
+        // id / user_id 是 record 链接，投影成字符串才能走 serde。
         let query = format!(
-            "SELECT * FROM user_activity WHERE {} ORDER BY timestamp DESC LIMIT {} START {}",
-            where_clauses.join(" AND "),
-            limit,
-            offset
+            "SELECT type::string(id) AS id, \
+                    IF user_id = NONE {{ NONE }} ELSE {{ type::string(user_id) }} AS user_id, \
+                    action, category, ip_address, user_agent, details, status, timestamp \
+             FROM user_activity WHERE {where_clause} \
+             ORDER BY timestamp DESC LIMIT $limit START $offset"
         );
 
-        let mut response = self.db.client
-            .query(&query)
-            .bind(("user_id", user_thing.clone()))
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec("user_activity_log", &query, bindings.clone())
             .await
             .map_err(|e| {
                 error!("Failed to get user activity log: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let activities: Vec<UserActivity> = response.take(0).map_err(|e| {
-            error!("Failed to parse activities: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
+        let activities = rows
+            .into_iter()
+            .map(serde_json::from_value::<UserActivityRow>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                error!("Failed to parse activities: {}", e);
+                AuthError::DatabaseError(format!("Failed to parse activities: {e}"))
+            })?
+            .into_iter()
+            .map(UserActivityResponse::from)
+            .collect::<Vec<_>>();
 
-        // 获取总数
-        let count_query = format!(
-            "SELECT count() as total FROM user_activity WHERE {} GROUP ALL",
-            where_clauses.join(" AND ")
-        );
-
-        let mut count_response = self.db.client
-            .query(&count_query)
-            .bind(("user_id", user_thing.clone()))
+        let count_query =
+            format!("SELECT count() AS total FROM user_activity WHERE {where_clause} GROUP ALL");
+        let count_rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec("user_activity_log_count", &count_query, bindings)
             .await
             .map_err(|e| {
                 error!("Failed to count activities: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let count_result: Vec<serde_json::Value> = count_response.take(0).map_err(|e| {
-            error!("Failed to parse count: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
-
-        let total = count_result.first()
+        let total = count_rows
+            .first()
             .and_then(|c| c.get("total"))
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
 
-        let total_pages = (total as f64 / limit as f64).ceil() as u32;
-
         Ok(ActivityLogResponse {
-            activities: activities.into_iter().map(|a| a.into()).collect(),
+            activities,
             total,
             page,
             limit,
-            total_pages,
+            total_pages: (total as f64 / limit as f64).ceil() as u32,
         })
     }
 

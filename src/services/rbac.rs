@@ -411,19 +411,19 @@ impl RBACService {
         }
 
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
 
+        // 直接比较 record，不再拼字符串。此前这里只列了 `user:⟨id⟩` 和 `user:id`
+        // 两种形式，而 `type::string(user_id)` 实际产出的是带反引号的
+        // `` user:`id` `` —— 两种都匹配不上，导致「查用户角色」永远返回空。
         let query = r#"
             SELECT string::replace(type::string(role_id), 'role:', '') as role_id, assigned_at
             FROM user_role
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+            WHERE user_id = type::record('user', $user_key)
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
+            .bind(("user_key", user_id.clone()))
             .await
             .map_err(|e| {
                 error!("Failed to get user roles: {}", e);
@@ -643,9 +643,6 @@ impl RBACService {
     // 权限检查
     pub async fn check_user_permission(&self, user_id: &str, permission_name: &str) -> Result<bool, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT count() as count
@@ -653,7 +650,7 @@ impl RBACService {
             WHERE role_id IN (
                 SELECT VALUE role_id
                 FROM user_role
-                WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+                WHERE user_id = type::record('user', $user_key)
             )
               AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
@@ -664,9 +661,7 @@ impl RBACService {
                 "check_user_permission",
                 query,
                 json!({
-                    "user_id_bracketed": user_id_bracketed,
-                    "user_id_plain": user_id_plain,
-                    "user_id_quoted": user_id_quoted,
+                    "user_key": user_id,
                     "permission_name": permission_name,
                 }),
             )
@@ -694,14 +689,11 @@ impl RBACService {
 
     pub async fn check_user_role(&self, user_id: &str, role_name: &str) -> Result<bool, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT count() as count
             FROM user_role
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+            WHERE user_id = type::record('user', $user_key)
               AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
@@ -711,9 +703,7 @@ impl RBACService {
                 "check_user_role",
                 query,
                 json!({
-                    "user_id_bracketed": user_id_bracketed,
-                    "user_id_plain": user_id_plain,
-                    "user_id_quoted": user_id_quoted,
+                    "user_key": user_id,
                     "role_name": role_name,
                 }),
             )
@@ -741,9 +731,6 @@ impl RBACService {
 
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
         
         let query = r#"
             SELECT name
@@ -753,16 +740,14 @@ impl RBACService {
                 WHERE role_id IN (
                     SELECT VALUE role_id
                     FROM user_role
-                    WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+                    WHERE user_id = type::record('user', $user_key)
                 )
             )
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
-            .bind(("user_id_quoted", user_id_quoted))
+            .bind(("user_key", user_id))
             .await
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);

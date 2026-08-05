@@ -65,6 +65,16 @@ impl SsoSessionService {
         })
     }
 
+
+    /// `SsoSession.user_id` 的契约是**裸用户键**（`create_session` 存的就是它）。
+    /// 但读取时 `type::string(user_id)` 会还原成 `` user:`uuid` ``，
+    /// 若不归一，路由里的归属校验（`session.user_id != current_user_id`）
+    /// 永远不相等，所有「操作自己的会话」都会被判成 403。
+    fn normalize_session(mut session: SsoSession) -> SsoSession {
+        session.user_id = crate::utils::record_id::normalize_user_id(&session.user_id);
+        session
+    }
+
     /// `sso_session.user_id` 在库里是 `record<user>`，而模型侧是字符串，
     /// 因此所有读取都要显式投影一次。
     const SESSION_PROJECTION: &'static str = "type::string(id) AS id, session_id, \
@@ -91,6 +101,7 @@ impl SsoSessionService {
             .next()
             .map(serde_json::from_value::<SsoSession>)
             .transpose()?
+            .map(Self::normalize_session)
             .ok_or_else(|| anyhow!("Session not found"))
     }
 
@@ -185,7 +196,11 @@ impl SsoSessionService {
             .map(serde_json::from_value::<SsoSession>)
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        Ok(sessions.into_iter().filter(|s| !s.is_expired()).collect())
+        Ok(sessions
+            .into_iter()
+            .map(Self::normalize_session)
+            .filter(|s| !s.is_expired())
+            .collect())
     }
 
     // 获取用户的所有活跃会话
@@ -317,6 +332,9 @@ impl SsoSessionService {
             }
         "#;
 
+        // 必须 .check()：`query().await` 只表示请求送达，语句级错误藏在
+        // Response 里，不 check 就会被静默吞掉 —— sso_session 的写入
+        // 曾因此长期失败而接口照样返回 200。
         self.db.client
             .query(query)
             .bind(("session_id", session.session_id.clone()))
@@ -330,7 +348,8 @@ impl SsoSessionService {
             .bind(("expires_at", session.expires_at))
             .bind(("ip_address", session.ip_address.clone()))
             .bind(("user_agent", session.user_agent.clone()))
-            .await?;
+            .await?
+            .check()?;
 
         Ok(())
     }
@@ -351,7 +370,8 @@ impl SsoSessionService {
             .bind(("client_sessions", session.client_sessions.clone()))
             .bind(("last_accessed_at", session.last_accessed_at))
             .bind(("expires_at", session.expires_at))
-            .await?;
+            .await?
+            .check()?;
 
         Ok(())
     }
@@ -359,11 +379,12 @@ impl SsoSessionService {
     // 私有方法：删除会话
     async fn delete_session(&self, session_id: &str) -> Result<()> {
         let query = "DELETE FROM sso_session WHERE session_id = $session_id";
-        
+
         self.db.client
             .query(query)
             .bind(("session_id", session_id.to_owned()))
-            .await?;
+            .await?
+            .check()?;
 
         Ok(())
     }

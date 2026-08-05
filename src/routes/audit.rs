@@ -539,13 +539,24 @@ async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResu
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
     
-    let activities: Vec<(String, i64)> = result.take(0).map_err(|e| {
+    // 每行是对象而非元组；原来的元组解析会失败，把 /api/audit/dashboard 打成 500。
+    let rows: Vec<serde_json::Value> = result.take(0).map_err(|e| {
         tracing::error!("Failed to extract top activities: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
+    let activities: Vec<(String, i64)> = rows
+        .iter()
+        .map(|r| {
+            (
+                r.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                r.get("count").and_then(|v| v.as_i64()).unwrap_or(0),
+            )
+        })
+        .collect();
+
     let total: i64 = activities.iter().map(|(_, count)| count).sum();
-    
+
     Ok(activities.into_iter().map(|(action, count)| {
         ActivityMetric {
             action,

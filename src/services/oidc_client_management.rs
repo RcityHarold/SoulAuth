@@ -89,16 +89,32 @@ impl OidcClientService {
     }
 
     // 获取客户端信息
+    /// 客户端记录里三个枚举字段（client_type / grant / response）写入时是
+    /// 纯字符串（见 `client_type_value` 等），因此读取必须走 serde。
+    /// 用 `take::<OidcClient>` 走 SurrealValue 解码会对不上 —— 这与
+    /// `LockoutType` 上实测到的 "no variants matched" 是同一类问题。
+    const CLIENT_PROJECTION: &'static str = "type::string(id) AS id, client_id, client_secret_hash, client_name, client_type, redirect_uris, post_logout_redirect_uris, allowed_scopes, allowed_grant_types, allowed_response_types, require_pkce, access_token_lifetime, refresh_token_lifetime, id_token_lifetime, is_active, type::string(created_by) AS created_by, created_at, updated_at";
+
     pub async fn get_client(&self, client_id: &str) -> Result<OidcClient> {
-        let query = "SELECT * FROM oidc_client WHERE client_id = $client_id AND is_active = true";
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("client_id", client_id.to_owned()))
+        let query = format!(
+            "SELECT {} FROM oidc_client WHERE client_id = $client_id AND is_active = true LIMIT 1",
+            Self::CLIENT_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "oidc_client_get",
+                &query,
+                serde_json::json!({ "client_id": client_id }),
+            )
             .await?;
 
-        let client: Option<OidcClient> = result.take(0)?;
-        client.ok_or_else(|| anyhow!("Client not found"))
+        rows.into_iter()
+            .next()
+            .map(serde_json::from_value::<OidcClient>)
+            .transpose()?
+            .ok_or_else(|| anyhow!("Client not found"))
     }
 
     // 获取客户端列表
@@ -110,16 +126,25 @@ impl OidcClientService {
         let limit = limit.unwrap_or(50);
         let offset = offset.unwrap_or(0);
 
-        let query = "SELECT * FROM oidc_client WHERE is_active = true LIMIT $limit START $offset";
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("limit", limit))
-            .bind(("offset", offset))
+        let query = format!(
+            "SELECT {} FROM oidc_client WHERE is_active = true LIMIT $limit START $offset",
+            Self::CLIENT_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "oidc_client_list",
+                &query,
+                serde_json::json!({ "limit": limit, "offset": offset }),
+            )
             .await?;
 
-        let clients: Vec<OidcClient> = result.take(0)?;
-        
+        let clients = rows
+            .into_iter()
+            .map(serde_json::from_value::<OidcClient>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
         Ok(clients.into_iter().map(|client| OidcClientResponse {
             client_id: client.client_id,
             client_secret: "***".to_string(), // 不返回密钥
@@ -187,12 +212,17 @@ impl OidcClientService {
 
     // 禁用客户端
     pub async fn disable_client(&self, client_id: &str) -> Result<()> {
-        let query = "UPDATE oidc_client SET is_active = false, updated_at = time::now() WHERE client_id = $client_id";
-        
+        // `updated_at` 是 `TYPE number`，不能写 `time::now()`（datetime）。
+        // 而且必须 .check()，否则语句级错误被吞：接口返回 204 但客户端根本没被禁用。
+        let query = "UPDATE oidc_client SET is_active = false, updated_at = $updated_at \
+                     WHERE client_id = $client_id";
+
         self.db.client
             .query(query)
             .bind(("client_id", client_id.to_owned()))
-            .await?;
+            .bind(("updated_at", Utc::now().timestamp()))
+            .await?
+            .check()?;
 
         Ok(())
     }
@@ -202,13 +232,18 @@ impl OidcClientService {
         let client_secret = generate_client_secret();
         let client_secret_hash = hash_client_secret(&client_secret)?;
 
-        let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = time::now() WHERE client_id = $client_id";
-        
+        // 同上。这里尤其要命：不 check 的话密钥轮换会静默失败 ——
+        // 调用方拿到新密钥并更新了自己的配置，服务端却还留着旧哈希，认证直接断。
+        let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = $updated_at \
+                     WHERE client_id = $client_id";
+
         self.db.client
             .query(query)
             .bind(("hash", client_secret_hash))
             .bind(("client_id", client_id.to_owned()))
-            .await?;
+            .bind(("updated_at", Utc::now().timestamp()))
+            .await?
+            .check()?;
 
         Ok(client_secret)
     }

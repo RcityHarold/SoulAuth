@@ -61,7 +61,9 @@ DEFINE TABLE user_mfa SCHEMAFULL;
 DEFINE FIELD user_id ON user_mfa TYPE string;
 DEFINE FIELD status ON user_mfa TYPE string;
 DEFINE FIELD method ON user_mfa TYPE string;
-DEFINE FIELD totp_secret ON user_mfa TYPE string;
+-- 模型侧是 Option<String>（SMS / Email 方式下没有 TOTP 密钥），
+-- schema 必须同为可空，否则写入 None 会被拒。
+DEFINE FIELD totp_secret ON user_mfa TYPE option<string>;
 DEFINE FIELD backup_codes ON user_mfa TYPE array;
 DEFINE FIELD created_at ON user_mfa TYPE datetime;
 DEFINE FIELD updated_at ON user_mfa TYPE datetime;
@@ -251,7 +253,14 @@ DEFINE INDEX oidc_refresh_token_expiry_idx ON oidc_refresh_token COLUMNS expires
 DEFINE TABLE sso_session SCHEMAFULL;
 DEFINE FIELD session_id ON sso_session TYPE string;
 DEFINE FIELD user_id ON sso_session TYPE record<user>;
-DEFINE FIELD client_sessions ON sso_session TYPE array; -- 客户端会话列表
+-- 数组元素是对象，SCHEMAFULL 下必须显式声明，否则写入被拒：
+--   "Found field 'client_sessions[0].client_id', but no such field exists"
+DEFINE FIELD client_sessions ON sso_session TYPE array;
+DEFINE FIELD client_sessions.* ON sso_session TYPE object;
+DEFINE FIELD client_sessions.*.client_id ON sso_session TYPE string;
+DEFINE FIELD client_sessions.*.session_id ON sso_session TYPE string;
+DEFINE FIELD client_sessions.*.created_at ON sso_session TYPE number;
+DEFINE FIELD client_sessions.*.last_accessed_at ON sso_session TYPE number;
 DEFINE FIELD created_at ON sso_session TYPE number;
 DEFINE FIELD last_accessed_at ON sso_session TYPE number;
 DEFINE FIELD expires_at ON sso_session TYPE number;

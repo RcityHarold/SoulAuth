@@ -296,7 +296,9 @@ impl AccountLockoutService {
             AND status IN ['Locked', 'TemporaryLocked']
         "#;
 
-        let now = Utc::now().to_string();
+        // `Utc::now().to_string()` 产出 "2026-08-05 08:43:36.837 UTC"，
+        // 不是 RFC3339，`type::datetime()` 转不了 —— 定时清理任务因此每小时报错一次。
+        let now = Utc::now().to_rfc3339();
         let _result = self
             .db
             .raw_query(

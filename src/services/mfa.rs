@@ -315,18 +315,47 @@ impl MfaService {
 
     /// 从数据库获取用户MFA配置
     async fn get_user_mfa(&self, user_id: &str) -> Result<UserMfa> {
+        // 读写必须用同一种编码。写入走 serde（`MfaStatus` / `MfaMethod` 存成
+        // "Pending" / "Totp" 这样的纯字符串），若这里用 `take::<UserMfa>` 走
+        // SurrealValue 解码就会报 "no variants matched" —— `LockoutType` 上已
+        // 实测到过同样的失败。所以读取也走 serde。
+        //
+        // 另外时间列必须投影成字符串：SDK 无法把原生 `Value::Datetime` 转成
+        // `serde_json::Value`（"Expected any, got datetime"）。
+        let query = r#"
+            SELECT
+                user_id,
+                status,
+                method,
+                totp_secret,
+                backup_codes,
+                type::string(created_at) AS created_at,
+                type::string(updated_at) AS updated_at,
+                IF last_used_at = NONE { NONE } ELSE { type::string(last_used_at) } AS last_used_at
+            FROM user_mfa
+            WHERE user_id = $user_id
+            LIMIT 1
+        "#;
+
         let mut result = self
             .db
             .raw_query(
                 "mfa_get_user_config",
-                "SELECT * FROM user_mfa WHERE user_id = $user_id LIMIT 1",
+                query,
                 serde_json::json!({ "user_id": user_id }),
             )
             .await?;
 
-        let mfa_config: Option<UserMfa> = result.take(0)?;
+        let rows: Vec<serde_json::Value> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
-        mfa_config.ok_or(AuthError::UserNotFound)
+        rows.into_iter()
+            .next()
+            .map(serde_json::from_value::<UserMfa>)
+            .transpose()
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse MFA config: {e}")))?
+            .ok_or(AuthError::UserNotFound)
     }
 
     /// 保存用户MFA配置到数据库。
@@ -343,7 +372,7 @@ impl MfaService {
                 user_id: $user_id,
                 status: $status,
                 method: $method,
-                totp_secret: $totp_secret,
+                totp_secret: $totp_secret ?? NONE,
                 backup_codes: $backup_codes,
                 created_at: type::datetime($created_at),
                 updated_at: type::datetime($updated_at),
