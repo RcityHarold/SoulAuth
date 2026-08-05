@@ -8,7 +8,6 @@ use crate::{
         SsoSession, ClientSession, CreateSsoSessionRequest, SsoSessionResponse
     },
     services::database::Database,
-    error::AuthError,
 };
 
 #[derive(Clone)]
@@ -66,17 +65,33 @@ impl SsoSessionService {
         })
     }
 
+    /// `sso_session.user_id` 在库里是 `record<user>`，而模型侧是字符串，
+    /// 因此所有读取都要显式投影一次。
+    const SESSION_PROJECTION: &'static str = "type::string(id) AS id, session_id, \
+         type::string(user_id) AS user_id, client_sessions, created_at, \
+         last_accessed_at, expires_at, ip_address, user_agent";
+
     // 获取 SSO 会话
     pub async fn get_session(&self, session_id: &str) -> Result<SsoSession> {
-        let query = "SELECT * FROM sso_session WHERE session_id = $session_id";
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("session_id", session_id.to_owned()))
+        let query = format!(
+            "SELECT {} FROM sso_session WHERE session_id = $session_id LIMIT 1",
+            Self::SESSION_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "sso_get_session",
+                &query,
+                serde_json::json!({ "session_id": session_id }),
+            )
             .await?;
 
-        let session: Option<SsoSession> = result.take(0)?;
-        session.ok_or_else(|| anyhow!("Session not found"))
+        rows.into_iter()
+            .next()
+            .map(serde_json::from_value::<SsoSession>)
+            .transpose()?
+            .ok_or_else(|| anyhow!("Session not found"))
     }
 
     // 添加客户端会话
@@ -140,60 +155,45 @@ impl SsoSessionService {
         })
     }
 
-    // 检查用户是否有活跃的 SSO 会话
-    pub async fn get_active_session_by_user(&self, user_id: &str) -> Result<Option<SsoSession>> {
-        let query = r#"
-            SELECT * FROM sso_session 
-            WHERE user_id = $user_id AND expires_at > time::now()
-            ORDER BY last_accessed_at DESC
-            LIMIT 1
-        "#;
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("user_id", user_id.to_owned()))
+    /// 读取某用户全部未过期的 SSO 会话。
+    ///
+    /// `expires_at` 是 Unix 秒（`TYPE number`），所以必须和一个数字比较 ——
+    /// 原来写的是 `expires_at > time::now()`，拿 number 跟 datetime 比，
+    /// 过滤条件根本不成立。
+    async fn load_user_sessions(&self, user_id: &str) -> Result<Vec<SsoSession>> {
+        let query = format!(
+            "SELECT {} FROM sso_session \
+             WHERE user_id = type::record('user', $user_key) AND expires_at > $now \
+             ORDER BY last_accessed_at DESC",
+            Self::SESSION_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "sso_load_user_sessions",
+                &query,
+                serde_json::json!({
+                    "user_key": crate::utils::record_id::normalize_user_id(user_id),
+                    "now": Utc::now().timestamp(),
+                }),
+            )
             .await?;
 
-        let session: Option<SsoSession> = result.take(0)?;
-        
-        if let Some(session) = session {
-            if !session.is_expired() {
-                return Ok(Some(session));
-            }
-        }
-        
-        Ok(None)
-    }
+        let sessions = rows
+            .into_iter()
+            .map(serde_json::from_value::<SsoSession>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
-    // 检查用户是否已在指定客户端登录
-    pub async fn is_user_logged_in_client(
-        &self,
-        user_id: &str,
-        client_id: &str,
-    ) -> Result<bool> {
-        if let Some(session) = self.get_active_session_by_user(user_id).await? {
-            return Ok(session.has_client_session(client_id));
-        }
-        Ok(false)
+        Ok(sessions.into_iter().filter(|s| !s.is_expired()).collect())
     }
 
     // 获取用户的所有活跃会话
     pub async fn get_user_sessions(&self, user_id: &str) -> Result<Vec<SsoSessionResponse>> {
-        let query = r#"
-            SELECT * FROM sso_session 
-            WHERE user_id = $user_id AND expires_at > time::now()
-            ORDER BY last_accessed_at DESC
-        "#;
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("user_id", user_id.to_owned()))
-            .await?;
-
-        let sessions: Vec<SsoSession> = result.take(0)?;
-        
-        Ok(sessions.into_iter()
-            .filter(|s| !s.is_expired())
+        Ok(self
+            .load_user_sessions(user_id)
+            .await?
+            .into_iter()
             .map(|s| {
                 let is_active = !s.is_expired();
                 SsoSessionResponse {
@@ -211,15 +211,20 @@ impl SsoSessionService {
 
     // 终止用户的所有 SSO 会话
     pub async fn logout_user_all_sessions(&self, user_id: &str) -> Result<i32> {
-        let query = "DELETE FROM sso_session WHERE user_id = $user_id";
-        
-        let _result = self.db.client
-            .query(query)
-            .bind(("user_id", user_id.to_owned()))
+        // 先数一遍再删，返回真实条数 —— 以前这里无条件返回 1。
+        let terminated = self.load_user_sessions(user_id).await?.len() as i32;
+
+        self.db
+            .raw_query(
+                "sso_logout_user_all_sessions",
+                "DELETE sso_session WHERE user_id = type::record('user', $user_key)",
+                serde_json::json!({
+                    "user_key": crate::utils::record_id::normalize_user_id(user_id),
+                }),
+            )
             .await?;
 
-        // 返回删除的会话数量（这里简化处理）
-        Ok(1) // SurrealDB 的具体返回值处理可能需要调整
+        Ok(terminated)
     }
 
     // 终止特定 SSO 会话
@@ -229,14 +234,42 @@ impl SsoSessionService {
 
     // 清理过期会话
     pub async fn cleanup_expired_sessions(&self) -> Result<i32> {
-        let query = "DELETE FROM sso_session WHERE expires_at < time::now()";
-        
-        let _result = self.db.client
-            .query(query)
+        // expires_at 是 Unix 秒，不能拿它跟 time::now() 的 datetime 比。
+        let now = Utc::now().timestamp();
+        let expired = self.count_sessions("expires_at < $now", Some(now)).await?;
+
+        self.db
+            .raw_query(
+                "sso_cleanup_expired_sessions",
+                "DELETE sso_session WHERE expires_at < $now",
+                serde_json::json!({ "now": now }),
+            )
             .await?;
 
-        // 返回清理的会话数量
-        Ok(1) // 简化处理
+        Ok(expired as i32)
+    }
+
+    async fn count_sessions(&self, predicate: &str, now: Option<i64>) -> Result<i64> {
+        let query = if predicate.is_empty() {
+            "SELECT count() AS count FROM sso_session GROUP ALL".to_string()
+        } else {
+            format!("SELECT count() AS count FROM sso_session WHERE {predicate} GROUP ALL")
+        };
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "sso_count_sessions",
+                &query,
+                serde_json::json!({ "now": now.unwrap_or(0) }),
+            )
+            .await?;
+
+        Ok(rows
+            .first()
+            .and_then(|row| row.get("count"))
+            .and_then(|count| count.as_i64())
+            .unwrap_or(0))
     }
 
     // 延长会话过期时间
@@ -274,7 +307,7 @@ impl SsoSessionService {
         let query = r#"
             CREATE sso_session CONTENT {
                 session_id: $session_id,
-                user_id: $user_id,
+                user_id: type::record('user', $user_key),
                 client_sessions: $client_sessions,
                 created_at: $created_at,
                 last_accessed_at: $last_accessed_at,
@@ -287,7 +320,10 @@ impl SsoSessionService {
         self.db.client
             .query(query)
             .bind(("session_id", session.session_id.clone()))
-            .bind(("user_id", session.user_id.clone()))
+            .bind((
+                "user_key",
+                crate::utils::record_id::normalize_user_id(&session.user_id),
+            ))
             .bind(("client_sessions", session.client_sessions.clone()))
             .bind(("created_at", session.created_at))
             .bind(("last_accessed_at", session.last_accessed_at))
@@ -337,19 +373,14 @@ impl SsoSessionService {
 impl SsoSessionService {
     // 获取活跃会话统计
     pub async fn get_session_stats(&self) -> Result<SessionStats> {
-        let total_query = "SELECT count() FROM sso_session GROUP ALL";
-        let active_query = "SELECT count() FROM sso_session WHERE expires_at > time::now() GROUP ALL";
-        
-        let mut total_result = self.db.client.query(total_query).await?;
-        let mut active_result = self.db.client.query(active_query).await?;
-
-        let total_sessions: Option<i64> = total_result.take(0)?;
-        let active_sessions: Option<i64> = active_result.take(0)?;
+        let now = Utc::now().timestamp();
+        let total_sessions = self.count_sessions("", None).await?;
+        let active_sessions = self.count_sessions("expires_at > $now", Some(now)).await?;
 
         Ok(SessionStats {
-            total_sessions: total_sessions.unwrap_or(0),
-            active_sessions: active_sessions.unwrap_or(0),
-            expired_sessions: total_sessions.unwrap_or(0) - active_sessions.unwrap_or(0),
+            total_sessions,
+            active_sessions,
+            expired_sessions: (total_sessions - active_sessions).max(0),
         })
     }
 

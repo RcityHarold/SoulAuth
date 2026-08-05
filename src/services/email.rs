@@ -76,7 +76,15 @@ impl EmailService {
         let to_address = to_email.parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid to address: {}", e)))?;
 
-        let verification_link = format!("{}/api/auth/verify-email/{}", self.config.app_url, token);
+        // 指向前端页面，由它去调 `GET /api/auth/verify-email/{token}`。
+        // 以前这里直接给的是 API 地址，用户点开只会看到一段 JSON
+        // ——而且响应体里还带着刚签发的访问令牌。
+        let page = self.config.verify_email_page_url();
+        let separator = if page.contains('?') { '&' } else { '?' };
+        let verification_link = format!(
+            "{page}{separator}token={}",
+            urlencoding::encode(token)
+        );
 
         let email = Message::builder()
             .from(from_address)

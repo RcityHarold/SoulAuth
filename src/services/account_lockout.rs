@@ -1,10 +1,16 @@
 use crate::{
     config::Config,
     error::{AuthError, Result},
-    models::account_lockout::{
-        AccountLockout, LockoutConfig, LockoutStatus, LockoutType, LockoutCheckResult
+    models::{
+        account_lockout::{
+            AccountLockout, LockoutCheckResult, LockoutConfig, LockoutStatus, LockoutType,
+        },
+        user_activity::{ActivityCategory, ActivityStatus},
     },
-    services::database::Database,
+    services::{
+        audit_logger::{actions, AuditEvent, AuditLogger},
+        database::Database,
+    },
 };
 use chrono::Utc;
 use std::sync::Arc;
@@ -14,23 +20,45 @@ use tracing::{info, warn, debug};
 pub struct AccountLockoutService {
     db: Arc<Database>,
     config: LockoutConfig,
+    audit: Arc<AuditLogger>,
 }
 
 impl AccountLockoutService {
     /// 创建新的账户锁定服务实例
-    pub fn new(db: Arc<Database>, _config: Config) -> Result<Self> {
+    pub fn new(db: Arc<Database>, _config: Config, audit: Arc<AuditLogger>) -> Result<Self> {
         Ok(Self {
             db,
             config: LockoutConfig::default(),
+            audit,
         })
     }
 
     /// 使用自定义配置创建服务
-    pub fn with_config(db: Arc<Database>, config: LockoutConfig) -> Result<Self> {
-        Ok(Self {
-            db,
-            config,
-        })
+    pub fn with_config(
+        db: Arc<Database>,
+        config: LockoutConfig,
+        audit: Arc<AuditLogger>,
+    ) -> Result<Self> {
+        Ok(Self { db, config, audit })
+    }
+
+    /// 账号 / IP 被锁定是安全事件，必须进审计。
+    fn record_lockout_event(&self, identifier: &str, lockout_type: &LockoutType, attempts: u32) {
+        let is_ip = matches!(lockout_type, LockoutType::IpAddress);
+        let event = AuditEvent::new(
+            actions::ACCOUNT_LOCKED,
+            ActivityCategory::Security,
+            ActivityStatus::Warning,
+            if is_ip { identifier.to_string() } else { String::new() },
+            String::new(),
+        )
+        .with_details(serde_json::json!({
+            "scope": if is_ip { "ip" } else { "account" },
+            "failed_attempts": attempts,
+        }));
+
+        // 账号维度的 identifier 是邮箱，不是用户 ID，所以不往 user_id 上挂。
+        self.audit.record(event);
     }
 
     pub fn max_attempts(&self) -> u32 {
@@ -138,6 +166,7 @@ impl AccountLockoutService {
         
         if lockout.is_locked() {
             warn!("User account locked: {} (attempts: {})", user_id, lockout.failed_attempts);
+            self.record_lockout_event(user_id, &LockoutType::User, lockout.failed_attempts);
         } else {
             debug!("Failed attempt recorded for user: {} (attempts: {}/{})", 
                    user_id, lockout.failed_attempts, self.config.max_attempts);
@@ -168,6 +197,7 @@ impl AccountLockoutService {
         
         if lockout.is_locked() {
             warn!("IP address locked: {} (attempts: {})", ip_address, lockout.failed_attempts);
+            self.record_lockout_event(ip_address, &LockoutType::IpAddress, lockout.failed_attempts);
         } else {
             debug!("Failed attempt recorded for IP: {} (attempts: {}/{})", 
                    ip_address, lockout.failed_attempts, self.config.max_attempts);
@@ -283,8 +313,27 @@ impl AccountLockoutService {
 
     /// 从数据库获取锁定记录
     async fn get_lockout_record(&self, identifier: &str, lockout_type: LockoutType) -> Result<AccountLockout> {
-        let query = "SELECT * FROM account_lockout WHERE identifier = $identifier AND lockout_type = $lockout_type";
+        // 时间列必须投影成字符串：SDK 无法把原生 `Value::Datetime` 转成
+        // `serde_json::Value`（报 "Expected any, got datetime"）。
+        let query = r#"
+            SELECT
+                identifier,
+                lockout_type,
+                failed_attempts,
+                status,
+                type::string(created_at) AS created_at,
+                type::string(updated_at) AS updated_at,
+                type::string(last_attempt_at) AS last_attempt_at,
+                IF locked_at = NONE { NONE } ELSE { type::string(locked_at) } AS locked_at,
+                IF locked_until = NONE { NONE } ELSE { type::string(locked_until) } AS locked_until
+            FROM account_lockout
+            WHERE identifier = $identifier AND lockout_type = $lockout_type
+            LIMIT 1
+        "#;
 
+        // 写路径用 serde（枚举存成 "User" / "IpAddress" 字符串），
+        // 读路径若用 SurrealValue 解码则对不上（"no variants matched"）。
+        // 两边必须一致，所以这里也走 serde。
         let mut result = self
             .db
             .raw_query(
@@ -297,33 +346,60 @@ impl AccountLockoutService {
             )
             .await
             .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-        
-        let lockout: Option<AccountLockout> = result.take(0)?;
-        
-        lockout.ok_or(AuthError::UserNotFound)
+
+        let rows: Vec<serde_json::Value> = result
+            .take(0)
+            .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+
+        rows.into_iter()
+            .next()
+            .map(serde_json::from_value::<AccountLockout>)
+            .transpose()
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to parse lockout record: {e}"))
+            })?
+            .ok_or(AuthError::UserNotFound)
     }
 
     /// 保存锁定记录到数据库
     async fn save_lockout_record(&self, lockout: &AccountLockout) -> Result<()> {
+        // 时间列是 `datetime`，而 raw_query 的 JSON 绑定给出的是 RFC3339 字符串，
+        // 必须显式转换 —— 否则整条写入被拒，账号锁定计数永远停在 0，
+        // 暴力破解防护实际上从未生效过。
         // SurrealQL doesn't support `REPLACE` in this position.
         // Use a deterministic record id so we can UPDATE (create-or-replace semantics).
         // Example: account_lockout:user:foo@example.com
+        // 注意必须用 `type::record(table, id)` 两参形式。
+        // 单参形式 `type::record("account_lockout:user:a@b.com")` 会在第一个冒号处
+        // 截断，得到 `account_lockout:user` —— 于是所有账号共用一条记录、
+        // 所有 IP 共用另一条，锁定计数根本不按对象累加。
         let lockout_type = format!("{:?}", lockout.lockout_type).to_lowercase();
         let identifier = lockout.identifier.replace(' ', "_");
-        let id = format!("{}:{}", lockout_type, identifier);
-        let rid = format!("account_lockout:{id}");
+        let record_id = format!("{}:{}", lockout_type, identifier);
 
         let query = r#"
-            UPDATE type::record($rid) CONTENT {
+            UPSERT type::record('account_lockout', $record_id) CONTENT {
                 identifier: $identifier,
                 lockout_type: $lockout_type,
                 failed_attempts: $failed_attempts,
                 status: $status,
-                locked_at: $locked_at,
-                locked_until: $locked_until,
-                last_attempt_at: $last_attempt_at,
-                created_at: $created_at,
-                updated_at: $updated_at
+                locked_at: IF $locked_at = NONE OR $locked_at = NULL {
+                    NONE
+                } ELSE {
+                    type::datetime($locked_at)
+                },
+                locked_until: IF $locked_until = NONE OR $locked_until = NULL {
+                    NONE
+                } ELSE {
+                    type::datetime($locked_until)
+                },
+                last_attempt_at: IF $last_attempt_at = NONE OR $last_attempt_at = NULL {
+                    NONE
+                } ELSE {
+                    type::datetime($last_attempt_at)
+                },
+                created_at: type::datetime($created_at),
+                updated_at: type::datetime($updated_at)
             }
         "#;
 
@@ -343,7 +419,7 @@ impl AccountLockoutService {
                 "save_lockout_record",
                 query,
                 serde_json::json!({
-                    "rid": rid,
+                    "record_id": record_id,
                     "identifier": identifier_value,
                     "lockout_type": lockout_type_value,
                     "failed_attempts": failed_attempts_value,

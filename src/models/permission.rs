@@ -24,11 +24,6 @@ pub struct CreatePermissionRequest {
     pub action: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct UpdatePermissionRequest {
-    pub display_name: Option<String>,
-    pub description: Option<String>,
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PermissionResponse {

@@ -14,11 +14,6 @@ pub struct Session {
     pub ip_address: String,
 }
 
-#[derive(Debug, Deserialize)]
-pub struct LogoutRequest {
-    pub token: String,
-}
-
 #[derive(Debug, Serialize)]
 pub struct SessionInfo {
     pub id: String,

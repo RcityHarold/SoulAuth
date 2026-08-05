@@ -24,6 +24,8 @@ totp-rs = { version = "5.0", features = ["qr", "serde"] }
 qrcode = "0.12"
 base32 = "0.4"
 rand = "0.8"
+# OIDC ID Token 的 RS256 签名密钥（生成 / 解析 PEM、导出 JWKS 的 n 与 e）
+rsa = "0.9"
 
 # 序列化/反序列化
 serde = { version = "1.0", features = ["derive"] }
@@ -36,7 +38,6 @@ anyhow = "1.0"
 # 日志和配置
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-config = "0.13"
 
 # 时间处理
 chrono = { version = "0.4", features = ["serde"] }
@@ -49,6 +50,8 @@ dotenv = "0.15"
 
 # 加密和哈希
 sha2 = "0.10"
+# MFA 的 TOTP 密钥需要可逆加密后落库
+chacha20poly1305 = "0.10"
 
 # URL 编码
 urlencoding = "2.1"

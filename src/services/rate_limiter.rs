@@ -110,13 +110,24 @@ impl RateLimiter {
         self.endpoint_rules.get(endpoint).unwrap_or(&self.default_rule)
     }
 
+    /// 计数桶的键：**必须**按 (客户端, 端点) 组合。
+    ///
+    /// 以前只用客户端 IP 做键：规则按端点挑，计数桶却是全局共用的。后果是
+    /// 所有端点共享同一个配额，而生效的上限取决于你恰好打到哪个端点；
+    /// 任何一个端点触发阻塞，该 IP 的**全部**端点一起被封。
+    fn record_key(client_key: &str, endpoint: &str) -> String {
+        format!("{client_key}\u{1}{endpoint}")
+    }
+
     /// 检查速率限制
     pub async fn check_rate_limit(&self, key: &str, endpoint: &str) -> Result<bool, crate::error::AppError> {
         let rule = self.get_rule(endpoint);
         let mut records = self.records.write().await;
-        
+
         // 获取或创建记录
-        let record = records.entry(key.to_string()).or_insert_with(RequestRecord::new);
+        let record = records
+            .entry(Self::record_key(key, endpoint))
+            .or_insert_with(RequestRecord::new);
 
         // 检查是否被阻塞
         if record.is_blocked() {
@@ -144,10 +155,11 @@ impl RateLimiter {
         Ok(true)
     }
 
-    /// 重置特定键的限制
+    /// 重置某个客户端在所有端点上的限制
     pub async fn reset_limit(&self, key: &str) {
+        let prefix = format!("{key}\u{1}");
         let mut records = self.records.write().await;
-        records.remove(key);
+        records.retain(|record_key, _| !record_key.starts_with(&prefix));
         info!("Rate limit reset for key: {}", key);
     }
 
@@ -156,7 +168,7 @@ impl RateLimiter {
         let rule = self.get_rule(endpoint);
         let records = self.records.read().await;
         
-        if let Some(record) = records.get(key) {
+        if let Some(record) = records.get(&Self::record_key(key, endpoint)) {
             if record.is_blocked() {
                 return 0;
             }
@@ -194,7 +206,10 @@ impl RateLimiter {
     }
 }
 
-/// 预定义的速率限制规则
+/// 预定义的速率限制规则。
+///
+/// 注意：规则表按**精确路径**匹配，带路径参数的端点（如
+/// `/api/auth/verify-email/:token`）只会命中默认规则。
 pub struct RateLimitRules;
 
 impl RateLimitRules {
@@ -225,15 +240,6 @@ impl RateLimitRules {
         }
     }
 
-    /// 邮件验证规则
-    pub fn email_verification() -> RateLimitRule {
-        RateLimitRule {
-            window_duration: Duration::from_secs(300), // 5分钟窗口
-            max_requests: 3,                           // 最多3次发送
-            block_duration: Duration::from_secs(300),  // 阻塞5分钟
-        }
-    }
-
     /// 一般API规则
     pub fn general_api() -> RateLimitRule {
         RateLimitRule {
@@ -247,7 +253,7 @@ impl RateLimitRules {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::time::{sleep, Duration};
+    use tokio::time::Duration;
 
     #[tokio::test]
     async fn test_rate_limiter_basic() {
@@ -300,6 +306,27 @@ mod tests {
         // 重置后应该允许请求
         let allowed = limiter.check_rate_limit(key, endpoint).await.unwrap();
         assert!(allowed, "Should be allowed after reset");
+    }
+
+    #[tokio::test]
+    async fn limits_are_tracked_per_endpoint_not_globally_per_client() {
+        let limiter = RateLimiter::new()
+            .with_default_rule(RateLimitRule {
+                window_duration: Duration::from_secs(60),
+                max_requests: 2,
+                block_duration: Duration::from_secs(120),
+            });
+
+        // 打满 /a 的配额
+        assert!(limiter.check_rate_limit("1.2.3.4", "/a").await.unwrap());
+        assert!(limiter.check_rate_limit("1.2.3.4", "/a").await.unwrap());
+        assert!(!limiter.check_rate_limit("1.2.3.4", "/a").await.unwrap());
+
+        // /b 必须仍然可用 —— 以前 /a 被封会连坐 /b
+        assert!(limiter.check_rate_limit("1.2.3.4", "/b").await.unwrap());
+
+        // 另一个客户端也不受影响
+        assert!(limiter.check_rate_limit("5.6.7.8", "/a").await.unwrap());
     }
 
     #[tokio::test]

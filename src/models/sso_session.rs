@@ -71,7 +71,4 @@ impl SsoSession {
         self.last_accessed_at = chrono::Utc::now().timestamp();
     }
 
-    pub fn has_client_session(&self, client_id: &str) -> bool {
-        self.client_sessions.iter().any(|cs| cs.client_id == client_id)
-    }
 }

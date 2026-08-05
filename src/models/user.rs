@@ -25,6 +25,9 @@ pub struct User {
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub verification_token: Option<String>,
+    /// 验证令牌的过期时间（Unix 秒）。以前的验证令牌永不过期。
+    #[serde(default)]
+    pub verification_token_expires_at: Option<i64>,
     pub account_status: String,
     #[serde(default = "default_membership_level")]
     pub membership_level: String,

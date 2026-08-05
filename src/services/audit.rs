@@ -1,18 +1,16 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{error, info, warn};
+use tracing::error;
 
 use crate::{
     error::{Result as ApiResult, AuthError},
     services::database::Database,
     routes::audit::{
-        ActivityMetric, AuthenticationStats, CategoryMetric, ExecutiveSummary,
-        FrequencyMetric, GeographicMetric, HourlyActivity, IpActivityMetric,
-        LockoutStats, RetentionMetrics, SecurityIncident, SecurityRecommendation,
-        StatusMetric, SuspiciousActivity, TimeseriesData, UserActivityMetric,
-        UserBehaviorAnalysis,
+        AuthenticationStats, CategoryMetric, ExecutiveSummary, HourlyActivity,
+        IpActivityMetric, LockoutStats, SecurityRecommendation, StatusMetric,
+        SuspiciousActivity, UserActivityMetric,
     },
 };
 
@@ -364,7 +362,7 @@ impl AuditService {
         let hourly_data: Vec<(i32, i64)> = result.take(0).unwrap_or_default();
         
         // Fill in missing hours with 0 count
-        let mut hourly_map: HashMap<i32, i64> = hourly_data.into_iter().collect();
+        let hourly_map: HashMap<i32, i64> = hourly_data.into_iter().collect();
         let mut distribution = Vec::new();
         
         for hour in 0..24 {

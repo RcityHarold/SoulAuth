@@ -2,15 +2,16 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rand::{distributions::Alphanumeric, Rng};
-use sha2::{Digest, Sha256};
 
 use crate::{
     models::oidc_client::{
-        OidcClient, CreateOidcClientRequest, OidcClientResponse, 
+        OidcClient, CreateOidcClientRequest, OidcClientResponse,
         ClientType, GrantType, ResponseType
     },
-    services::database::Database,
-    error::AuthError,
+    services::{
+        database::Database,
+        oidc::hash_client_secret,
+    },
 };
 
 #[derive(Clone)]
@@ -32,7 +33,7 @@ impl OidcClientService {
         // 生成客户端ID和密钥
         let client_id = generate_client_id();
         let client_secret = generate_client_secret();
-        let client_secret_hash = hash_client_secret(&client_secret);
+        let client_secret_hash = hash_client_secret(&client_secret)?;
 
         let now = Utc::now().timestamp();
 
@@ -199,7 +200,7 @@ impl OidcClientService {
     // 重新生成客户端密钥
     pub async fn regenerate_client_secret(&self, client_id: &str) -> Result<String> {
         let client_secret = generate_client_secret();
-        let client_secret_hash = hash_client_secret(&client_secret);
+        let client_secret_hash = hash_client_secret(&client_secret)?;
 
         let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = time::now() WHERE client_id = $client_id";
         
@@ -210,13 +211,6 @@ impl OidcClientService {
             .await?;
 
         Ok(client_secret)
-    }
-
-    // 验证客户端密钥
-    pub async fn verify_client_secret(&self, client_id: &str, client_secret: &str) -> Result<bool> {
-        let client = self.get_client(client_id).await?;
-        let provided_hash = hash_client_secret(client_secret);
-        Ok(provided_hash == client.client_secret_hash)
     }
 
     // 私有方法：保存客户端到数据库
@@ -324,10 +318,6 @@ fn generate_client_secret() -> String {
         .take(64)
         .map(char::from)
         .collect()
-}
-
-fn hash_client_secret(secret: &str) -> String {
-    format!("{:x}", Sha256::digest(secret.as_bytes()))
 }
 
 fn client_type_value(value: &ClientType) -> &'static str {

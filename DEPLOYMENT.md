@@ -56,6 +56,112 @@ surreal import --conn http://localhost:8000 --user root --pass root --ns product
 - 文档系统角色（3个文档专用角色）
 - 权限关联（为现有角色分配文档权限）
 
+## OIDC 签名密钥
+
+ID Token 使用 RS256 签名，公钥通过 `/api/oidc/jwks` 发布。生产环境必须提供一把持久私钥：
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out /etc/soulauth/oidc-signing.pem
+chmod 600 /etc/soulauth/oidc-signing.pem
+# 然后设置 OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem
+```
+
+未配置时进程启动会临时生成一把并打 WARN —— 重启后 `kid` 变化，已签发的 ID Token
+将无法验签，依赖方会出现随机的登录失败。
+
+## 从旧版本升级
+
+1. **所有用户需要重新登录。** 现在每次鉴权都会核对 `session` 表，登出与改密可以
+   真正吊销令牌；升级前签发的令牌若无对应会话记录将被拒绝。
+
+2. **执行权限迁移。** `initial_data.sql` 末尾新增了 `oidc_clients.read` /
+   `oidc_clients.write` 两个权限并授予 admin 角色。已有部署单独执行该段即可，
+   否则管理员将无法访问 `/api/oidc/clients`。
+
+3. **补充 user 表字段：**
+   ```sql
+   DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
+   ```
+
+4. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
+   存量行里存的是 record 链接，必须**先转换数据、再改字段定义**，否则改完之后
+   读取旧行会直接失败：
+   ```sql
+   -- ① 先把已有的 record 链接转成字符串
+   UPDATE oidc_client SET created_by = type::string(created_by)
+     WHERE created_by != NONE;
+   -- ② 再收紧字段类型
+   DEFINE FIELD created_by ON oidc_client TYPE string;
+   ```
+
+5. **社交相关表已不再使用**，可在确认无其他消费方后删除：
+   `friend_request`、`friendship`、`direct_conversation`、`direct_message`、
+   `social_group`、`social_group_member`、`group_thread`、`group_thread_message`、
+   `group_collab_run`。
+
+6. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
+   `OIDC_RSA_PRIVATE_KEY_PATH`。`JWT_SECRET` 现在要求至少 32 字符。
+
+7. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
+   手动执行——这与本文档开头"应用程序不应具有 DDL 权限"的原则一致。
+
+8. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
+   但建议逐个调用 `POST /api/oidc/clients/:client_id/regenerate-secret`
+   迁移到 Argon2 存储。
+
+9. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
+   ```bash
+   openssl rand -base64 32   # 填入 MFA_SECRET_ENCRYPTION_KEY
+   ```
+   不配置时会从 `JWT_SECRET` 派生并打 WARN —— 那样一来轮换 `JWT_SECRET`
+   会导致所有已存的 TOTP 密钥无法解密，生产环境务必单独配置。
+   存量的明文密钥可继续使用，并在下一次写入时自动就地加密。
+
+10. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
+    但建议让已启用 MFA 的用户重新生成一次（`POST /api/auth/mfa/setup`）。
+
+11. **`initial_data.sql` / `docs_permissions.sql` 现在是幂等的**（`CREATE` 全部
+    改为带确定性 ID 的 `UPSERT`），可以安全地重复执行。
+
+12. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
+    现在跳 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带 `return_to`。
+    登录页需要做两件事：调用 `POST /api/auth/login` 完成登录，
+    然后跳回 `return_to` 指向的地址；如果仍需要 Google 登录入口，
+    在页面上链到 `GET /api/auth/login/google` 即可。
+
+13. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
+    决定，`http://localhost:8080` 下会自动省略。
+
+14. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
+    每个请求都校验会话（吊销绝对即时，代价是每请求两次查询）。
+
+15. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
+    下旧定义会拒绝新写入）：
+    ```sql
+    -- 审计事件未必对应已存在的用户（登录失败、限流触发等）
+    DEFINE FIELD user_id ON user_activity TYPE option<record<user>>;
+    ```
+    如果 `user_activity` / `user_profile` / `user_preferences` 里已有历史数据，
+    由于此前的写入本就会被 SCHEMAFULL 拒绝，这些表大概率是空的；若确有数据，
+    需要把 datetime 值转成 Unix 秒后再启用新版本。
+
+16. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
+    并对应一条有效的 `session` 记录，升级前签发的 cookie 会被拒绝。
+
+17. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
+    验证邮件的链接现在是 `{VERIFY_EMAIL_PAGE_URL}?token=xxx`，页面拿到 token 后
+    再调 `GET /api/auth/verify-email/{token}`。
+
+18. **审计接口的响应结构有两处变化：**
+    - `GET /api/audit/system-health` 删除了 `connection_pool_used` /
+      `connection_pool_size` 两个字段（SurrealDB HTTP 客户端不暴露连接池指标，
+      之前一直是写死的 1/10）；内存与运行时长改为真实值。
+    - `GET /api/audit/security-report` 中 `user_retention_metrics` 的字段
+      由 `daily_retention` / `weekly_retention` / `monthly_retention` 改名为
+      `daily_active_rate` / `weekly_active_rate` / `monthly_active_rate`
+      —— 这个口径本来就是活跃率而非留存率。同一接口的
+      `geographic_distribution` 现在恒为空数组（没有接入 GeoIP 数据源）。
+
 ## 权限系统说明
 
 ### 系统角色

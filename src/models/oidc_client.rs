@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 use validator::Validate;
-use chrono::{DateTime, Utc};
 use surrealdb::types::SurrealValue;
 
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]

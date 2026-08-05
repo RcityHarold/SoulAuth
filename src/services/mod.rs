@@ -1,6 +1,8 @@
 pub mod audit;
+pub mod audit_logger;
 pub mod database;
 pub mod auth;
+pub mod auth_cache;
 pub mod email;
 pub mod oauth;
 pub mod rate_limiter;
@@ -9,6 +11,6 @@ pub mod account_lockout;
 pub mod rbac;
 pub mod user_management;
 pub mod oidc;
+pub mod oidc_keys;
 pub mod oidc_client_management;
 pub mod sso_session_management;
-pub mod social_hub;

@@ -3,7 +3,7 @@
 -- 在执行 initial_data.sql 之后运行此文件
 
 -- 文档管理权限
-CREATE permission:docs_read CONTENT {
+UPSERT permission:docs_read CONTENT {
     name: "docs.read",
     display_name: "查看文档",
     description: "查看和阅读文档内容",
@@ -14,7 +14,7 @@ CREATE permission:docs_read CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:docs_write CONTENT {
+UPSERT permission:docs_write CONTENT {
     name: "docs.write",
     display_name: "编辑文档",
     description: "创建、编辑和发布文档",
@@ -25,7 +25,7 @@ CREATE permission:docs_write CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:docs_delete CONTENT {
+UPSERT permission:docs_delete CONTENT {
     name: "docs.delete",
     display_name: "删除文档",
     description: "删除文档和章节",
@@ -36,7 +36,7 @@ CREATE permission:docs_delete CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:docs_admin CONTENT {
+UPSERT permission:docs_admin CONTENT {
     name: "docs.admin",
     display_name: "文档管理",
     description: "管理文档空间、权限和设置",
@@ -48,7 +48,7 @@ CREATE permission:docs_admin CONTENT {
 };
 
 -- 文档空间权限
-CREATE permission:spaces_read CONTENT {
+UPSERT permission:spaces_read CONTENT {
     name: "spaces.read",
     display_name: "查看文档空间",
     description: "查看和访问文档空间",
@@ -59,7 +59,7 @@ CREATE permission:spaces_read CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:spaces_write CONTENT {
+UPSERT permission:spaces_write CONTENT {
     name: "spaces.write",
     display_name: "管理文档空间",
     description: "创建、编辑文档空间和设置",
@@ -70,7 +70,7 @@ CREATE permission:spaces_write CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:spaces_delete CONTENT {
+UPSERT permission:spaces_delete CONTENT {
     name: "spaces.delete",
     display_name: "删除文档空间",
     description: "删除文档空间",
@@ -82,7 +82,7 @@ CREATE permission:spaces_delete CONTENT {
 };
 
 -- 文档评论权限
-CREATE permission:comments_read CONTENT {
+UPSERT permission:comments_read CONTENT {
     name: "comments.read",
     display_name: "查看评论",
     description: "查看文档评论和讨论",
@@ -93,7 +93,7 @@ CREATE permission:comments_read CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:comments_write CONTENT {
+UPSERT permission:comments_write CONTENT {
     name: "comments.write",
     display_name: "管理评论",
     description: "添加、编辑和回复评论",
@@ -104,7 +104,7 @@ CREATE permission:comments_write CONTENT {
     updated_at: time::unix()
 };
 
-CREATE permission:comments_delete CONTENT {
+UPSERT permission:comments_delete CONTENT {
     name: "comments.delete",
     display_name: "删除评论",
     description: "删除评论和讨论",
@@ -116,7 +116,7 @@ CREATE permission:comments_delete CONTENT {
 };
 
 -- 创建文档管理员角色
-CREATE role:docs_admin CONTENT {
+UPSERT role:docs_admin CONTENT {
     name: "docs_admin",
     display_name: "文档管理员",
     description: "拥有完整文档管理权限的管理员",
@@ -126,7 +126,7 @@ CREATE role:docs_admin CONTENT {
 };
 
 -- 创建文档编辑员角色
-CREATE role:docs_editor CONTENT {
+UPSERT role:docs_editor CONTENT {
     name: "docs_editor",
     display_name: "文档编辑员",
     description: "可以创建和编辑文档的角色",
@@ -136,7 +136,7 @@ CREATE role:docs_editor CONTENT {
 };
 
 -- 创建文档阅读者角色
-CREATE role:docs_reader CONTENT {
+UPSERT role:docs_reader CONTENT {
     name: "docs_reader",
     display_name: "文档阅读者",
     description: "只能查看文档的角色",
@@ -146,70 +146,70 @@ CREATE role:docs_reader CONTENT {
 };
 
 -- 为 admin 角色添加所有文档权限
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__docs_read CONTENT {
     role_id: role:admin,
     permission_id: permission:docs_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__docs_write CONTENT {
     role_id: role:admin,
     permission_id: permission:docs_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__docs_delete CONTENT {
     role_id: role:admin,
     permission_id: permission:docs_delete,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__docs_admin CONTENT {
     role_id: role:admin,
     permission_id: permission:docs_admin,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__spaces_read CONTENT {
     role_id: role:admin,
     permission_id: permission:spaces_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__spaces_write CONTENT {
     role_id: role:admin,
     permission_id: permission:spaces_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__spaces_delete CONTENT {
     role_id: role:admin,
     permission_id: permission:spaces_delete,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__comments_read CONTENT {
     role_id: role:admin,
     permission_id: permission:comments_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__comments_write CONTENT {
     role_id: role:admin,
     permission_id: permission:comments_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:admin__comments_delete CONTENT {
     role_id: role:admin,
     permission_id: permission:comments_delete,
     granted_at: time::unix(),
@@ -217,70 +217,70 @@ CREATE role_permission CONTENT {
 };
 
 -- 为 docs_admin 角色分配文档管理权限
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__docs_read CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:docs_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__docs_write CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:docs_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__docs_delete CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:docs_delete,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__docs_admin CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:docs_admin,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__spaces_read CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:spaces_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__spaces_write CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:spaces_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__spaces_delete CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:spaces_delete,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__comments_read CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:comments_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__comments_write CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:comments_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_admin__comments_delete CONTENT {
     role_id: role:docs_admin,
     permission_id: permission:comments_delete,
     granted_at: time::unix(),
@@ -288,35 +288,35 @@ CREATE role_permission CONTENT {
 };
 
 -- 为 docs_editor 角色分配编辑权限
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_editor__docs_read CONTENT {
     role_id: role:docs_editor,
     permission_id: permission:docs_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_editor__docs_write CONTENT {
     role_id: role:docs_editor,
     permission_id: permission:docs_write,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_editor__spaces_read CONTENT {
     role_id: role:docs_editor,
     permission_id: permission:spaces_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_editor__comments_read CONTENT {
     role_id: role:docs_editor,
     permission_id: permission:comments_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_editor__comments_write CONTENT {
     role_id: role:docs_editor,
     permission_id: permission:comments_write,
     granted_at: time::unix(),
@@ -324,21 +324,21 @@ CREATE role_permission CONTENT {
 };
 
 -- 为 docs_reader 角色分配只读权限
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_reader__docs_read CONTENT {
     role_id: role:docs_reader,
     permission_id: permission:docs_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_reader__spaces_read CONTENT {
     role_id: role:docs_reader,
     permission_id: permission:spaces_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:docs_reader__comments_read CONTENT {
     role_id: role:docs_reader,
     permission_id: permission:comments_read,
     granted_at: time::unix(),
@@ -346,21 +346,21 @@ CREATE role_permission CONTENT {
 };
 
 -- 为 user 角色添加基础文档读取权限
-CREATE role_permission CONTENT {
+UPSERT role_permission:user__docs_read CONTENT {
     role_id: role:user,
     permission_id: permission:docs_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:user__spaces_read CONTENT {
     role_id: role:user,
     permission_id: permission:spaces_read,
     granted_at: time::unix(),
     granted_by: user:system
 };
 
-CREATE role_permission CONTENT {
+UPSERT role_permission:user__comments_read CONTENT {
     role_id: role:user,
     permission_id: permission:comments_read,
     granted_at: time::unix(),

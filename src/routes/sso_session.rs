@@ -9,15 +9,13 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    config::Config,
     error::AuthError,
     models::sso_session::{CreateSsoSessionRequest, SsoSessionResponse},
     services::{
-        auth::AuthService,
         database::Database,
         sso_session_management::{SessionStats, SsoSessionService, UserSessionStats},
     },
-    utils::jwt::Claims,
+    utils::jwt::AuthedUser,
     require_permission,
 };
 
@@ -56,13 +54,10 @@ struct CleanupResponse {
 // 创建 SSO 会话
 async fn create_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Json(mut request): Json<CreateSsoSessionRequest>,
 ) -> Result<Json<SsoSessionResponse>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     request.user_id = current_user_id;
 
     match session_service.create_session(request).await {
@@ -73,14 +68,12 @@ async fn create_session(
 
 // 获取 SSO 会话
 async fn get_session(
-    Extension(session_service): Extension<Arc<SsoSessionService>>,
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    Extension(session_service): Extension<Arc<SsoSessionService>>,
+    authed_user: AuthedUser,
     Path(session_id): Path<String>,
 ) -> Result<Json<SsoSessionResponse>, AuthError> {
-    let auth_service = AuthService::new(db.clone(), config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
 
     match session_service.get_session(&session_id).await {
         Ok(session) => {
@@ -107,13 +100,10 @@ async fn get_session(
 // 添加客户端会话
 async fn add_client_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path((session_id, client_id)): Path<(String, String)>,
 ) -> Result<Json<SsoSessionResponse>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     let session = session_service.get_session(&session_id).await
         .map_err(|_| AuthError::NotFound("Session not found".to_string()))?;
 
@@ -130,13 +120,10 @@ async fn add_client_session(
 // 移除客户端会话（单点登出）
 async fn remove_client_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path((session_id, client_id)): Path<(String, String)>,
 ) -> Result<Json<SsoSessionResponse>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     let session = session_service.get_session(&session_id).await
         .map_err(|_| AuthError::NotFound("Session not found".to_string()))?;
 
@@ -153,9 +140,7 @@ async fn remove_client_session(
 // 延长会话
 async fn extend_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path(session_id): Path<String>,
     Json(request): Json<ExtendSessionRequest>,
 ) -> Result<Json<SsoSessionResponse>, AuthError> {
@@ -163,8 +148,7 @@ async fn extend_session(
         return Err(AuthError::BadRequest("Invalid extend duration".to_string()));
     }
 
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     let session = session_service.get_session(&session_id).await
         .map_err(|_| AuthError::NotFound("Session not found".to_string()))?;
 
@@ -181,13 +165,10 @@ async fn extend_session(
 // 获取用户的所有会话
 async fn get_user_sessions(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path(_user_id): Path<String>,
 ) -> Result<Json<Vec<SsoSessionResponse>>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
 
     match session_service.get_user_sessions(&current_user_id).await {
         Ok(sessions) => Ok(Json(sessions)),
@@ -198,13 +179,10 @@ async fn get_user_sessions(
 // 终止用户的所有会话
 async fn logout_user_all_sessions(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path(_user_id): Path<String>,
 ) -> Result<Json<LogoutResponse>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
 
     match session_service.logout_user_all_sessions(&current_user_id).await {
         Ok(count) => {
@@ -221,13 +199,10 @@ async fn logout_user_all_sessions(
 // 终止特定会话
 async fn logout_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path(session_id): Path<String>,
 ) -> Result<StatusCode, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     let session = session_service.get_session(&session_id).await
         .map_err(|_| AuthError::NotFound("Session not found".to_string()))?;
 
@@ -244,13 +219,10 @@ async fn logout_session(
 // 获取用户会话统计
 async fn get_user_session_stats(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
-    Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    authed_user: AuthedUser,
     Path(_user_id): Path<String>,
 ) -> Result<Json<UserSessionStats>, AuthError> {
-    let auth_service = AuthService::new(db, config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
 
     match session_service.get_user_session_stats(&current_user_id).await {
         Ok(stats) => Ok(Json(stats)),
@@ -260,13 +232,11 @@ async fn get_user_session_stats(
 
 // 获取全局会话统计
 async fn get_session_stats(
-    Extension(session_service): Extension<Arc<SsoSessionService>>,
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    Extension(session_service): Extension<Arc<SsoSessionService>>,
+    authed_user: AuthedUser,
 ) -> Result<Json<SessionStats>, AuthError> {
-    let auth_service = AuthService::new(db.clone(), config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     require_permission!(&db, &current_user_id, "security.read");
 
     match session_service.get_session_stats().await {
@@ -277,13 +247,11 @@ async fn get_session_stats(
 
 // 清理过期会话
 async fn cleanup_expired_sessions(
-    Extension(session_service): Extension<Arc<SsoSessionService>>,
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    Extension(session_service): Extension<Arc<SsoSessionService>>,
+    authed_user: AuthedUser,
 ) -> Result<Json<CleanupResponse>, AuthError> {
-    let auth_service = AuthService::new(db.clone(), config)?;
-    let current_user_id = auth_service.resolve_authenticated_user_id(&claims).await?;
+    let current_user_id = authed_user.id()?;
     require_permission!(&db, &current_user_id, "security.read");
 
     match session_service.cleanup_expired_sessions().await {

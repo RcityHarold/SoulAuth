@@ -6,26 +6,27 @@ use crate::{
         MfaStatusResponse, EnableTotpRequest, VerifyTotpRequest, UseBackupCodeRequest
     },
     services::database::Database,
+    utils::crypto::{hash_backup_code, verify_backup_code, SecretCipher},
 };
 use chrono::Utc;
 use qrcode::{QrCode, render::svg};
 use std::sync::Arc;
 use totp_rs::{Algorithm, TOTP, Secret};
 use tracing::{info, error, debug};
-use uuid::Uuid;
 
 /// MFA服务
 pub struct MfaService {
     db: Database,
-    config: Config,
+    /// TOTP 密钥的静态加密器。
+    cipher: SecretCipher,
 }
 
 impl MfaService {
     /// 创建新的MFA服务实例
     pub fn new(db: Arc<Database>, config: Config) -> Result<Self> {
-        Ok(Self { 
-            db: (*db).clone(), 
-            config 
+        Ok(Self {
+            db: (*db).clone(),
+            cipher: SecretCipher::from_config(&config)?,
         })
     }
 
@@ -40,10 +41,14 @@ impl MfaService {
             }
         }
 
-        // 生成TOTP密钥
-        use rand::Rng;
-        let mut rng = rand::thread_rng();
-        let secret_bytes: Vec<u8> = (0..20).map(|_| rng.gen()).collect();
+        // 生成TOTP密钥。
+        // 注意 rng 必须在 await 之前析构：ThreadRng 不是 Send，
+        // 跨 await 持有会让整个 handler future 变成 !Send，路由注册直接编译不过。
+        let secret_bytes: Vec<u8> = {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            (0..20).map(|_| rng.gen()).collect()
+        };
         let secret_str = base32::encode(base32::Alphabet::RFC4648 { padding: false }, &secret_bytes);
         let secret = Secret::Encoded(secret_str.clone());
 
@@ -72,16 +77,20 @@ impl MfaService {
         use base64::{Engine as _, engine::general_purpose};
         let qr_data_url = format!("data:image/svg+xml;base64,{}", general_purpose::STANDARD.encode(qr_svg));
 
-        // 生成备用恢复代码
+        // 生成备用恢复代码：明文只在这一次返回给用户，库里存 Argon2 哈希。
         let backup_codes = UserMfa::generate_backup_codes();
+        let hashed_backup_codes = backup_codes
+            .iter()
+            .map(|code| hash_backup_code(code))
+            .collect::<Result<Vec<_>>>()?;
 
         // 保存MFA配置到数据库（状态为Pending）
         let mfa_config = UserMfa {
             user_id: user_id.to_string(),
             status: MfaStatus::Pending,
             method: MfaMethod::Totp,
-            totp_secret: Some(secret_str.clone()),
-            backup_codes: backup_codes.clone(),
+            totp_secret: Some(self.cipher.encrypt(&secret_str)?),
+            backup_codes: hashed_backup_codes,
             created_at: Utc::now(),
             updated_at: Utc::now(),
             last_used_at: None,
@@ -109,12 +118,10 @@ impl MfaService {
             return Err(AuthError::ServerError("TOTP not in pending state".to_string()));
         }
 
-        let secret = mfa_config.totp_secret
-            .as_ref()
-            .ok_or_else(|| AuthError::ServerError("TOTP secret not found".to_string()))?;
+        let secret = self.decrypted_secret(&mfa_config)?;
 
         // 验证TOTP代码
-        if self.verify_totp_code(secret, &request.totp_code)? {
+        if self.verify_totp_code(&secret, &request.totp_code)? {
             // 更新状态为已启用
             mfa_config.status = MfaStatus::Enabled;
             mfa_config.updated_at = Utc::now();
@@ -144,11 +151,9 @@ impl MfaService {
             });
         }
 
-        let secret = mfa_config.totp_secret
-            .as_ref()
-            .ok_or_else(|| AuthError::ServerError("TOTP secret not found".to_string()))?;
+        let secret = self.decrypted_secret(&mfa_config)?;
 
-        if self.verify_totp_code(secret, &request.totp_code)? {
+        if self.verify_totp_code(&secret, &request.totp_code)? {
             // 更新最后使用时间
             mfa_config.last_used_at = Some(Utc::now());
             self.save_user_mfa(&mfa_config).await?;
@@ -185,8 +190,13 @@ impl MfaService {
             });
         }
 
-        // 检查备用代码是否存在
-        if let Some(index) = mfa_config.backup_codes.iter().position(|code| code == &request.backup_code) {
+        // 逐条哈希比对；命中即消费掉该条。
+        let hit = mfa_config
+            .backup_codes
+            .iter()
+            .position(|stored| verify_backup_code(stored, &request.backup_code));
+
+        if let Some(index) = hit {
             // 移除已使用的备用代码
             mfa_config.backup_codes.remove(index);
             mfa_config.last_used_at = Some(Utc::now());
@@ -252,12 +262,34 @@ impl MfaService {
         }
     }
 
-    /// 检查用户是否启用了MFA
-    pub async fn is_mfa_enabled(&self, user_id: &str) -> bool {
+    /// 返回用户已启用的 MFA 方式；没有配置则返回 `Ok(None)`。
+    ///
+    /// 登录链路用它决定是否要走两步验证，因此**必须 fail-closed**：
+    /// 查询出错时返回 Err 让登录直接失败，而不是当作"未启用 MFA"放行 ——
+    /// 否则一次数据库抖动就等于对所有账号临时关闭了二次验证。
+    pub async fn enabled_method(&self, user_id: &str) -> Result<Option<MfaMethod>> {
         match self.get_user_mfa(user_id).await {
-            Ok(mfa_config) => mfa_config.status == MfaStatus::Enabled,
-            Err(_) => false,
+            Ok(config) if config.status == MfaStatus::Enabled => Ok(Some(config.method)),
+            Ok(_) => Ok(None),
+            Err(AuthError::UserNotFound) => Ok(None),
+            Err(e) => {
+                error!("Failed to load MFA config for user {}: {:?}", user_id, e);
+                Err(e)
+            }
         }
+    }
+
+    /// 取出并解密 TOTP 密钥。
+    ///
+    /// 兼容升级前写入的明文记录：`SecretCipher::decrypt` 对无密文前缀的值原样返回，
+    /// 这些记录会在下一次 `save_user_mfa` 时被自动加密（见 `save_user_mfa`）。
+    fn decrypted_secret(&self, mfa_config: &UserMfa) -> Result<String> {
+        let stored = mfa_config
+            .totp_secret
+            .as_ref()
+            .ok_or_else(|| AuthError::ServerError("TOTP secret not found".to_string()))?;
+
+        self.cipher.decrypt(stored)
     }
 
     /// 验证TOTP代码
@@ -283,52 +315,84 @@ impl MfaService {
 
     /// 从数据库获取用户MFA配置
     async fn get_user_mfa(&self, user_id: &str) -> Result<UserMfa> {
-        let query = "SELECT * FROM user_mfa WHERE user_id = $user_id";
-        
-        let mut result = self.db.query(query)
-            .bind(("user_id", user_id.to_owned()))
+        let mut result = self
+            .db
+            .raw_query(
+                "mfa_get_user_config",
+                "SELECT * FROM user_mfa WHERE user_id = $user_id LIMIT 1",
+                serde_json::json!({ "user_id": user_id }),
+            )
             .await?;
-        
+
         let mfa_config: Option<UserMfa> = result.take(0)?;
-        
+
         mfa_config.ok_or(AuthError::UserNotFound)
     }
 
-    /// 保存用户MFA配置到数据库
+    /// 保存用户MFA配置到数据库。
+    ///
+    /// 写入前统一把 TOTP 密钥转成密文 —— 存量的明文记录只要经过任意一次
+    /// 保存（启用、验证、用备用码）就会被就地加密。
+    /// 注意：`raw_query` 用 JSON 绑定，`DateTime` 会序列化成 RFC3339 字符串，
+    /// 而 `user_mfa` 的时间列是 `datetime` —— SCHEMAFULL 不会自动强转，
+    /// 必须在语句里显式 `type::datetime()`，并兼容 `Option::None` 的 NULL。
     async fn save_user_mfa(&self, mfa_config: &UserMfa) -> Result<()> {
+        let mfa_config = &self.with_encrypted_secret(mfa_config)?;
         let query = r#"
-            UPSERT type::thing('user_mfa', $user_id) CONTENT {
+            UPSERT type::record('user_mfa', $user_id) CONTENT {
                 user_id: $user_id,
                 status: $status,
                 method: $method,
                 totp_secret: $totp_secret,
                 backup_codes: $backup_codes,
-                created_at: $created_at,
-                updated_at: $updated_at,
-                last_used_at: $last_used_at
+                created_at: type::datetime($created_at),
+                updated_at: type::datetime($updated_at),
+                last_used_at: IF $last_used_at = NONE OR $last_used_at = NULL {
+                    NONE
+                } ELSE {
+                    type::datetime($last_used_at)
+                }
             }
         "#;
 
-        self.db.query(query)
-            .bind(("user_id", mfa_config.user_id.clone()))
-            .bind(("status", mfa_config.status.clone()))
-            .bind(("method", mfa_config.method.clone()))
-            .bind(("totp_secret", mfa_config.totp_secret.clone()))
-            .bind(("backup_codes", mfa_config.backup_codes.clone()))
-            .bind(("created_at", mfa_config.created_at))
-            .bind(("updated_at", mfa_config.updated_at))
-            .bind(("last_used_at", mfa_config.last_used_at))
+        self.db
+            .raw_query(
+                "mfa_save_user_config",
+                query,
+                serde_json::json!({
+                    "user_id": mfa_config.user_id,
+                    "status": mfa_config.status,
+                    "method": mfa_config.method,
+                    "totp_secret": mfa_config.totp_secret,
+                    "backup_codes": mfa_config.backup_codes,
+                    "created_at": mfa_config.created_at,
+                    "updated_at": mfa_config.updated_at,
+                    "last_used_at": mfa_config.last_used_at,
+                }),
+            )
             .await?;
 
         Ok(())
     }
 
+    fn with_encrypted_secret(&self, mfa_config: &UserMfa) -> Result<UserMfa> {
+        let mut config = mfa_config.clone();
+        if let Some(secret) = &config.totp_secret {
+            if !SecretCipher::is_encrypted(secret) {
+                config.totp_secret = Some(self.cipher.encrypt(secret)?);
+            }
+        }
+        Ok(config)
+    }
+
     /// 删除用户MFA配置
     async fn delete_user_mfa(&self, user_id: &str) -> Result<()> {
-        let query = "DELETE user_mfa WHERE user_id = $user_id";
-        
-        self.db.query(query)
-            .bind(("user_id", user_id.to_owned()))
+        self.db
+            .raw_query(
+                "mfa_delete_user_config",
+                "DELETE user_mfa WHERE user_id = $user_id",
+                serde_json::json!({ "user_id": user_id }),
+            )
             .await?;
 
         Ok(())
@@ -345,7 +409,6 @@ impl From<totp_rs::TotpUrlError> for AuthError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio_test;
 
     #[tokio::test]
     async fn test_totp_code_verification() {
@@ -354,7 +417,6 @@ mod tests {
         
         // 测试TOTP代码验证逻辑
         let secret = Secret::Raw((0u8..20).collect());
-        let secret_str = secret.to_encoded().to_string();
         
         let totp = TOTP::new(
             Algorithm::SHA1,

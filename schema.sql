@@ -16,6 +16,7 @@ DEFINE FIELD username_normalized ON user TYPE string;
 DEFINE FIELD password ON user TYPE option<string>;
 DEFINE FIELD verified ON user TYPE bool DEFAULT false;
 DEFINE FIELD verification_token ON user TYPE option<string>;
+DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
 DEFINE FIELD membership_level ON user TYPE string DEFAULT "FREE";
 DEFINE FIELD membership_expiry ON user TYPE option<string>;
@@ -162,128 +163,22 @@ DEFINE INDEX user_preferences_user_idx ON user_preferences COLUMNS user_id UNIQU
 
 -- 用户活动日志表
 DEFINE TABLE user_activity SCHEMAFULL;
-DEFINE FIELD user_id ON user_activity TYPE record<user>;
+-- 登录失败、限流触发这类事件未必对应一个已存在的用户，故为可选。
+DEFINE FIELD user_id ON user_activity TYPE option<record<user>>;
 DEFINE FIELD action ON user_activity TYPE string;
 DEFINE FIELD category ON user_activity TYPE string;
 DEFINE FIELD ip_address ON user_activity TYPE string;
 DEFINE FIELD user_agent ON user_activity TYPE string;
+-- details 是按事件类型变化的自由结构（reason / provider / permission / endpoint ...）。
+-- SCHEMAFULL 表上必须显式放开嵌套键，否则写入会被拒：
+--   "Found field 'details.endpoint', but no such field exists for table 'user_activity'"
 DEFINE FIELD details ON user_activity TYPE object;
+DEFINE FIELD details.* ON user_activity TYPE any;
 DEFINE FIELD status ON user_activity TYPE string;
 DEFINE FIELD timestamp ON user_activity TYPE number;
 DEFINE INDEX user_activity_user_idx ON user_activity COLUMNS user_id;
 DEFINE INDEX user_activity_timestamp_idx ON user_activity COLUMNS timestamp;
 DEFINE INDEX user_activity_category_idx ON user_activity COLUMNS category;
-
--- 好友申请表
-DEFINE TABLE friend_request SCHEMAFULL;
-DEFINE FIELD requester_id ON friend_request TYPE record<user>;
-DEFINE FIELD addressee_id ON friend_request TYPE record<user>;
-DEFINE FIELD status ON friend_request TYPE string DEFAULT "Pending";
-DEFINE FIELD message ON friend_request TYPE option<string>;
-DEFINE FIELD created_at ON friend_request TYPE number;
-DEFINE FIELD responded_at ON friend_request TYPE option<number>;
-DEFINE INDEX friend_request_lookup_idx ON friend_request COLUMNS requester_id, addressee_id, status;
-DEFINE INDEX friend_request_addressee_idx ON friend_request COLUMNS addressee_id, status, created_at;
-
--- 好友关系表
-DEFINE TABLE friendship SCHEMAFULL;
-DEFINE FIELD user_a ON friendship TYPE record<user>;
-DEFINE FIELD user_b ON friendship TYPE record<user>;
-DEFINE FIELD created_at ON friendship TYPE number;
-DEFINE FIELD created_from_request_id ON friendship TYPE option<record<friend_request>>;
-DEFINE INDEX friendship_unique_idx ON friendship COLUMNS user_a, user_b UNIQUE;
-DEFINE INDEX friendship_user_a_idx ON friendship COLUMNS user_a;
-DEFINE INDEX friendship_user_b_idx ON friendship COLUMNS user_b;
-
--- 人类私聊会话表
-DEFINE TABLE direct_conversation SCHEMAFULL;
-DEFINE FIELD user_a ON direct_conversation TYPE record<user>;
-DEFINE FIELD user_b ON direct_conversation TYPE record<user>;
-DEFINE FIELD created_at ON direct_conversation TYPE number;
-DEFINE FIELD updated_at ON direct_conversation TYPE number;
-DEFINE INDEX direct_conversation_unique_idx ON direct_conversation COLUMNS user_a, user_b UNIQUE;
-DEFINE INDEX direct_conversation_user_a_idx ON direct_conversation COLUMNS user_a, updated_at;
-DEFINE INDEX direct_conversation_user_b_idx ON direct_conversation COLUMNS user_b, updated_at;
-
--- 人类私聊消息表
-DEFINE TABLE direct_message SCHEMAFULL;
-DEFINE FIELD conversation_id ON direct_message TYPE record<direct_conversation>;
-DEFINE FIELD sender_id ON direct_message TYPE record<user>;
-DEFINE FIELD recipient_id ON direct_message TYPE record<user>;
-DEFINE FIELD content ON direct_message TYPE string;
-DEFINE FIELD created_at ON direct_message TYPE number;
-DEFINE INDEX direct_message_conversation_idx ON direct_message COLUMNS conversation_id, created_at;
-DEFINE INDEX direct_message_recipient_idx ON direct_message COLUMNS recipient_id, created_at;
-
--- 社交群组表
-DEFINE TABLE social_group SCHEMAFULL;
-DEFINE FIELD name ON social_group TYPE string;
-DEFINE FIELD avatar ON social_group TYPE string;
-DEFINE FIELD group_type ON social_group TYPE number;
-DEFINE FIELD level ON social_group TYPE string;
-DEFINE FIELD owner_id ON social_group TYPE string;
-DEFINE FIELD created_at ON social_group TYPE string;
-DEFINE FIELD admin_ids ON social_group TYPE array;
-DEFINE FIELD member_ids ON social_group TYPE array;
-DEFINE FIELD announcement ON social_group TYPE option<string>;
-DEFINE FIELD settings ON social_group TYPE option<object>;
-DEFINE FIELD settings.join_mode ON social_group TYPE string;
-DEFINE FIELD settings.allow_member_invite ON social_group TYPE bool;
-DEFINE FIELD settings.allow_file_upload ON social_group TYPE bool;
-DEFINE FIELD code ON social_group TYPE option<string>;
-DEFINE FIELD human_member_ids ON social_group TYPE array;
-DEFINE FIELD ai_member_ids ON social_group TYPE array;
-DEFINE FIELD description ON social_group TYPE option<string>;
-DEFINE FIELD max_humans ON social_group TYPE option<number>;
-DEFINE FIELD max_ais ON social_group TYPE option<number>;
-DEFINE FIELD member_user_ids ON social_group TYPE array;
-DEFINE INDEX social_group_owner_idx ON social_group COLUMNS owner_id;
-
-DEFINE TABLE social_group_member SCHEMAFULL;
-DEFINE FIELD group_id ON social_group_member TYPE string;
-DEFINE FIELD member_id ON social_group_member TYPE string;
-DEFINE FIELD member_kind ON social_group_member TYPE string;
-DEFINE FIELD created_at ON social_group_member TYPE string;
-DEFINE INDEX social_group_member_lookup_idx ON social_group_member COLUMNS group_id, member_id, member_kind UNIQUE;
-DEFINE INDEX social_group_member_member_idx ON social_group_member COLUMNS member_id, member_kind;
-
-DEFINE TABLE group_thread SCHEMAFULL;
-DEFINE FIELD group_id ON group_thread TYPE string;
-DEFINE FIELD thread_type ON group_thread TYPE string;
-DEFINE FIELD title ON group_thread TYPE string;
-DEFINE FIELD created_by ON group_thread TYPE string;
-DEFINE FIELD status ON group_thread TYPE string;
-DEFINE FIELD created_at ON group_thread TYPE string;
-DEFINE FIELD updated_at ON group_thread TYPE string;
-DEFINE INDEX group_thread_group_idx ON group_thread COLUMNS group_id, updated_at;
-
-DEFINE TABLE group_thread_message SCHEMAFULL;
-DEFINE FIELD group_id ON group_thread_message TYPE string;
-DEFINE FIELD thread_id ON group_thread_message TYPE string;
-DEFINE FIELD sender_id ON group_thread_message TYPE string;
-DEFINE FIELD sender_kind ON group_thread_message TYPE string;
-DEFINE FIELD message_type ON group_thread_message TYPE string;
-DEFINE FIELD content ON group_thread_message TYPE string;
-DEFINE FIELD reply_to ON group_thread_message TYPE option<string>;
-DEFINE FIELD created_at ON group_thread_message TYPE string;
-DEFINE INDEX group_thread_message_thread_idx ON group_thread_message COLUMNS thread_id, created_at;
-
-DEFINE TABLE group_collab_run SCHEMAFULL;
-DEFINE FIELD group_id ON group_collab_run TYPE string;
-DEFINE FIELD thread_id ON group_collab_run TYPE string;
-DEFINE FIELD scenario_type ON group_collab_run TYPE number;
-DEFINE FIELD triggered_by ON group_collab_run TYPE string;
-DEFINE FIELD strategy_type ON group_collab_run TYPE string;
-DEFINE FIELD status ON group_collab_run TYPE string;
-DEFINE FIELD prompt ON group_collab_run TYPE string;
-DEFINE FIELD participant_ids ON group_collab_run TYPE array;
-DEFINE FIELD metadata ON group_collab_run TYPE option<object>;
-DEFINE FIELD result_summary ON group_collab_run TYPE option<string>;
-DEFINE FIELD result_payload ON group_collab_run TYPE option<object>;
-DEFINE FIELD created_at ON group_collab_run TYPE string;
-DEFINE FIELD updated_at ON group_collab_run TYPE string;
-DEFINE FIELD completed_at ON group_collab_run TYPE option<string>;
-DEFINE INDEX group_collab_run_thread_idx ON group_collab_run COLUMNS thread_id, created_at;
 
 -- ===============================
 -- OIDC SSO 相关表结构
@@ -305,7 +200,7 @@ DEFINE FIELD access_token_lifetime ON oidc_client TYPE number DEFAULT 3600; -- 1
 DEFINE FIELD refresh_token_lifetime ON oidc_client TYPE number DEFAULT 86400; -- 24小时
 DEFINE FIELD id_token_lifetime ON oidc_client TYPE number DEFAULT 3600; -- 1小时
 DEFINE FIELD is_active ON oidc_client TYPE bool DEFAULT true;
-DEFINE FIELD created_by ON oidc_client TYPE record<user>;
+DEFINE FIELD created_by ON oidc_client TYPE string;
 DEFINE FIELD created_at ON oidc_client TYPE number;
 DEFINE FIELD updated_at ON oidc_client TYPE number;
 DEFINE INDEX oidc_client_id_idx ON oidc_client COLUMNS client_id UNIQUE;

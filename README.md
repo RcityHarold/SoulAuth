@@ -38,7 +38,7 @@
 
 ### 安全防护层 🛡️
 - **速率限制 (Rate Limiting)**: 防止暴力破解和API滥用
-- **多因素认证 (MFA)**: TOTP/Google Authenticator支持
+- **多因素认证 (MFA)**: TOTP/Google Authenticator，已接入两步登录链路
 - **账户锁定机制**: 多次失败登录后自动锁定账户
 - **智能安全检查**: 基于IP和用户的双重保护
 - **自动安全管理**: 过期记录清理和动态解锁
@@ -66,60 +66,100 @@
 - **单点登录**: 支持跨应用的无缝身份验证
 - **授权码流程**: 标准的 OAuth 2.0 授权码流程
 - **PKCE 支持**: 代码质询防止授权码拦截攻击
-- **JWT ID Token**: 标准的身份令牌生成和验证
+- **JWT ID Token**: RS256 签名，公钥通过 JWKS 端点发布
 - **多客户端支持**: 支持 Web、移动、SPA 等不同类型客户端
 - **会话管理**: 完整的 SSO 会话生命周期管理
-- **单点登出**: 支持全局和单应用登出
+- **单点登出**: 校验 id_token_hint 并吊销对应令牌与会话
 - **Discovery 端点**: 标准的 OIDC 发现和配置端点
 
-### 最新更新 (OIDC SSO 系统完成版本) 🎉
-- 🔐 **OIDC 单点登录完成**: 完整的企业级 SSO 解决方案（第五阶段已完成）
-  - ✅ **OIDC 核心协议**: 完整的 OpenID Connect 1.0 实现
-  - ✅ **标准端点**: Discovery、授权、令牌、用户信息、登出端点
-  - ✅ **授权码流程**: 支持 PKCE 的安全授权码流程
-  - ✅ **令牌管理**: 访问令牌、刷新令牌、ID 令牌完整生命周期
-  - ✅ **客户端管理**: 多类型客户端注册、配置、密钥管理
-  - ✅ **SSO 会话**: 跨应用会话同步、单点登出、会话统计
-  - ✅ **安全特性**: PKCE、作用域控制、客户端认证、签名验证
-- 📊 **监控审计系统完成**: 全面的安全监控和审计体系（第四阶段已完成）
-  - ✅ **安全仪表板**: 实时安全指标概览和趋势分析
-  - ✅ **审计日志分析**: 用户活动分类统计和行为分析
-  - ✅ **安全事件监控**: 失败登录、权限拒绝、可疑活动检测
-  - ✅ **系统健康监控**: 数据库状态、内存使用、连接池监控
-  - ✅ **安全报告生成**: 自动生成详细的安全分析报告
-  - ✅ **威胁检测**: 基于行为模式的异常活动识别
-  - ✅ **性能指标**: 认证成功率、锁定统计、速率限制违规
-  - ✅ **风险评估**: 自动风险级别计算和安全建议
-- 👤 **用户生命周期管理完成**: 完整的用户管理体系（第三阶段已完成）
-  - ✅ **用户档案系统**: 完整个人信息管理、联系方式、头像支持
-  - ✅ **账户状态管理**: 五种状态控制（Active、Inactive、Suspended、PendingDeletion、Deleted）
-  - ✅ **用户偏好设置**: 主题、语言、通知、安全偏好等个性化配置
-  - ✅ **活动审计系统**: 详细操作日志、分类管理、时间范围查询
-  - ✅ **管理员功能**: 用户列表、搜索、状态变更、批量管理
-  - ✅ **登录追踪**: 最后登录时间和IP地址记录
-  - ✅ **权限集成**: 与RBAC系统完全集成的权限控制
-- 🔐 **权限系统完成**: 完整的RBAC（基于角色的访问控制）系统（第二阶段已完成）
-  - ✅ **角色管理**: 创建、编辑、查询角色，支持系统角色和自定义角色
-  - ✅ **权限管理**: 基于资源和操作的细粒度权限控制
-  - ✅ **用户角色分配**: 灵活的用户角色分配和移除机制
-  - ✅ **权限检查中间件**: 便捷的权限验证宏和中间件
-  - ✅ **系统初始化**: 自动创建系统角色和权限
-  - ✅ **权限保护**: 所有RBAC接口都有相应的权限保护
-- 🛡️ **安全防护层**: 全面的安全防护体系（第一阶段已完成）
-  - ✅ **速率限制**: 智能API请求频率控制，防止暴力破解
-  - ✅ **多因素认证**: 完整TOTP/Google Authenticator支持
-  - ✅ **账户锁定**: 自动锁定机制，多维度安全保护
-  - ✅ **设备安全**: IP和用户双重锁定策略
-  - ✅ **自动管理**: 定期清理和智能解锁
-- 🔒 **安全修复**: 移除JWT密钥硬编码，强制使用环境变量
-- 🔒 **安全修复**: 移除敏感信息日志泄露（邮箱、令牌等）
-- 🔒 **数据库安全**: 添加连接超时和错误处理改进
-- ✨ **新功能**: 完整的密码重置流程（请求重置、验证令牌、重置密码）
-- ✨ **新功能**: 真正的会话管理系统（登出、会话列表、批量登出）
-- 🔧 **修复**: 邮箱验证逻辑优化（注册后强制验证才能登录）
-- 🔧 **修复**: OAuth 用户记录处理改进
-- 📊 **数据库**: 新增 password_reset_token、session、user_mfa、account_lockout、role、permission、user_role、role_permission、user_profile、user_preferences、user_activity、oidc_client、oidc_authorization_code、oidc_access_token、oidc_refresh_token、sso_session 表
-- 📊 **监控审计**: 完整的审计API端点集，支持安全仪表板、指标分析、系统健康监控和安全报告生成
+### 最新更新：安全整改与范围收敛 🔧
+
+本轮改动做了两件事：**把宣称已完成但实际断裂的功能补上**，以及**删掉不属于认证系统的社交功能**。
+
+#### 移除的内容
+- 删除全部社交功能：好友申请 / 好友关系、私聊会话与消息、群组与群成员、群话题与群消息、
+  AI 协作运行、WebSocket 社交推送。对应的 6 个 model、`SocialHub` 服务、
+  `routes/auth.rs` 中约 2/3 的代码以及 9 张数据库表一并删除。
+- `/api/ops` 只保留会员分布概览（并已加鉴权），群组 / 会话看板随社交一并移除。
+
+#### 修复的缺陷
+- **RBAC 路由此前在运行时必然 500**：所有 handler 依赖一个从未被注入的 `User` extension。
+  现统一改用 `AuthedUser` 提取器（Bearer → 校验会话 → 载入用户 → 检查账号状态）。
+- **登出现在真正生效**：每次鉴权都会核对 `session` 表，登出 / 改密后旧 JWT 立即失效。
+- **MFA 已接入登录链路**：此前 `services/mfa.rs` 没有任何路由和调用方。
+- **OIDC ID Token 改用 RS256**，`/api/oidc/jwks` 返回真实公钥（`n` / `e` / `kid`），
+  第三方 RP 可独立验签；此前是 HS256 对称密钥 + 空 JWKS。
+- **OIDC 刷新令牌真正落库**：`save/get/update` 此前是空实现，刷新必然失败；
+  现支持轮换、重放检测（复用即吊销该客户端下全部令牌）与 scope 收敛。
+- **OIDC 登出不再是空壳**：校验 `id_token_hint` 签名、吊销对应令牌与会话、
+  `post_logout_redirect_uri` 必须在客户端白名单内（此前是开放重定向）。
+- **`/api/oidc/clients` 加上鉴权**：读写分别要求 `oidc_clients.read` / `oidc_clients.write`，
+  `created_by` 记录真实操作人；回调地址强制 https（localhost 例外）。
+- **修复 SurrealQL 注入**：角色更新 / 删除、用户档案与偏好更新、用户列表查询
+  此前把用户可控字符串直接拼进语句。
+- **client_secret 改用 Argon2 存储**（兼容历史 SHA-256 记录），比较为常量时间。
+- **OAuth `state` 改为服务端签名 JWT**（含 nonce 与过期），回调强制验签，真正防 CSRF；
+  同时移除了 OAuth HTTP 客户端上的 `danger_accept_invalid_certs`。
+- **CORS 收敛为白名单**（此前 `Any/Any/Any`）；`X-Forwarded-For` 需显式开启
+  `TRUST_PROXY_HEADERS` 才被信任，否则伪造该头即可绕过限流与 IP 锁定。
+- **限流改为全局中间件**，覆盖所有端点（此前只在个别 handler 里手动调用）。
+- 账号锁定检查改为 fail-closed；注册增加邮箱格式与密码强度校验；
+  邮箱验证令牌 24 小时过期；会话记录真实 IP 与 User-Agent（此前硬编码假值）。
+- 应用启动不再执行 DDL，也不再无条件等待外部仓库的安装标记文件。
+
+#### 第二轮补充修复
+- **MFA 判定改为 fail-closed**：查询 MFA 配置出错时不再当作"未启用"放行。
+- **账号锁定计数覆盖 MFA 第二步**：以前密码正确即清零计数，等于可以无限次
+  重新登录来刷新配额、爆破 6 位 TOTP；现在两步都走完才清零，验证码试错同样计数。
+- **TOTP 密钥加密落库**（ChaCha20-Poly1305），**备用恢复码改为 Argon2 哈希**，
+  明文只在生成时返回一次；存量明文记录兼容读取并在下次写入时自动迁移。
+- **删除审计接口里的编造数据**：`system-health` 的内存 / 运行时长改为真实值、
+  移除伪造的连接池指标；`security-report` 的登录模式、安全事件、用户行为分析
+  全部改为对 `user_activity` 与 `account_lockout` 的真实聚合（无 GeoIP 数据源，
+  地理分布如实返回空）。
+- **`initial_data.sql` / `docs_permissions.sql` 改为幂等**（`UPSERT` + 确定性 ID）。
+
+#### 第三轮：可用性与性能
+- **密码账号现在也能走 SSO**：`POST /api/auth/login` 与 `/api/auth/mfa/login-verify`
+  成功时会下发 `soulauth_session` cookie。以前只有 Google 回调那条路径设置它，
+  邮箱密码注册的用户在 `/api/oidc/authorize` 永远被判为未登录。
+- **`/api/oidc/authorize` 未登录时改跳前端登录页**（`LOGIN_PAGE_URL`，默认
+  `{APP_URL}/login`）并带上签名过的 `return_to`，不再硬编码 302 到 Google —— 
+  登录方式由前端决定。**这是行为变更**：依赖"自动跳 Google"的部署需要
+  在登录页上放一个 Google 登录入口（`GET /api/auth/login/google`）。
+- **Cookie 的 `Secure` 改为按部署协议决定**（`APP_URL` 是 https 才带）。
+  以前恒定带 `Secure`，`http://localhost` 本地开发时浏览器直接丢弃 cookie，
+  OIDC 流程根本跑不通。
+- **新增已认证请求缓存**（`AUTH_SESSION_CACHE_TTL_SECONDS`，默认 5 秒）：
+  命中时省掉"查 session 表 + 读 user 记录"两次查询。登出、全端登出、改密、
+  账号停用都会立即清除对应缓存项，因此单实例下吊销仍是即时的；
+  多副本部署时其它副本最多滞后一个 TTL。设为 0 可关闭。
+
+#### 第四轮：数据层与审计埋点
+- **浏览器会话 cookie 绑定到会话记录**：`soulauth_session` 现在带 `sid`，
+  `/api/oidc/authorize` 会校验该 `session` 行仍存在且未过期。此前它是个自包含 JWT，
+  登出甚至改密之后仍能在 24 小时内换到授权码 —— 把"登出真正生效"整个绕过去了。
+  没有 `sid` 的旧 cookie 一律拒绝。
+- **修正三处 schema 与模型的类型冲突**：`user_activity.timestamp`、
+  `user_profile.created_at/updated_at`、`user_preferences.created_at/updated_at`
+  在库里是 `TYPE number`，模型却用 `DateTime<Utc>` —— SCHEMAFULL 会拒绝写入，
+  意味着这些接口一直在报错、审计事件一条也落不了库。现在统一为 Unix 秒，
+  对外 Response 仍返回 RFC3339。
+- **修正 `sso_session` 的两处类型错位**：`user_id` 是 `record<user>` 却绑的裸字符串；
+  `expires_at`（number）被拿去和 `time::now()`（datetime）比较，过滤条件根本不成立。
+  同时 `logout_user_all_sessions` / `cleanup_expired_sessions` 不再无条件返回 1。
+- **补齐认证事件埋点**（新增 `services/audit_logger.rs`）：登录成功/失败、
+  MFA 失败、OAuth 登录、登出、密码重置、权限拒绝、限流触发。此前审计系统查的 6 个
+  action 全代码库没有任何地方写过，报表永远是空的。埋点是 fire-and-forget，
+  只记分类与非敏感上下文，绝不落凭据。
+- **审计写入失败不再冒泡**：以前 `log_user_activity` 出错会让改档案/改状态整体 500。
+- **验证邮件链接指向前端页面**（`VERIFY_EMAIL_PAGE_URL`）。以前直接给 API 地址，
+  用户点开看到的是一段 JSON，而且响应体里带着刚签发的访问令牌。
+
+#### 已知限制
+- 限流计数器仍保存在单进程内存中，多副本部署时各副本独立计数。
+- 注册接口在邮箱重复时返回 409，可用于探测邮箱是否已注册（与找回密码的防枚举策略不一致，
+  属于可用性取舍）。
 
 ## 技术栈
 
@@ -186,10 +226,51 @@ SMTP_FROM=noreply@example.com
 APP_URL=http://localhost:8080
 EMAIL_VERIFICATION_ENABLED=false
 
+# CORS 白名单（逗号分隔）。不配置时只允许 APP_URL 自身。
+# 绝不要放开成通配：本服务的接口都带 Authorization 头。
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+
+# 是否信任 X-Forwarded-For / X-Real-IP。
+# 只有确实跑在受控反向代理之后才可置 true，否则客户端能伪造来源 IP
+# 绕过限流与 IP 维度的账号锁定。
+TRUST_PROXY_HEADERS=false
+
+# OIDC ID Token 的 RS256 签名私钥（PKCS#8 或 PKCS#1 PEM），二选一。
+# 都不配置时启动会临时生成一把并打 WARN：重启后 kid 变化、
+# 已签发的 ID Token 无法再验签，生产环境必须显式配置。
+#   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out oidc-signing.pem
+OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem
+# OIDC_RSA_PRIVATE_KEY_PEM="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
+
+# 密码最小长度（默认 12，另需至少包含大写/小写/数字/符号中的三类）
+PASSWORD_MIN_LENGTH=12
+
+# MFA 的 TOTP 密钥加密密钥（base64 的 32 字节）：openssl rand -base64 32
+# 不配置时从 JWT_SECRET 派生并告警 —— 那样轮换 JWT_SECRET 会让已存的
+# TOTP 密钥无法解密，生产环境请单独配置。
+MFA_SECRET_ENCRYPTION_KEY=<base64-32-bytes>
+
+# 前端登录页。未登录用户访问 /api/oidc/authorize 时会被送到这里，
+# 并带上签名过的 return_to 参数。默认 {APP_URL}/login。
+LOGIN_PAGE_URL=https://app.example.com/login
+
+# 邮箱验证页。验证邮件里的链接指向它（带 ?token=），
+# 由前端再去调 GET /api/auth/verify-email/{token}。默认 {APP_URL}/verify-email。
+VERIFY_EMAIL_PAGE_URL=https://app.example.com/verify-email
+
+# 已认证请求的会话校验缓存时长（秒），0 表示关闭。
+# 本实例的登出/改密/停用会立即清缓存；多副本部署时其它副本最多滞后一个 TTL。
+AUTH_SESSION_CACHE_TTL_SECONDS=5
+
+# 可选：启动前等待的安装标记文件。不配置则不等待。
+# INSTALL_MARKER_PATH=../Rainbow-docs/.rainbow_docs_installed
+
 # 代理配置（可选）
 PROXY_ENABLED=false
 PROXY_URL=http://your-proxy:port
 ```
+
+> `JWT_SECRET` 至少 32 个字符，否则启动直接报错退出。
 
 3. 构建和运行
 ```bash
@@ -521,17 +602,20 @@ DEFINE TABLE sso_session SCHEMAFULL;
 - `GET /api/auth/callback/github` - GitHub回调处理
 
 ### 多因素认证 (MFA) 🔐
-- `POST /api/auth/mfa/setup-totp` - 初始化TOTP设置（获取QR码）
-- `POST /api/auth/mfa/enable-totp` - 启用TOTP（验证初始代码）
-- `POST /api/auth/mfa/verify-totp` - 验证TOTP代码
-- `POST /api/auth/mfa/use-backup-code` - 使用备用恢复代码
-- `POST /api/auth/mfa/disable` - 禁用MFA
-- `GET /api/auth/mfa/status` - 获取MFA状态
+- `GET  /api/auth/mfa/status` - 获取当前用户的 MFA 状态
+- `POST /api/auth/mfa/setup` - 初始化 TOTP（返回密钥、QR 码与备用恢复码）
+- `POST /api/auth/mfa/enable` - 用一次 TOTP 验证码确认并启用
+- `POST /api/auth/mfa/disable` - 关闭 MFA（需先通过一次 TOTP 验证）
+- `POST /api/auth/mfa/login-verify` - 两步登录第二步：用临时令牌 + TOTP 或备用码换取访问令牌
 
-### 安全管理 🛡️
-- `GET /api/auth/security/lockout-status` - 查看账户锁定状态
-- `POST /api/auth/security/unlock-account` - 管理员解锁账户
-- `GET /api/auth/security/rate-limit-status` - 查看速率限制状态
+启用 MFA 后，`POST /api/auth/login` 不再直接返回访问令牌，而是返回：
+
+```json
+{ "mfa_required": true, "temp_token": "<5 分钟有效>", "method": "Totp" }
+```
+
+客户端需再调用 `/api/auth/mfa/login-verify`（body 传 `temp_token` + `totp_code` 或
+`backup_code`；从管理后台登录时额外传 `"admin": true`）才能拿到正式令牌。
 
 ### 权限系统 (RBAC) 🔐
 #### 角色管理
