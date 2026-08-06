@@ -527,7 +527,7 @@ impl UserManagementService {
     ) -> Result<ActivityLogResponse, AuthError> {
         let page = request.page.unwrap_or(1).max(1);
         let limit = request.limit.unwrap_or(50).clamp(1, 200);
-        let offset = (page - 1) * limit;
+        let offset = (page - 1).saturating_mul(limit);
 
         let mut where_clauses = vec!["user_id = type::record('user', $user_key)".to_string()];
         if request.category.is_some() {
@@ -612,14 +612,17 @@ impl UserManagementService {
 
     // 用户列表管理
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<UserResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        // 这里走 `query_take0_vec`，绑定值是 JSON。RecordId 经 serde_json 会退化成
+        // 字符串，`id = "user:xxx"` 永远匹配不到记录 ID，必须在 SQL 里用
+        // type::record() 重新构造。
+        let user_key = crate::utils::record_id::normalize_user_id(user_id);
 
         let users: Vec<User> = self
             .db
             .query_take0_vec(
                 "user_management_get_user_by_id",
-                "SELECT * FROM user WHERE id = $user_id LIMIT 1",
-                json!({ "user_id": user_thing }),
+                "SELECT * FROM user WHERE id = type::record('user', $user_key) LIMIT 1",
+                json!({ "user_key": user_key }),
             )
             .await
             .map_err(|e| {
@@ -641,9 +644,12 @@ impl UserManagementService {
     }
 
     pub async fn list_users(&self, request: UserListRequest) -> Result<UserListResponse, AuthError> {
-        let page = request.page.unwrap_or(1);
-        let limit = request.limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // `page` / `limit` 是 u32 且直接来自查询串：`page=0` 会让 `page - 1` 下溢
+        // （debug 直接 panic，release 绕回 u32::MAX），`limit` 不设上限则
+        // `?limit=4294967295` 等于一次性把整张 user 表拉进内存。
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
         // 过滤条件全部走绑定参数：`search` 是用户可控的自由文本，以前直接拼进
         // `email CONTAINS '...'`，单引号即可改写语句。

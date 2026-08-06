@@ -45,6 +45,14 @@ pub struct UserMfa {
     pub updated_at: DateTime<Utc>,
     /// 最后使用时间
     pub last_used_at: Option<DateTime<Utc>>,
+    /// 最近一次被接受的 TOTP 时间步（Unix 秒 / 30）。
+    ///
+    /// RFC 6238 §5.2 要求同一个码只能用一次：`check_current` 只判断码是否落在
+    /// 当前窗口（含 ±1 步偏移），同一个 6 位码在 30~90 秒内可以反复提交。
+    /// 记下已接受的步长后，验证时拒绝 `step <= last_totp_step`，钓鱼中转或
+    /// 肩窥拿到的码就无法在窗口内复用。
+    #[serde(default)]
+    pub last_totp_step: Option<i64>,
 }
 
 impl UserMfa {

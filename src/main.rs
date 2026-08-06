@@ -151,6 +151,16 @@ async fn main() -> anyhow::Result<()> {
             .with_endpoint_rule(
                 "/api/auth/reset-password".to_string(),
                 RateLimitRules::password_reset(),
+            )
+            // 下面两个是“拿着令牌猜”的端点，键必须写成路由模板才对得上
+            // `MatchedPath`。以前它们连默认规则都形同虚设（每个 token 一个桶）。
+            .with_endpoint_rule(
+                "/api/auth/verify-email/:token".to_string(),
+                RateLimitRules::password_reset(),
+            )
+            .with_endpoint_rule(
+                "/api/auth/initialize-password".to_string(),
+                RateLimitRules::password_reset(),
             ),
     );
 
@@ -239,7 +249,12 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/sso", routes::sso_session::sso_session_routes())
         .merge(routes::oidc::discovery_routes()) // 根路径上的 /.well-known 发现端点
         // 限流放在最内层：外层的 Extension 已经注入，它才能拿到 AppState / Config。
-        .layer(middleware::from_fn(rate_limit_layer))
+        //
+        // 用 `route_layer` 而不是 `layer`：前者在路由匹配之后执行，中间件才能读到
+        // `MatchedPath`（`/api/auth/verify-email/:token` 这样的模板）。挂在 `layer`
+        // 上只能拿到原始路径，带参数的端点会一个 token 一个计数桶，等于不限流。
+        // 代价是打不中任何路由的请求（404）不再计数，这类请求本来也不碰业务逻辑。
+        .route_layer(middleware::from_fn(rate_limit_layer))
         .layer(Extension(shared_db))
         .layer(Extension(app_state))
         .layer(Extension(auth_service))

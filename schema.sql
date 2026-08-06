@@ -68,6 +68,8 @@ DEFINE FIELD backup_codes ON user_mfa TYPE array;
 DEFINE FIELD created_at ON user_mfa TYPE datetime;
 DEFINE FIELD updated_at ON user_mfa TYPE datetime;
 DEFINE FIELD last_used_at ON user_mfa TYPE option<datetime>;
+-- 已接受过的 TOTP 时间步，用于拒绝同一个码在窗口内被重放（RFC 6238 §5.2）。
+DEFINE FIELD last_totp_step ON user_mfa TYPE option<number>;
 DEFINE INDEX user_mfa_user_idx ON user_mfa COLUMNS user_id UNIQUE;
 
 -- 账户锁定表
@@ -75,11 +77,13 @@ DEFINE TABLE account_lockout SCHEMAFULL;
 DEFINE FIELD identifier ON account_lockout TYPE string;
 DEFINE FIELD lockout_type ON account_lockout TYPE string;
 DEFINE FIELD failed_attempts ON account_lockout TYPE number;
-DEFINE FIELD status ON account_lockout TYPE string;
+-- DEFAULT 是必须的：`increment_failed_attempts` 首次插入时只 SET 计数相关字段，
+-- 不碰 status（碰了会把已锁定的记录改回 Normal）。
+DEFINE FIELD status ON account_lockout TYPE string DEFAULT 'Normal';
 DEFINE FIELD locked_at ON account_lockout TYPE option<datetime>;
 DEFINE FIELD locked_until ON account_lockout TYPE option<datetime>;
 DEFINE FIELD last_attempt_at ON account_lockout TYPE option<datetime>;
-DEFINE FIELD created_at ON account_lockout TYPE datetime;
+DEFINE FIELD created_at ON account_lockout TYPE datetime DEFAULT time::now();
 DEFINE FIELD updated_at ON account_lockout TYPE datetime;
 DEFINE INDEX lockout_identifier_idx ON account_lockout COLUMNS identifier, lockout_type UNIQUE;
 

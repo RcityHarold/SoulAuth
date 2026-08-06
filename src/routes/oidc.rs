@@ -638,13 +638,18 @@ async fn userinfo(
         .to_str()
         .map_err(|_| AuthError::Unauthorized("Invalid authorization header".to_string()))?;
 
-    let access_token = auth_str
-        .strip_prefix("Bearer ")
+    // 和 `utils::jwt` 用同一个解析函数：认证方案名按 RFC 7235 不区分大小写。
+    let access_token = crate::utils::jwt::strip_bearer_scheme(auth_str)
+        .map(str::trim)
         .ok_or_else(|| AuthError::Unauthorized("Invalid token type".to_string()))?;
 
     match oidc_service.get_userinfo(access_token).await {
         Ok(userinfo) => Ok(Json(userinfo)),
-        Err(e) => Err(AuthError::Unauthorized(e.to_string())),
+        Err(e) => {
+            // 底层错误可能带着 SurrealQL 语句原文，不能直接回给调用方。
+            tracing::warn!(error = %e, "OIDC userinfo lookup failed");
+            Err(AuthError::Unauthorized("Invalid access token".to_string()))
+        }
     }
 }
 

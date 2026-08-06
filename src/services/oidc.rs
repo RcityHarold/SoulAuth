@@ -141,6 +141,26 @@ impl OidcService {
             return Err(anyhow!("PKCE is required for this client"));
         }
 
+        // 只收 S256。发现文档里 `code_challenge_methods_supported` 就只列了 S256，
+        // 但这里以前不校验 method，缺省会按 `plain` 处理 —— plain 的 challenge 等于
+        // verifier 本身，谁能看到授权请求（Referer、浏览器历史、同设备的其他 App）
+        // 谁就直接拿到了 verifier，PKCE 等于没有。不认下发时就拒，别留到兑换阶段。
+        if request.code_challenge.is_some() {
+            match request.code_challenge_method.as_deref() {
+                Some("S256") => {}
+                Some(other) => {
+                    return Err(anyhow!(
+                        "Unsupported code_challenge_method '{other}': only S256 is supported"
+                    ))
+                }
+                None => {
+                    return Err(anyhow!(
+                        "code_challenge_method is required and must be S256"
+                    ))
+                }
+            }
+        }
+
         // 生成授权码
         let code = generate_random_string(32);
         let expires_at = Utc::now().timestamp() + 600; // 10分钟过期
@@ -542,17 +562,16 @@ impl OidcService {
             ));
         }
 
-        match method.unwrap_or("plain") {
-            "S256" => {
+        // 授权阶段已经把非 S256 拦在门外了，这里不再兜底 `plain`：
+        // 留着它，存量的 plain 授权码或将来某条绕过下发校验的路径就还能降级。
+        match method {
+            Some("S256") => {
                 let hash = Sha256::digest(code_verifier.as_bytes());
                 let encoded = general_purpose::URL_SAFE_NO_PAD.encode(hash);
                 Ok(constant_time_eq(encoded.as_bytes(), code_challenge.as_bytes()))
             }
-            "plain" => Ok(constant_time_eq(
-                code_verifier.as_bytes(),
-                code_challenge.as_bytes(),
-            )),
-            other => Err(anyhow!("Unsupported code challenge method: {}", other)),
+            Some(other) => Err(anyhow!("Unsupported code challenge method: {}", other)),
+            None => Err(anyhow!("Missing code_challenge_method; S256 is required")),
         }
     }
 
@@ -1038,16 +1057,26 @@ mod tests {
     }
 
     #[test]
-    fn verifies_plain_pkce_challenge() {
+    fn rejects_plain_pkce_challenge() {
+        // plain 的 challenge 就是 verifier 本身，等于没有 PKCE；发现文档也只宣告 S256。
         let verifier = "plain-verifier-abcdefghijklmnopqrstuvwxyz012345";
-        let result = OidcService::verify_pkce_value(verifier, Some("plain"), verifier);
-        assert!(result.expect("plain pkce should pass"));
+        let err = OidcService::verify_pkce_value(verifier, Some("plain"), verifier)
+            .expect_err("plain must be rejected");
+        assert!(err.to_string().contains("Unsupported code challenge method"));
+    }
+
+    #[test]
+    fn rejects_pkce_without_challenge_method() {
+        let verifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~";
+        let err = OidcService::verify_pkce_value(verifier, None, verifier)
+            .expect_err("missing method must be rejected");
+        assert!(err.to_string().contains("Missing code_challenge_method"));
     }
 
     #[test]
     fn rejects_pkce_verifier_shorter_than_rfc_minimum() {
         let result =
-            OidcService::verify_pkce_value("short-verifier", Some("plain"), "short-verifier");
+            OidcService::verify_pkce_value("short-verifier", Some("S256"), "short-verifier");
         assert!(result
             .expect_err("short verifier should be rejected")
             .to_string()
@@ -1057,7 +1086,7 @@ mod tests {
     #[test]
     fn rejects_pkce_verifier_with_invalid_charset() {
         let verifier = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._!";
-        let result = OidcService::verify_pkce_value(verifier, Some("plain"), verifier);
+        let result = OidcService::verify_pkce_value(verifier, Some("S256"), verifier);
         assert!(result
             .expect_err("invalid verifier charset should be rejected")
             .to_string()

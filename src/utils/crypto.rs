@@ -158,7 +158,8 @@ pub fn verify_backup_code(stored: &str, provided: &str) -> bool {
     constant_time_eq(stored.as_bytes(), provided.as_bytes())
 }
 
-fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+/// 定长字节比较：长度不同直接假，长度相同时不按位早退。
+pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }

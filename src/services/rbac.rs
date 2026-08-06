@@ -205,9 +205,10 @@ impl RBACService {
     }
 
     pub async fn list_roles(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<RoleResponse>, AuthError> {
-        let page = page.unwrap_or(1);
-        let limit = limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
+        let page = page.unwrap_or(1).max(1);
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
         let mut response = self
             .db
@@ -293,9 +294,10 @@ impl RBACService {
     }
 
     pub async fn list_permissions(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<PermissionResponse>, AuthError> {
-        let page = page.unwrap_or(1);
-        let limit = limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
+        let page = page.unwrap_or(1).max(1);
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
         let mut response = self
             .db

@@ -401,9 +401,15 @@ impl AuthService {
         let created_user = self.db.create_record("user", &user).await?;
 
         if let Some(token) = verification_token {
-            self.email_service
+            // 用户记录已经提交了，此时再抛错只会让调用方拿到 500、重试又撞 409，
+            // 账号就永远卡在“已创建但没收到验证信”。发信失败只记日志。
+            if let Err(e) = self
+                .email_service
                 .send_verification_email(&email, &token)
-                .await?;
+                .await
+            {
+                error!("Failed to send verification email to '{email}': {e}");
+            }
 
             return Ok((
                 AuthResponse {
@@ -630,6 +636,10 @@ impl AuthService {
             return Ok(());
         }
 
+        // 先作废该邮箱名下所有还没用掉的旧令牌，保证任一时刻只有最新那封邮件有效。
+        // 否则每点一次"忘记密码"就多留一把可用的钥匙，全都活到各自的 1 小时到期为止。
+        self.invalidate_password_reset_tokens(&email).await?;
+
         let reset_token = Uuid::new_v4().to_string();
         let now = Utc::now();
         let expires_at = now + Duration::hours(1);
@@ -647,10 +657,33 @@ impl AuthService {
             .create_record("password_reset_token", &token_record)
             .await?;
 
-        self.email_service
+        // 发信失败不能往外抛。未知邮箱这条路径直接 `Ok(())`，若已知邮箱因 SMTP 挂了
+        // 而返回 500，两者的差异就成了账号是否存在的判别信号 —— 上面那段防枚举的
+        // 静默返回等于白做。SMTP 抖动也不该让用户流程断掉，令牌已经落库了。
+        if let Err(e) = self
+            .email_service
             .send_password_reset_email(&email, &reset_token)
-            .await?;
+            .await
+        {
+            error!("Failed to send password reset email: {e}");
+        }
 
+        Ok(())
+    }
+
+    /// 把某邮箱名下所有未使用的重置令牌标记为已用。
+    ///
+    /// 签发新令牌前、以及某个令牌被成功兑换后都要调用：这两条路径都必须让此前
+    /// 发出去的链接立刻失效，否则攻击者事先触发的那封重置邮件在受害者改完密码
+    /// 之后仍然能用来再改一次。
+    async fn invalidate_password_reset_tokens(&self, email: &str) -> Result<()> {
+        self.db
+            .raw_query(
+                "invalidate_password_reset_tokens",
+                "UPDATE password_reset_token SET used = true WHERE email = $email AND used = false",
+                serde_json::json!({ "email": email }),
+            )
+            .await?;
         Ok(())
     }
 
@@ -691,6 +724,11 @@ impl AuthService {
                 &record_address(token_thing),
                 &updated_token,
             )
+            .await?;
+
+        // 同一邮箱名下可能还有别的未使用令牌（例如攻击者抢先申请、或用户连点了
+        // 几次"忘记密码"）。密码既然已经改了，剩下那些一律作废。
+        self.invalidate_password_reset_tokens(&reset_token.email)
             .await?;
 
         // 改密之后强制所有既有会话下线。

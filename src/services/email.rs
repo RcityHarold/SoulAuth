@@ -34,18 +34,10 @@ impl EmailService {
             None
         };
 
-        // 如果启用了代理，设置环境变量
-        if self.config.proxy_enabled {
-            if let Some(proxy_url) = &self.config.proxy_url {
-                // 为当前进程设置代理环境变量
-                std::env::set_var("HTTPS_PROXY", proxy_url);
-                std::env::set_var("HTTP_PROXY", proxy_url);
-                std::env::set_var("https_proxy", proxy_url);
-                std::env::set_var("http_proxy", proxy_url);
-                
-                tracing::info!("设置代理环境变量: {}", proxy_url);
-            }
-        }
+        // 这里曾经在每次发信时 `std::env::set_var` 改四个代理环境变量。两个问题：
+        // 一是 `setenv` 在多线程进程里不安全 —— 另一个线程正好在 `getenv` 时就是
+        // 数据竞争，而这个函数跑在 tokio 的工作线程上；二是根本没用，lettre 的 SMTP
+        // 走的是裸 TCP，不认 HTTP_PROXY。需要经代理发信请在网络层做转发。
 
         let transport = if self.config.smtp_insecure {
             let mut builder = SmtpTransport::builder_dangerous(&self.config.smtp_host)
@@ -67,6 +59,25 @@ impl EmailService {
         };
 
         Ok(transport)
+    }
+
+    /// 把阻塞式的 SMTP 发送挪到阻塞线程池。
+    ///
+    /// `lettre::SmtpTransport::send` 是同步的，超时还设到了 60 秒。直接在 async fn
+    /// 里调用会把整个 tokio 工作线程占死那么久 —— 核数不多的机器上，几封发不出去的
+    /// 邮件就能让全站停止响应。
+    async fn send_blocking(&self, email: Message) -> Result<()> {
+        let transport = self.create_transport()?;
+
+        tokio::task::spawn_blocking(move || {
+            transport
+                .send(&email)
+                .map_err(|e| AuthError::ServerError(format!("Failed to send email: {}", e)))
+        })
+        .await
+        .map_err(|e| AuthError::ServerError(format!("Email task panicked: {e}")))??;
+
+        Ok(())
     }
 
     pub async fn send_verification_email(&self, to_email: &str, token: &str) -> Result<()> {
@@ -102,12 +113,7 @@ impl EmailService {
             ))
             .map_err(|e| AuthError::ServerError(format!("Failed to build email: {}", e)))?;
 
-        let transport = self.create_transport()?;
-        transport
-            .send(&email)
-            .map_err(|e| AuthError::ServerError(format!("Failed to send email: {}", e)))?;
-
-        Ok(())
+        self.send_blocking(email).await
     }
 
     pub async fn send_password_reset_email(&self, to_email: &str, token: &str) -> Result<()> {
@@ -136,11 +142,6 @@ impl EmailService {
             ))
             .map_err(|e| AuthError::ServerError(format!("Failed to build email: {}", e)))?;
 
-        let transport = self.create_transport()?;
-        transport
-            .send(&email)
-            .map_err(|e| AuthError::ServerError(format!("Failed to send email: {}", e)))?;
-
-        Ok(())
+        self.send_blocking(email).await
     }
 }

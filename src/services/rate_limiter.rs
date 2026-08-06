@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// 速率限制规则
 #[derive(Debug, Clone)]
@@ -149,7 +149,8 @@ impl RateLimiter {
 
         // 记录请求
         record.add_request();
-        info!("Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}", 
+        // 每个请求都会走到这里，放 info 会把日志淹掉（也拖慢高 QPS 下的写入）。
+        debug!("Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}",
               key, endpoint, record.timestamps.len(), rule.max_requests);
 
         Ok(true)
@@ -208,8 +209,9 @@ impl RateLimiter {
 
 /// 预定义的速率限制规则。
 ///
-/// 注意：规则表按**精确路径**匹配，带路径参数的端点（如
-/// `/api/auth/verify-email/:token`）只会命中默认规则。
+/// 规则表按端点字符串精确匹配，而中间件传进来的是**路由模板**
+/// （见 `utils::rate_limit_middleware::rate_limit_endpoint`）。所以带路径参数的
+/// 端点要按 `/api/auth/verify-email/:token` 这样登记，写成具体路径不会命中。
 pub struct RateLimitRules;
 
 impl RateLimitRules {

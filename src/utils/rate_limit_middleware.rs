@@ -1,5 +1,5 @@
 use axum::{
-    extract::ConnectInfo,
+    extract::{ConnectInfo, MatchedPath},
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -47,6 +47,23 @@ pub fn client_ip(addr: &SocketAddr, headers: &HeaderMap, trust_proxy_headers: bo
     addr.ip().to_string()
 }
 
+/// 限流桶要用的端点标识：优先取**路由模板**，拿不到才退回原始路径。
+///
+/// 用原始路径当键是有实际后果的：计数桶按 (IP, 端点) 建，
+/// `/api/auth/verify-email/<token>` 每换一个 token 就是一个全新的桶，等于该端点
+/// 完全没有限流——正好是最需要限流的猜令牌场景。同时攻击者能用无限多个不同路径
+/// 把记录表撑爆（清理任务一小时才跑一次）。取 `/api/auth/verify-email/:token`
+/// 这样的模板后，同一路由的所有请求共用一个桶。
+///
+/// 拿得到 `MatchedPath` 的前提是本中间件挂在 `route_layer` 上（路由匹配之后执行）；
+/// 若将来改回 `layer`，这里会静默退回旧行为，所以两边必须一起改。
+fn rate_limit_endpoint<B>(req: &Request<B>) -> String {
+    req.extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string())
+}
+
 /// 全局限流中间件。
 ///
 /// 以前限流只在少数几个 handler 里手动调用，其余端点完全没有保护；现在统一挂在
@@ -64,7 +81,7 @@ pub async fn rate_limit_layer<B>(
     next: Next<B>,
 ) -> Response {
     let ip = client_ip(&addr, &headers, config.trust_proxy_headers);
-    let endpoint = req.uri().path().to_string();
+    let endpoint = rate_limit_endpoint(&req);
 
     match app_state.rate_limiter.check_rate_limit(&ip, &endpoint).await {
         Ok(true) => next.run(req).await,

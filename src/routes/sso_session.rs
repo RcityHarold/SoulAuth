@@ -97,6 +97,15 @@ async fn get_session(
     }
 }
 
+/// 把会话写入失败收敛成一句对外无害的话。
+///
+/// 这些错误来自 `anyhow`，原文里常常带着完整的 SurrealQL 语句和表 / 字段名；
+/// 以前直接 `e.to_string()` 塞进 400 响应体，等于把库结构送给调用方。
+fn session_write_error(operation: &str, error: anyhow::Error) -> AuthError {
+    tracing::warn!(error = %error, operation, "SSO session write failed");
+    AuthError::BadRequest("Session could not be updated".to_string())
+}
+
 // 添加客户端会话
 async fn add_client_session(
     Extension(session_service): Extension<Arc<SsoSessionService>>,
@@ -113,7 +122,7 @@ async fn add_client_session(
 
     match session_service.add_client_session(&session_id, &client_id).await {
         Ok(session) => Ok(Json(session)),
-        Err(e) => Err(AuthError::BadRequest(e.to_string())),
+        Err(e) => Err(session_write_error("add client session", e)),
     }
 }
 
@@ -133,7 +142,7 @@ async fn remove_client_session(
 
     match session_service.remove_client_session(&session_id, &client_id).await {
         Ok(session) => Ok(Json(session)),
-        Err(e) => Err(AuthError::BadRequest(e.to_string())),
+        Err(e) => Err(session_write_error("remove client session", e)),
     }
 }
 
@@ -158,17 +167,39 @@ async fn extend_session(
 
     match session_service.extend_session(&session_id, request.extend_seconds).await {
         Ok(session) => Ok(Json(session)),
-        Err(e) => Err(AuthError::BadRequest(e.to_string())),
+        Err(e) => Err(session_write_error("extend session", e)),
     }
+}
+
+/// 解析 `:user_id` 路径参数：只能是自己，除非持有 `users.read`。
+///
+/// 以前这三个 `/users/:user_id/...` 端点直接把路径参数丢掉（`Path(_user_id)`），
+/// 无条件返回**调用者自己**的数据。既不越权、也不报错，但 URL 在说谎：管理员
+/// 拿 `/users/<别人>/sessions` 去核对，看到的是自己的会话，还以为对方没有登录。
+async fn resolve_target_user(
+    db: &Arc<Database>,
+    authed_user: &AuthedUser,
+    requested_user_id: &str,
+) -> Result<String, AuthError> {
+    let current_user_id = authed_user.id()?;
+    let requested = crate::utils::record_id::normalize_user_id(requested_user_id);
+
+    if requested == current_user_id {
+        return Ok(current_user_id);
+    }
+
+    require_permission!(db, &current_user_id, "users.read");
+    Ok(requested)
 }
 
 // 获取用户的所有会话
 async fn get_user_sessions(
+    Extension(db): Extension<Arc<Database>>,
     Extension(session_service): Extension<Arc<SsoSessionService>>,
     authed_user: AuthedUser,
-    Path(_user_id): Path<String>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<Vec<SsoSessionResponse>>, AuthError> {
-    let current_user_id = authed_user.id()?;
+    let current_user_id = resolve_target_user(&db, &authed_user, &user_id).await?;
 
     match session_service.get_user_sessions(&current_user_id).await {
         Ok(sessions) => Ok(Json(sessions)),
@@ -178,11 +209,12 @@ async fn get_user_sessions(
 
 // 终止用户的所有会话
 async fn logout_user_all_sessions(
+    Extension(db): Extension<Arc<Database>>,
     Extension(session_service): Extension<Arc<SsoSessionService>>,
     authed_user: AuthedUser,
-    Path(_user_id): Path<String>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<LogoutResponse>, AuthError> {
-    let current_user_id = authed_user.id()?;
+    let current_user_id = resolve_target_user(&db, &authed_user, &user_id).await?;
 
     match session_service.logout_user_all_sessions(&current_user_id).await {
         Ok(count) => {
@@ -218,11 +250,12 @@ async fn logout_session(
 
 // 获取用户会话统计
 async fn get_user_session_stats(
+    Extension(db): Extension<Arc<Database>>,
     Extension(session_service): Extension<Arc<SsoSessionService>>,
     authed_user: AuthedUser,
-    Path(_user_id): Path<String>,
+    Path(user_id): Path<String>,
 ) -> Result<Json<UserSessionStats>, AuthError> {
-    let current_user_id = authed_user.id()?;
+    let current_user_id = resolve_target_user(&db, &authed_user, &user_id).await?;
 
     match session_service.get_user_session_stats(&current_user_id).await {
         Ok(stats) => Ok(Json(stats)),

@@ -5,7 +5,6 @@ use crate::{
 };
 use oauth2::{
     basic::BasicClient,
-    reqwest::async_http_client,
     AuthUrl,
     HttpRequest,
     HttpResponse,
@@ -74,6 +73,11 @@ async fn http_client_request(
         body,
     })
 }
+
+/// 出站 OAuth 请求的整体超时（含 TLS 握手、发送、读完响应体）。
+const OUTBOUND_HTTP_TIMEOUT_SECS: u64 = 15;
+/// 单独的建连超时，比整体超时短，让"连不上"比"响应慢"更快失败。
+const OUTBOUND_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 pub struct OAuthService {
     config: Config,
@@ -195,8 +199,13 @@ impl OAuthService {
     // GitHub 的 TLS 连接放弃证书校验，任何能插到链路中间的人都可以拿到授权码与
     // 访问令牌。自签名证书的场景请把 CA 加进系统信任库。
     fn create_http_client(&self) -> Result<Client> {
-        let mut client_builder = Client::builder();
-        
+        // reqwest 默认**不设**任何超时。Google / GitHub（或一个配歪了的代理）一旦
+        // 把连接吊住，回调 handler 就永远不返回，请求会一直堆着占住 tokio 任务和
+        // 连接。这里给整个请求封顶。
+        let mut client_builder = Client::builder()
+            .timeout(std::time::Duration::from_secs(OUTBOUND_HTTP_TIMEOUT_SECS))
+            .connect_timeout(std::time::Duration::from_secs(OUTBOUND_CONNECT_TIMEOUT_SECS));
+
         if self.config.proxy_enabled {
             if let Some(proxy_url) = &self.config.proxy_url {
                 let proxy_url = proxy_url.replace("https://", "http://");  // 强制使用 http 协议
@@ -234,33 +243,26 @@ impl OAuthService {
     }
 
     pub async fn handle_google_callback(&self, code: String) -> Result<OAuthUserInfo> {
-        info!("Starting Google OAuth callback with code: {}", code);
-        
-        // 交换授权码获取访问令牌
-        info!("Exchanging authorization code for access token");
-        let exchange = self
+        // 不要把 `code` 打进日志：授权码就是凭证，日志往往会外发到集中式平台，
+        // 谁能读日志谁就能在它过期前抢先兑换成访问令牌。
+        info!("Exchanging Google authorization code for access token");
+        // 两条路径（走代理 / 不走代理）都用 `create_http_client`。以前不走代理时
+        // 用的是 `async_http_client` 和 `Client::new()`，它们各自 new 一个默认
+        // client —— 默认**没有超时**，等于把上面那份超时配置绕开了。
+        let client = self.create_http_client()?;
+
+        let token = self
             .google_client
-            .exchange_code(oauth2::AuthorizationCode::new(code));
-        let token = if self.config.proxy_enabled {
-            let client = self.create_http_client()?;
-            exchange
-                .request_async(move |req| http_client_request(client.clone(), req))
-                .await
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?
-        } else {
-            exchange
-                .request_async(async_http_client)
-                .await
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?
-        };
+            .exchange_code(oauth2::AuthorizationCode::new(code))
+            .request_async({
+                let client = client.clone();
+                move |req| http_client_request(client.clone(), req)
+            })
+            .await
+            .map_err(|e| AuthError::OAuthError(e.to_string()))?;
 
         // 使用访问令牌获取用户信息
         info!("Fetching user info from Google API");
-        let client = if self.config.proxy_enabled {
-            self.create_http_client()?
-        } else {
-            Client::new()
-        };
 
         let user_info: GoogleUserInfo = match client
             .get("https://www.googleapis.com/oauth2/v2/userinfo")
@@ -314,29 +316,20 @@ impl OAuthService {
     }
 
     pub async fn handle_github_callback(&self, code: String) -> Result<OAuthUserInfo> {
-        // 交换授权码获取访问令牌
-        let exchange = self
-            .github_client
-            .exchange_code(oauth2::AuthorizationCode::new(code));
-        let token = if self.config.proxy_enabled {
-            let client = self.create_http_client()?;
-            exchange
-                .request_async(move |req| http_client_request(client.clone(), req))
-                .await
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?
-        } else {
-            exchange
-                .request_async(async_http_client)
-                .await
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?
-        };
+        // 交换授权码获取访问令牌（同 Google：统一走带超时的 client）
+        let client = self.create_http_client()?;
 
-        let client = if self.config.proxy_enabled {
-            self.create_http_client()?
-        } else {
-            Client::new()
-        };
-        
+        let token = self
+            .github_client
+            .exchange_code(oauth2::AuthorizationCode::new(code))
+            .request_async({
+                let client = client.clone();
+                move |req| http_client_request(client.clone(), req)
+            })
+            .await
+            .map_err(|e| AuthError::OAuthError(e.to_string()))?;
+
+
         // 获取用户信息
         let user_info: GitHubUserInfo = client
             .get("https://api.github.com/user")

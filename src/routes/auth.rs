@@ -510,8 +510,29 @@ async fn verify_email(
     Ok(Json(issued.response))
 }
 
-async fn get_current_user(user: AuthedUser) -> Result<Json<UserResponse>> {
-    Ok(Json(UserResponse::from(user.0)))
+async fn get_current_user(
+    Extension(db): Extension<Arc<Database>>,
+    user: AuthedUser,
+) -> Result<Json<UserResponse>> {
+    // `From<User>` 拿不到角色表，只能把 is_admin 填成 false。前端靠这个字段决定
+    // 要不要露出管理后台入口，所以这里必须真查一次 RBAC，否则管理员看到的
+    // 永远是普通用户视图。
+    let user_id = crate::utils::record_id::normalize_user_id(
+        &user
+            .0
+            .id
+            .as_ref()
+            .map(crate::utils::record_id::record_id_key_to_string)
+            .unwrap_or_default(),
+    );
+
+    let mut response = UserResponse::from(user.0);
+    response.is_admin = RBACService::new(db)
+        .check_user_role(&user_id, "admin")
+        .await
+        .unwrap_or(false);
+
+    Ok(Json(response))
 }
 
 // ===== 多因素认证 =====
@@ -728,6 +749,7 @@ async fn request_password_reset(
 async fn reset_password(
     Extension(auth_service): Extension<Arc<AuthService>>,
     Extension(audit): Extension<Arc<AuditLogger>>,
+    Extension(oidc_service): Extension<Arc<OidcService>>,
     Extension(config): Extension<Config>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -737,6 +759,13 @@ async fn reset_password(
     let user_id = auth_service
         .reset_password(request.token, request.new_password)
         .await?;
+
+    // 改密只清了本站的 session 行。已经发给各 RP 的 OIDC 访问 / 刷新令牌是独立的，
+    // 不一起吊销的话，"账号被盗 → 重置密码"根本赶不走攻击者：他从 RP 那一侧的
+    // 访问照旧有效，刷新令牌还能一直续期。和 `logout_all` 用同一套处理。
+    if let Err(e) = oidc_service.revoke_all_tokens_for_user(&user_id).await {
+        error!("Failed to revoke OIDC tokens after password reset: {e}");
+    }
 
     audit.record(
         AuditEvent::new(

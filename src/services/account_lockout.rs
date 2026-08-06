@@ -16,6 +16,24 @@ use chrono::Utc;
 use std::sync::Arc;
 use tracing::{info, warn, debug};
 
+/// 撞上写冲突时的最大重试次数。
+const WRITE_CONFLICT_RETRIES: usize = 5;
+/// 重试退避基数（毫秒），实际等待随重试次数线性增长。
+const WRITE_CONFLICT_BACKOFF_MS: u64 = 10;
+
+/// 一次失败尝试记录完之后的结果。
+struct AttemptOutcome {
+    failed_attempts: u32,
+    /// 是否**正是这一次**把账号 / IP 锁上的。只有它为真才需要写审计，
+    /// 免得锁定期内每次尝试都重复记一条。
+    just_locked: bool,
+}
+
+/// SurrealDB 的乐观并发在真撞车时会返回这个错误，它是可重试的。
+fn is_write_conflict(error: &AuthError) -> bool {
+    error.to_string().contains("Transaction conflict")
+}
+
 /// 账户锁定服务
 pub struct AccountLockoutService {
     db: Arc<Database>,
@@ -151,28 +169,23 @@ impl AccountLockoutService {
             return Ok(());
         }
 
-        info!("Recording failed login attempt for user: {}", user_id);
+        let outcome = self
+            .increment_failed_attempts(user_id, LockoutType::User)
+            .await?;
 
-        let mut lockout = match self.get_lockout_record(user_id, LockoutType::User).await {
-            Ok(lockout) => lockout,
-            Err(AuthError::UserNotFound) => {
-                // 创建新的锁定记录
-                AccountLockout::new(user_id.to_string(), LockoutType::User)
-            }
-            Err(e) => return Err(e),
-        };
-
-        lockout.record_failed_attempt(&self.config);
-        
-        if lockout.is_locked() {
-            warn!("User account locked: {} (attempts: {})", user_id, lockout.failed_attempts);
-            self.record_lockout_event(user_id, &LockoutType::User, lockout.failed_attempts);
+        if outcome.just_locked {
+            warn!(
+                "User account locked: {} (attempts: {})",
+                user_id, outcome.failed_attempts
+            );
+            self.record_lockout_event(user_id, &LockoutType::User, outcome.failed_attempts);
         } else {
-            debug!("Failed attempt recorded for user: {} (attempts: {}/{})", 
-                   user_id, lockout.failed_attempts, self.config.max_attempts);
+            debug!(
+                "Failed attempt recorded for user: {} (attempts: {}/{})",
+                user_id, outcome.failed_attempts, self.config.max_attempts
+            );
         }
 
-        self.save_lockout_record(&lockout).await?;
         Ok(())
     }
 
@@ -182,29 +195,130 @@ impl AccountLockoutService {
             return Ok(());
         }
 
-        info!("Recording failed login attempt for IP: {}", ip_address);
+        let outcome = self
+            .increment_failed_attempts(ip_address, LockoutType::IpAddress)
+            .await?;
 
-        let mut lockout = match self.get_lockout_record(ip_address, LockoutType::IpAddress).await {
-            Ok(lockout) => lockout,
-            Err(AuthError::UserNotFound) => {
-                // 创建新的锁定记录
-                AccountLockout::new(ip_address.to_string(), LockoutType::IpAddress)
-            }
-            Err(e) => return Err(e),
-        };
-
-        lockout.record_failed_attempt(&self.config);
-        
-        if lockout.is_locked() {
-            warn!("IP address locked: {} (attempts: {})", ip_address, lockout.failed_attempts);
-            self.record_lockout_event(ip_address, &LockoutType::IpAddress, lockout.failed_attempts);
+        if outcome.just_locked {
+            warn!(
+                "IP address locked: {} (attempts: {})",
+                ip_address, outcome.failed_attempts
+            );
+            self.record_lockout_event(ip_address, &LockoutType::IpAddress, outcome.failed_attempts);
         } else {
-            debug!("Failed attempt recorded for IP: {} (attempts: {}/{})", 
-                   ip_address, lockout.failed_attempts, self.config.max_attempts);
+            debug!(
+                "Failed attempt recorded for IP: {} (attempts: {}/{})",
+                ip_address, outcome.failed_attempts, self.config.max_attempts
+            );
         }
 
-        self.save_lockout_record(&lockout).await?;
         Ok(())
+    }
+
+    /// 在数据库里原子地累加失败次数，并在越过阈值时上锁。
+    ///
+    /// 以前这里是"读一条 → 内存里 +1 → 整条写回"。读和写是**两个独立的 HTTP 请求、
+    /// 两个独立事务**，读集不重叠，数据库无从发现冲突，于是并发失败登录会静默丢计数。
+    /// 实测：同一账号 10 个并发失败请求，计数只从 0 涨到 1，一条错误都不报 ——
+    /// 攻击者把并发拉高就能让锁定阈值几乎永远够不着。
+    ///
+    /// 现在改成三条语句一次发过去：
+    /// 1. `failed_attempts += 1` —— 单事务内读改写，冲突由数据库负责发现；
+    /// 2. 上锁条件写进 `WHERE`，判据取库里的真实值，不依赖应用侧读到的旧值；
+    /// 3. 回读最终状态，用来决定要不要记审计。
+    ///
+    /// SurrealDB 用乐观并发：真撞上会返回 "Transaction conflict"。那种情况必须重试，
+    /// 否则这次失败尝试就没被计上，等于换个方式漏计。
+    async fn increment_failed_attempts(
+        &self,
+        identifier: &str,
+        lockout_type: LockoutType,
+    ) -> Result<AttemptOutcome> {
+        let record_id = Self::lockout_record_id(identifier, &lockout_type);
+        let lockout_type_value = format!("{:?}", lockout_type);
+
+        let query = r#"
+            UPSERT type::record('account_lockout', $record_id) SET
+                identifier = $identifier,
+                lockout_type = $lockout_type,
+                failed_attempts += 1,
+                last_attempt_at = time::now(),
+                updated_at = time::now();
+
+            UPDATE type::record('account_lockout', $record_id) SET
+                status = 'Locked',
+                locked_at = time::now(),
+                locked_until = time::now() + type::duration($lockout_duration)
+            WHERE failed_attempts >= $max_attempts AND status != 'Locked'
+            RETURN VALUE failed_attempts;
+
+            SELECT failed_attempts, status FROM type::record('account_lockout', $record_id);
+        "#;
+
+        let bindings = serde_json::json!({
+            "record_id": record_id,
+            "identifier": identifier,
+            "lockout_type": lockout_type_value,
+            "max_attempts": self.config.max_attempts,
+            "lockout_duration": format!("{}m", self.config.lockout_duration_minutes),
+        });
+
+        let mut last_error = None;
+        for attempt in 0..WRITE_CONFLICT_RETRIES {
+            match self
+                .db
+                .raw_query("lockout_increment_attempts", query, bindings.clone())
+                .await
+            {
+                Ok(mut response) => {
+                    // 第 1 条语句的返回值用不上；第 2 条只在"这次刚好把它锁上"时非空
+                    // （`status != 'Locked'` 挡住了已经锁着的重复上锁）；第 3 条给最终值。
+                    let newly_locked: Vec<u32> = response.take(1).unwrap_or_default();
+                    let rows: Vec<serde_json::Value> = response.take(2).unwrap_or_default();
+
+                    let failed_attempts = rows
+                        .first()
+                        .and_then(|row| row.get("failed_attempts"))
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0) as u32;
+
+                    return Ok(AttemptOutcome {
+                        failed_attempts,
+                        just_locked: !newly_locked.is_empty(),
+                    });
+                }
+                Err(e) if is_write_conflict(&e) && attempt + 1 < WRITE_CONFLICT_RETRIES => {
+                    // 纯粹的乐观并发撞车，退避一点再来。退避时长随重试次数递增，
+                    // 避免所有并发请求在同一时刻再撞一次。
+                    debug!(
+                        "Lockout counter write conflict on '{identifier}', retry {}/{}",
+                        attempt + 1,
+                        WRITE_CONFLICT_RETRIES
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        WRITE_CONFLICT_BACKOFF_MS * (attempt as u64 + 1),
+                    ))
+                    .await;
+                    last_error = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+
+        Err(last_error.unwrap_or_else(|| {
+            AuthError::DatabaseError("Failed to record login attempt".to_string())
+        }))
+    }
+
+    /// 锁定记录的确定性 ID。
+    ///
+    /// 必须和 `save_lockout_record` 用同一套规则，否则解锁 / 重置会打到另一条记录上。
+    fn lockout_record_id(identifier: &str, lockout_type: &LockoutType) -> String {
+        format!(
+            "{}:{}",
+            format!("{:?}", lockout_type).to_lowercase(),
+            identifier.replace(' ', "_")
+        )
     }
 
     /// 重置用户的失败尝试计数
@@ -375,9 +489,7 @@ impl AccountLockoutService {
         // 单参形式 `type::record("account_lockout:user:a@b.com")` 会在第一个冒号处
         // 截断，得到 `account_lockout:user` —— 于是所有账号共用一条记录、
         // 所有 IP 共用另一条，锁定计数根本不按对象累加。
-        let lockout_type = format!("{:?}", lockout.lockout_type).to_lowercase();
-        let identifier = lockout.identifier.replace(' ', "_");
-        let record_id = format!("{}:{}", lockout_type, identifier);
+        let record_id = Self::lockout_record_id(&lockout.identifier, &lockout.lockout_type);
 
         let query = r#"
             UPSERT type::record('account_lockout', $record_id) CONTENT {

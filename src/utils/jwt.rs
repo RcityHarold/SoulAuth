@@ -170,8 +170,17 @@ fn bearer_token(parts: &Parts) -> Option<String> {
         .headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
+        .and_then(strip_bearer_scheme)
         .map(|token| token.trim().to_string())
+}
+
+/// 剥掉 `Bearer ` 前缀。**大小写不敏感**：RFC 7235 规定认证方案名不区分大小写，
+/// 而 `Claims` 提取器走的 `TypedHeader` 本来就是不敏感的。这里如果只认
+/// `"Bearer "`，同一个 `authorization: bearer xxx` 会在走 `AuthedUser` 的路由上
+/// 401、在走 `Claims` 的路由上通过——同一个客户端有一半接口能用。
+pub fn strip_bearer_scheme(value: &str) -> Option<&str> {
+    let (scheme, token) = value.split_once(' ')?;
+    scheme.eq_ignore_ascii_case("Bearer").then_some(token)
 }
 
 /// 账号状态检查：被停用 / 删除的账号，已签发的令牌也应立即失效。
@@ -289,8 +298,18 @@ pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User
 #[cfg(test)]
 mod tests {
     use super::{
-        create_mfa_challenge_token, decode_mfa_challenge_token, Claims, MFA_CHALLENGE_PURPOSE,
+        create_mfa_challenge_token, decode_mfa_challenge_token, strip_bearer_scheme, Claims,
+        MFA_CHALLENGE_PURPOSE,
     };
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        assert_eq!(strip_bearer_scheme("Bearer abc"), Some("abc"));
+        assert_eq!(strip_bearer_scheme("bearer abc"), Some("abc"));
+        assert_eq!(strip_bearer_scheme("BEARER abc"), Some("abc"));
+        assert_eq!(strip_bearer_scheme("Basic abc"), None);
+        assert_eq!(strip_bearer_scheme("abc"), None);
+    }
     use crate::models::subject::SubjectType;
 
     #[test]

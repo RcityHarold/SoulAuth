@@ -193,7 +193,13 @@ impl From<User> for UserResponse {
             .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0));
 
         Self {
-            id: crate::utils::record_id::record_id_key_to_string(&user.id.unwrap()),
+            // `id` 是 Option（新建时还没有），这里用 unwrap 会把一条缺 id 的记录
+            // 变成整个 handler 线程 panic。降级成空串，交由上层按“找不到用户”处理。
+            id: user
+                .id
+                .as_ref()
+                .map(crate::utils::record_id::record_id_key_to_string)
+                .unwrap_or_default(),
             email: user.email,
             username: user.username,
             is_admin: false,
