@@ -73,6 +73,23 @@ impl RequestRecord {
     }
 }
 
+/// 一次限流判定的结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RateLimitDecision {
+    /// 放行。
+    Allowed,
+    /// 这次请求正好把配额用超，阻塞由它触发。值得记一条审计。
+    JustBlocked,
+    /// 已经在阻塞期内。不必重复记审计，否则被限流的流量有多大、审计写入就有多大。
+    StillBlocked,
+}
+
+impl RateLimitDecision {
+    pub fn allowed(self) -> bool {
+        matches!(self, RateLimitDecision::Allowed)
+    }
+}
+
 /// 速率限制器
 pub struct RateLimiter {
     /// 默认规则
@@ -119,8 +136,23 @@ impl RateLimiter {
         format!("{client_key}\u{1}{endpoint}")
     }
 
-    /// 检查速率限制
+    /// 检查速率限制。放行返回 `true`。
+    ///
+    /// 只关心"能不能过"的调用方用这个；需要区分"刚被封"和"封着呢"的用
+    /// [`Self::check_rate_limit_verbose`]。
     pub async fn check_rate_limit(&self, key: &str, endpoint: &str) -> Result<bool, crate::error::AppError> {
+        Ok(self.check_rate_limit_verbose(key, endpoint).await?.allowed())
+    }
+
+    /// 同 [`Self::check_rate_limit`]，但会告诉调用方这次是不是**刚**触发阻塞。
+    ///
+    /// 中间件靠它决定要不要写审计：被限流的请求每一个都记一条的话，洪水打过来
+    /// 时返回 429 很便宜、每条 429 却换来一次数据库写入 —— 限流器反倒成了放大器。
+    pub async fn check_rate_limit_verbose(
+        &self,
+        key: &str,
+        endpoint: &str,
+    ) -> Result<RateLimitDecision, crate::error::AppError> {
         let rule = self.get_rule(endpoint);
         let mut records = self.records.write().await;
 
@@ -131,8 +163,8 @@ impl RateLimiter {
 
         // 检查是否被阻塞
         if record.is_blocked() {
-            warn!("Rate limit blocked for key: {}, endpoint: {}", key, endpoint);
-            return Ok(false);
+            debug!("Rate limit blocked for key: {}, endpoint: {}", key, endpoint);
+            return Ok(RateLimitDecision::StillBlocked);
         }
 
         // 清理过期记录
@@ -142,9 +174,9 @@ impl RateLimiter {
         if record.is_rate_limited(rule.max_requests) {
             // 触发阻塞
             record.block(rule.block_duration);
-            warn!("Rate limit exceeded for key: {}, endpoint: {}, blocking for {:?}", 
+            warn!("Rate limit exceeded for key: {}, endpoint: {}, blocking for {:?}",
                   key, endpoint, rule.block_duration);
-            return Ok(false);
+            return Ok(RateLimitDecision::JustBlocked);
         }
 
         // 记录请求
@@ -153,7 +185,7 @@ impl RateLimiter {
         debug!("Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}",
               key, endpoint, record.timestamps.len(), rule.max_requests);
 
-        Ok(true)
+        Ok(RateLimitDecision::Allowed)
     }
 
     /// 重置某个客户端在所有端点上的限制
@@ -282,6 +314,36 @@ mod tests {
         // 再次请求仍应被阻塞
         let allowed = limiter.check_rate_limit(key, endpoint).await.unwrap();
         assert!(!allowed, "Request 5 should still be blocked");
+    }
+
+    #[tokio::test]
+    async fn just_blocked_is_reported_exactly_once() {
+        // 中间件靠这个区分来决定要不要写审计：阻塞期内每个请求都记一条的话，
+        // 被限流的流量有多大、审计写入就有多大。
+        let limiter = RateLimiter::new().with_default_rule(RateLimitRule {
+            window_duration: Duration::from_secs(60),
+            max_requests: 2,
+            block_duration: Duration::from_secs(120),
+        });
+
+        assert_eq!(
+            limiter.check_rate_limit_verbose("k", "/e").await.unwrap(),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check_rate_limit_verbose("k", "/e").await.unwrap(),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            limiter.check_rate_limit_verbose("k", "/e").await.unwrap(),
+            RateLimitDecision::JustBlocked
+        );
+        for _ in 0..5 {
+            assert_eq!(
+                limiter.check_rate_limit_verbose("k", "/e").await.unwrap(),
+                RateLimitDecision::StillBlocked
+            );
+        }
     }
 
     #[tokio::test]

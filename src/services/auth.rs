@@ -366,7 +366,7 @@ impl AuthService {
         }
 
         let username_normalized = self.ensure_username_available(&username).await?;
-        let hashed_password = hash_password(&req.password)?;
+        let hashed_password = hash_password_blocking(req.password.clone()).await?;
 
         let now = Utc::now();
         let (verification_token, verification_expires_at) = if self.config.email_verification_enabled
@@ -433,23 +433,31 @@ impl AuthService {
     ) -> Result<LoginOutcome> {
         let email = validate_email(&email).map_err(|_| AuthError::InvalidCredentials)?;
 
-        let user = self
+        let user = match self
             .db
             .find_record_by_field::<User>("user", "email", &email)
             .await?
-            .ok_or(AuthError::InvalidCredentials)?;
+        {
+            Some(user) => user,
+            None => {
+                // 邮箱没注册过也要把 Argon2 的时间花掉，否则响应快得多，
+                // 等于告诉调用方"这个邮箱不存在"。
+                spend_password_verification_time().await;
+                return Err(AuthError::InvalidCredentials);
+            }
+        };
 
         // 验证密码
-        let password_hash = user
-            .password_hash
-            .as_ref()
-            .ok_or(AuthError::InvalidCredentials)?;
-        let parsed_hash =
-            PasswordHash::new(password_hash).map_err(|e| AuthError::ServerError(e.to_string()))?;
+        let password_hash = match user.password_hash.clone() {
+            Some(hash) => hash,
+            None => {
+                // 纯 OAuth 账号没有密码哈希，同理不能提前返回。
+                spend_password_verification_time().await;
+                return Err(AuthError::InvalidCredentials);
+            }
+        };
 
-        Argon2::default()
-            .verify_password(password.as_bytes(), &parsed_hash)
-            .map_err(|_| AuthError::InvalidCredentials)?;
+        verify_password_blocking(password_hash, password).await?;
 
         // 检查邮箱验证状态
         if self.config.email_verification_enabled && !user.is_email_verified {
@@ -611,7 +619,7 @@ impl AuthService {
             return Err(AuthError::PasswordAlreadySet);
         }
 
-        user.password_hash = Some(hash_password(password)?);
+        user.password_hash = Some(hash_password_blocking(password.to_string()).await?);
         user.updated_at = Utc::now().timestamp();
 
         let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?.clone();
@@ -707,7 +715,7 @@ impl AuthService {
             .await?
             .ok_or(AuthError::UserNotFound)?;
 
-        user.password_hash = Some(hash_password(&new_password)?);
+        user.password_hash = Some(hash_password_blocking(new_password.clone()).await?);
         user.updated_at = Utc::now().timestamp();
 
         let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?.clone();
@@ -778,6 +786,53 @@ impl AuthService {
 
         Ok(session_infos)
     }
+}
+
+/// 一个固定的、谁也不知道原文的 Argon2 哈希，用来给"账号不存在"这条路径垫上
+/// 等量的计算。
+///
+/// 参数必须和 `hash_password` 一致（都用 `Argon2::default()`），否则耗时对不上，
+/// 垫了也白垫。只算一次。
+static DUMMY_PASSWORD_HASH: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+fn dummy_password_hash() -> &'static str {
+    DUMMY_PASSWORD_HASH.get_or_init(|| {
+        // 原文用随机值，保证没人能构造出匹配它的密码。
+        let filler = Uuid::new_v4().to_string();
+        hash_password(&filler).unwrap_or_default()
+    })
+}
+
+/// 账号不存在 / 没有密码时，照样跑一次 Argon2 校验再丢掉结果。
+///
+/// 登录失败的文案两条路径是一样的，但耗时不是：命中账号要跑 Argon2（几十毫秒），
+/// 没命中则立刻返回。这个差值在网络上很容易测出来，等于把"这个邮箱注册过没有"
+/// 白送出去。这里把两条路径的计算量拉平。
+async fn spend_password_verification_time() {
+    let _ = verify_password_blocking(dummy_password_hash().to_string(), "invalid-password".into())
+        .await;
+}
+
+/// Argon2 是几十毫秒的**纯 CPU** 运算，直接在 async fn 里跑会把 tokio 的工作
+/// 线程整个占住。核数不多的机器上，几个并发登录就能把可用的工作线程吃光，
+/// 连不相干的接口一起变慢。和 SMTP 发送同理，挪到阻塞线程池。
+async fn verify_password_blocking(stored_hash: String, password: String) -> Result<()> {
+    tokio::task::spawn_blocking(move || {
+        let parsed = PasswordHash::new(&stored_hash)
+            .map_err(|e| AuthError::ServerError(e.to_string()))?;
+        Argon2::default()
+            .verify_password(password.as_bytes(), &parsed)
+            .map_err(|_| AuthError::InvalidCredentials)
+    })
+    .await
+    .map_err(|e| AuthError::ServerError(format!("Password verification task panicked: {e}")))?
+}
+
+/// 同上：哈希一次密码也要几十毫秒，注册 / 改密路径同样不能占着工作线程。
+async fn hash_password_blocking(password: String) -> Result<String> {
+    tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|e| AuthError::ServerError(format!("Password hashing task panicked: {e}")))?
 }
 
 fn hash_password(password: &str) -> Result<String> {

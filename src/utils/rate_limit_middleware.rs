@@ -12,7 +12,10 @@ use tracing::warn;
 use crate::{
     config::Config,
     models::user_activity::{ActivityCategory, ActivityStatus},
-    services::audit_logger::{actions, AuditEvent, AuditLogger},
+    services::{
+        audit_logger::{actions, AuditEvent, AuditLogger},
+        rate_limiter::RateLimitDecision,
+    },
     AppState,
 };
 
@@ -83,27 +86,37 @@ pub async fn rate_limit_layer<B>(
     let ip = client_ip(&addr, &headers, config.trust_proxy_headers);
     let endpoint = rate_limit_endpoint(&req);
 
-    match app_state.rate_limiter.check_rate_limit(&ip, &endpoint).await {
-        Ok(true) => next.run(req).await,
-        Ok(false) => {
-            let user_agent = headers
-                .get(axum::http::header::USER_AGENT)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or("Unknown")
-                .chars()
-                .take(256)
-                .collect::<String>();
+    match app_state
+        .rate_limiter
+        .check_rate_limit_verbose(&ip, &endpoint)
+        .await
+    {
+        Ok(RateLimitDecision::Allowed) => next.run(req).await,
+        Ok(decision) => {
+            // 只在阻塞被触发的那一刻记审计。以前每个被拒的请求都写一条：返回 429
+            // 很便宜，但每条 429 都换来一次数据库写入，洪水打过来时限流器自己就是
+            // 放大器。阻塞期内的后续请求直接丢弃，信息量也没有损失 —— 触发那一条
+            // 已经记下了 IP、端点和时间。
+            if decision == RateLimitDecision::JustBlocked {
+                let user_agent = headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("Unknown")
+                    .chars()
+                    .take(256)
+                    .collect::<String>();
 
-            audit.record(
-                AuditEvent::new(
-                    actions::RATE_LIMIT_VIOLATION,
-                    ActivityCategory::Security,
-                    ActivityStatus::Warning,
-                    ip.clone(),
-                    user_agent,
-                )
-                .with_details(serde_json::json!({ "endpoint": endpoint })),
-            );
+                audit.record(
+                    AuditEvent::new(
+                        actions::RATE_LIMIT_VIOLATION,
+                        ActivityCategory::Security,
+                        ActivityStatus::Warning,
+                        ip.clone(),
+                        user_agent,
+                    )
+                    .with_details(serde_json::json!({ "endpoint": endpoint })),
+                );
+            }
 
             rate_limited_response(&ip, &endpoint)
         }
