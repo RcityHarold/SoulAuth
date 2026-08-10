@@ -83,6 +83,11 @@ pub struct OAuthService {
     config: Config,
     google_client: BasicClient,
     github_client: BasicClient,
+    // 授权 / 换令牌两个端点已经进了 BasicClient，不必重复保存；
+    // 这三个是「换到令牌之后」才用的，得自己拿着。
+    google_userinfo_url: String,
+    github_user_url: String,
+    github_emails_url: String,
 }
 
 #[cfg(test)]
@@ -91,42 +96,7 @@ mod tests {
     use crate::config::Config;
 
     fn test_config() -> Config {
-        Config {
-            database_url: "http://localhost:8000".to_string(),
-            database_user: "root".to_string(),
-            database_pass: "root".to_string(),
-            database_namespace: "auth".to_string(),
-            database_name: "main".to_string(),
-            database_connection_timeout: 30,
-            database_max_connections: 10,
-            jwt_secret: "0123456789abcdef0123456789abcdef".to_string(),
-            jwt_expiration: 3600,
-            google_client_id: "google-client".to_string(),
-            google_client_secret: "google-secret".to_string(),
-            github_client_id: "github-client".to_string(),
-            github_client_secret: "github-secret".to_string(),
-            oauth_redirect_url: "https://auth.example/api/auth/callback".to_string(),
-            proxy_enabled: false,
-            proxy_url: None,
-            smtp_host: "localhost".to_string(),
-            smtp_port: 1025,
-            smtp_username: "smtp-user".to_string(),
-            smtp_password: "smtp-pass".to_string(),
-            smtp_from: "noreply@example.com".to_string(),
-            smtp_insecure: true,
-            app_url: "https://auth.example".to_string(),
-            email_verification_enabled: false,
-            trust_proxy_headers: false,
-            cors_allowed_origins: Vec::new(),
-            oidc_rsa_private_key_pem: None,
-            oidc_rsa_private_key_path: None,
-            password_min_length: 12,
-            mfa_encryption_key: None,
-            login_page_url: None,
-            verify_email_page_url: None,
-            session_cache_ttl_seconds: 5,
-            install_marker_path: None,
-        }
+        Config::test_default()
     }
 
     #[test]
@@ -142,6 +112,51 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_overrides_keep_each_providers_real_path_shape() {
+        // 覆盖之所以只给一个根地址，前提就是路径形状照抄真实 provider；
+        // 形状一旦被改歪，本地替身就不再是忠实替身，测过也说明不了什么。
+        let (auth, token, userinfo) = super::google_endpoints(Some("http://127.0.0.1:8126"));
+        assert_eq!(auth, "http://127.0.0.1:8126/o/oauth2/v2/auth");
+        assert_eq!(token, "http://127.0.0.1:8126/token");
+        assert_eq!(userinfo, "http://127.0.0.1:8126/oauth2/v2/userinfo");
+
+        // GitHub 覆盖后的路径正是 GitHub Enterprise 的约定
+        let (auth, token, user, emails) = super::github_endpoints(Some("https://ghe.example.com"));
+        assert_eq!(auth, "https://ghe.example.com/login/oauth/authorize");
+        assert_eq!(token, "https://ghe.example.com/login/oauth/access_token");
+        assert_eq!(user, "https://ghe.example.com/api/v3/user");
+        assert_eq!(emails, "https://ghe.example.com/api/v3/user/emails");
+    }
+
+    #[test]
+    fn without_override_the_official_endpoints_are_used() {
+        // 防的是「加了覆盖能力，结果默认路径也被顺手改掉」。
+        let (auth, token, userinfo) = super::google_endpoints(None);
+        assert_eq!(auth, "https://accounts.google.com/o/oauth2/v2/auth");
+        assert_eq!(token, "https://oauth2.googleapis.com/token");
+        assert_eq!(userinfo, "https://www.googleapis.com/oauth2/v2/userinfo");
+
+        let (auth, token, user, emails) = super::github_endpoints(None);
+        assert_eq!(auth, "https://github.com/login/oauth/authorize");
+        assert_eq!(token, "https://github.com/login/oauth/access_token");
+        assert_eq!(user, "https://api.github.com/user");
+        assert_eq!(emails, "https://api.github.com/user/emails");
+    }
+
+    #[test]
+    fn an_empty_override_is_treated_as_absent() {
+        // `GOOGLE_OAUTH_BASE_URL=` 会读成 Some("")，若不当空处理，
+        // 端点就变成 `/token` 这种没有主机名的地址，直接把换令牌打断。
+        let mut config = test_config();
+        config.google_oauth_base_url = Some("   ".to_string());
+        let service = OAuthService::new(config).expect("service");
+        assert_eq!(
+            service.google_userinfo_url,
+            "https://www.googleapis.com/oauth2/v2/userinfo"
+        );
+    }
+
+    #[test]
     fn github_auth_url_carries_the_supplied_signed_state() {
         let service = OAuthService::new(test_config()).expect("service");
         let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
@@ -154,17 +169,59 @@ mod tests {
     }
 }
 
+/// 各 provider 的端点。`base` 为 `None` 时用官方地址；为 `Some` 时
+/// **沿用该 provider 真实的路径形状**，只换根地址 —— 这样本地替身是忠实
+/// 替身，测出来的东西对真实端点同样成立。
+///
+/// 只在这一处知道路径形状：换 provider 或改端点都只动这里。
+fn google_endpoints(base: Option<&str>) -> (String, String, String) {
+    match base {
+        Some(b) => (
+            format!("{b}/o/oauth2/v2/auth"),
+            format!("{b}/token"),
+            format!("{b}/oauth2/v2/userinfo"),
+        ),
+        None => (
+            "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
+            "https://oauth2.googleapis.com/token".to_string(),
+            "https://www.googleapis.com/oauth2/v2/userinfo".to_string(),
+        ),
+    }
+}
+
+/// 返回 (auth, token, user, emails)。覆盖时的路径正是 GitHub Enterprise 的约定。
+fn github_endpoints(base: Option<&str>) -> (String, String, String, String) {
+    match base {
+        Some(b) => (
+            format!("{b}/login/oauth/authorize"),
+            format!("{b}/login/oauth/access_token"),
+            format!("{b}/api/v3/user"),
+            format!("{b}/api/v3/user/emails"),
+        ),
+        None => (
+            "https://github.com/login/oauth/authorize".to_string(),
+            "https://github.com/login/oauth/access_token".to_string(),
+            "https://api.github.com/user".to_string(),
+            "https://api.github.com/user/emails".to_string(),
+        ),
+    }
+}
+
 impl OAuthService {
     pub fn new(config: Config) -> Result<Self> {
+        let base = |v: &Option<String>| {
+            v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+        };
+        let (google_auth, google_token, google_userinfo_url) =
+            google_endpoints(base(&config.google_oauth_base_url).as_deref());
+        let (github_auth, github_token, github_user_url, github_emails_url) =
+            github_endpoints(base(&config.github_oauth_base_url).as_deref());
+
         let google_client = BasicClient::new(
             ClientId::new(config.google_client_id.clone()),
             Some(ClientSecret::new(config.google_client_secret.clone())),
-            AuthUrl::new("https://accounts.google.com/o/oauth2/v2/auth".to_string())
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            Some(
-                TokenUrl::new("https://oauth2.googleapis.com/token".to_string())
-                    .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            ),
+            AuthUrl::new(google_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+            Some(TokenUrl::new(google_token).map_err(|e| AuthError::OAuthError(e.to_string()))?),
         )
         .set_redirect_uri(
             RedirectUrl::new(format!("{}/google", config.oauth_redirect_url))
@@ -174,12 +231,8 @@ impl OAuthService {
         let github_client = BasicClient::new(
             ClientId::new(config.github_client_id.clone()),
             Some(ClientSecret::new(config.github_client_secret.clone())),
-            AuthUrl::new("https://github.com/login/oauth/authorize".to_string())
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            Some(
-                TokenUrl::new("https://github.com/login/oauth/access_token".to_string())
-                    .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            ),
+            AuthUrl::new(github_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+            Some(TokenUrl::new(github_token).map_err(|e| AuthError::OAuthError(e.to_string()))?),
         )
         .set_redirect_uri(
             RedirectUrl::new(format!("{}/github", config.oauth_redirect_url))
@@ -190,6 +243,9 @@ impl OAuthService {
             config,
             google_client,
             github_client,
+            google_userinfo_url,
+            github_user_url,
+            github_emails_url,
         })
     }
 
@@ -265,7 +321,7 @@ impl OAuthService {
         info!("Fetching user info from Google API");
 
         let user_info: GoogleUserInfo = match client
-            .get("https://www.googleapis.com/oauth2/v2/userinfo")
+            .get(&self.google_userinfo_url)
             .bearer_auth(token.access_token().secret())
             .send()
             .await {
@@ -332,7 +388,7 @@ impl OAuthService {
 
         // 获取用户信息
         let user_info: GitHubUserInfo = client
-            .get("https://api.github.com/user")
+            .get(&self.github_user_url)
             .bearer_auth(token.access_token().secret())
             .header("User-Agent", "rust-auth-system")
             .send()
@@ -344,7 +400,7 @@ impl OAuthService {
 
         // 获取用户邮箱（因为某些用户可能没有公开邮箱）
         let emails: Vec<GitHubEmail> = client
-            .get("https://api.github.com/user/emails")
+            .get(&self.github_emails_url)
             .bearer_auth(token.access_token().secret())
             .header("User-Agent", "rust-auth-system")
             .send()

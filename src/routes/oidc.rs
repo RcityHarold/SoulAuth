@@ -27,13 +27,20 @@ use crate::{
         oidc::{JwksResponse, OidcConfiguration, OidcService},
     },
     utils::{
-        jwt::get_user_from_token,
+        jwt::{decode_and_verify_token, load_user_from_claims},
         record_id::{normalize_user_id, record_id_key_to_string},
     },
 };
 
 pub(crate) const SOULAUTH_SESSION_COOKIE: &str = "soulauth_session";
 pub(crate) const OIDC_RETURN_COOKIE: &str = "soulauth_oidc_return";
+/// 存放 OAuth `state` 里那个 nonce 的 cookie，用来把 state 绑到发起登录的浏览器上。
+///
+/// 只验 state 的签名是挡不住 OAuth 登录 CSRF 的：攻击者自己访问一次
+/// `/api/auth/login/google`，从跳转地址里就能白拿一个"本服务签发"的合法 state，
+/// 再配上自己账号的 `code` 诱导受害者访问回调，受害者的浏览器就被登进了
+/// 攻击者的账号。必须要求回调时浏览器能拿出同一个 nonce（double-submit）。
+pub(crate) const OAUTH_STATE_COOKIE: &str = "soulauth_oauth_state";
 pub(crate) const SESSION_TTL_SECONDS: i64 = 86400;
 const OAUTH_STATE_TTL_SECONDS: i64 = 600;
 
@@ -246,10 +253,16 @@ pub(crate) fn decode_oidc_return_token(
 }
 
 /// 签发 OAuth `state`。`return_target` 只允许是本服务内部的 authorize 路径。
+/// 一个刚签发的 OAuth `state`：令牌本身，以及要写进 cookie 的 nonce。
+pub(crate) struct IssuedOAuthState {
+    pub token: String,
+    pub nonce: String,
+}
+
 pub(crate) fn create_oauth_state_token(
     return_target: Option<&str>,
     jwt_secret: &str,
-) -> Result<String, AuthError> {
+) -> Result<IssuedOAuthState, AuthError> {
     if let Some(target) = return_target {
         if !is_valid_oidc_return_target(target) {
             return Err(AuthError::BadRequest("Invalid OIDC return target".to_string()));
@@ -257,28 +270,43 @@ pub(crate) fn create_oauth_state_token(
     }
 
     let now = Utc::now().timestamp();
+    let nonce = Uuid::new_v4().to_string();
     let claims = OAuthStateClaims {
-        nonce: Uuid::new_v4().to_string(),
+        nonce: nonce.clone(),
         return_target: return_target.map(ToOwned::to_owned),
         exp: now + OAUTH_STATE_TTL_SECONDS,
         iat: now,
     };
 
-    encode(
+    let token = encode(
         &Header::default(),
         &claims,
         &EncodingKey::from_secret(jwt_secret.as_bytes()),
     )
-    .map_err(|e| AuthError::TokenError(e.to_string()))
+    .map_err(|e| AuthError::TokenError(e.to_string()))?;
+
+    Ok(IssuedOAuthState { token, nonce })
 }
 
-/// 校验回调带回来的 `state`，返回其中携带的 OIDC 回跳目标（如果有）。
+/// state 的 cookie 有效期，与 state 本身一致。
+pub(crate) const OAUTH_STATE_COOKIE_TTL_SECONDS: i64 = OAUTH_STATE_TTL_SECONDS;
+
+/// 解析出来的 `state` 内容。
+pub(crate) struct DecodedOAuthState {
+    /// 必须与浏览器 cookie 里的值一致，否则这次回调不是本浏览器发起的。
+    pub nonce: String,
+    pub return_target: Option<String>,
+}
+
+/// 校验回调带回来的 `state`，返回其中的 nonce 与 OIDC 回跳目标。
 ///
-/// 校验失败即视为 CSRF / 重放，调用方必须终止登录流程。
+/// **只验签名不足以防 CSRF** —— 签名只证明"是本服务签的"，而任何人都能向
+/// `/api/auth/login/google` 要一个。调用方拿到 nonce 后必须再和 cookie 比对，
+/// 见 [`OAUTH_STATE_COOKIE`]。
 pub(crate) fn decode_oauth_state_token(
     token: &str,
     jwt_secret: &str,
-) -> Result<Option<String>, AuthError> {
+) -> Result<DecodedOAuthState, AuthError> {
     let mut validation = Validation::default();
     validation.leeway = 0;
     let token_data = decode::<OAuthStateClaims>(
@@ -294,7 +322,10 @@ pub(crate) fn decode_oauth_state_token(
         }
     }
 
-    Ok(token_data.claims.return_target)
+    Ok(DecodedOAuthState {
+        nonce: token_data.claims.nonce,
+        return_target: token_data.claims.return_target,
+    })
 }
 
 fn is_valid_oidc_return_target(target: &str) -> bool {
@@ -398,11 +429,30 @@ async fn authorize(
     if !prompt_login {
         if let Some(auth_header) = headers.get(header::AUTHORIZATION) {
             if let Ok(auth_str) = auth_header.to_str() {
-                if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                    if let Ok(user) = get_user_from_token(token, &db).await {
-                        let user_id =
-                            record_id_key_to_string(user.id.as_ref().ok_or(AuthError::UserNotFound)?);
-                        return create_authorize_response(&oidc_service, &request, &user_id).await;
+                // 认证方案名按 RFC 7235 不区分大小写，和 `utils::jwt` 用同一个解析函数。
+                // 这里如果只认 "Bearer "，一个发 `authorization: bearer xxx` 的客户端
+                // 会被判为未登录、被丢去登录页，而它在别的接口上是能正常认证的。
+                if let Some(token) = crate::utils::jwt::strip_bearer_scheme(auth_str) {
+                    let token = token.trim();
+                    // 先解 Claims 再取 user：ID Token 的 `sid` 需要 `session_id`，
+                    // 而 `get_user_from_token` 只返回 User，把它丢掉了。
+                    if let Ok(claims) = decode_and_verify_token(&db, token).await {
+                        if let Ok(user) = load_user_from_claims(&db, &claims).await {
+                            let user_id = record_id_key_to_string(
+                                user.id.as_ref().ok_or(AuthError::UserNotFound)?,
+                            );
+                            // 没有 session_id 的令牌无法提供 `sid`，按 fail-closed
+                            // 处理：不在此处签授权码，继续往下走到登录页。
+                            if let Some(session_id) = claims.session_id.as_deref() {
+                                return create_authorize_response(
+                                    &oidc_service,
+                                    &request,
+                                    &user_id,
+                                    session_id,
+                                )
+                                .await;
+                            }
+                        }
                     }
                 }
             }
@@ -418,7 +468,13 @@ async fn authorize(
 
                 if !session_too_old && browser_session_is_active(&db, &session.session_key).await {
                     if let Ok(user_id) = resolve_existing_user_id(&db, &session.user_id).await {
-                        return create_authorize_response(&oidc_service, &request, &user_id).await;
+                        return create_authorize_response(
+                            &oidc_service,
+                            &request,
+                            &user_id,
+                            &session.session_key,
+                        )
+                        .await;
                     }
                 }
             }
@@ -573,8 +629,12 @@ async fn create_authorize_response(
     oidc_service: &OidcService,
     request: &AuthorizeRequest,
     user_id: &str,
+    auth_session_ref: &str,
 ) -> Result<Response, AuthError> {
-    match oidc_service.create_authorization_code(request, user_id).await {
+    match oidc_service
+        .create_authorization_code(request, user_id, auth_session_ref)
+        .await
+    {
         Ok(code) => {
             let separator = if request.redirect_uri.contains('?') { '&' } else { '?' };
             let mut redirect_url = format!(
@@ -757,8 +817,8 @@ mod tests {
         build_cookie, build_expired_cookie, create_browser_session_token,
         create_browser_session_token_with_ttl, create_error_redirect, create_oauth_state_token,
         create_oidc_return_token, decode_browser_session_token, decode_oauth_state_token,
-        decode_oidc_return_token, sign_oidc_return_token_unchecked, OIDC_RETURN_COOKIE,
-        SOULAUTH_SESSION_COOKIE,
+        decode_oidc_return_token, sign_oidc_return_token_unchecked, OAUTH_STATE_COOKIE,
+        OIDC_RETURN_COOKIE, SOULAUTH_SESSION_COOKIE,
     };
 
     #[test]
@@ -888,26 +948,27 @@ mod tests {
         let target = "/api/oidc/authorize?client_id=client";
         let state = create_oauth_state_token(Some(target), "test-secret").expect("state");
 
-        let decoded = decode_oauth_state_token(&state, "test-secret").expect("decoded");
+        let decoded = decode_oauth_state_token(&state.token, "test-secret").expect("decoded");
 
-        assert_eq!(decoded.as_deref(), Some(target));
+        assert_eq!(decoded.return_target.as_deref(), Some(target));
+        // nonce 必须原样带回来：登录入口把它写进 cookie，回调时要拿它比对。
+        assert_eq!(decoded.nonce, state.nonce);
     }
 
     #[test]
     fn oauth_state_without_return_target_is_still_verified() {
         let state = create_oauth_state_token(None, "test-secret").expect("state");
 
-        assert_eq!(
-            decode_oauth_state_token(&state, "test-secret").expect("decoded"),
-            None
-        );
+        let decoded = decode_oauth_state_token(&state.token, "test-secret").expect("decoded");
+        assert!(decoded.return_target.is_none());
+        assert!(!decoded.nonce.is_empty());
     }
 
     #[test]
     fn forged_oauth_state_is_rejected() {
         let state = create_oauth_state_token(None, "real-secret").expect("state");
 
-        assert!(decode_oauth_state_token(&state, "attacker-secret").is_err());
+        assert!(decode_oauth_state_token(&state.token, "attacker-secret").is_err());
         assert!(decode_oauth_state_token("not-a-jwt", "real-secret").is_err());
     }
 
@@ -921,7 +982,14 @@ mod tests {
         let a = create_oauth_state_token(None, "test-secret").expect("a");
         let b = create_oauth_state_token(None, "test-secret").expect("b");
 
-        assert_ne!(a, b, "each state must carry a fresh nonce");
+        assert_ne!(a.nonce, b.nonce, "each state must carry a fresh nonce");
+        assert_ne!(a.token, b.token);
+    }
+
+    #[test]
+    fn oauth_state_cookie_name_is_stable() {
+        // 名字变了会让上一批还在途中的登录全部失败，改动要有意识。
+        assert_eq!(OAUTH_STATE_COOKIE, "soulauth_oauth_state");
     }
 
     #[test]

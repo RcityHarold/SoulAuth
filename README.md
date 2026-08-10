@@ -117,7 +117,7 @@
   移除伪造的连接池指标；`security-report` 的登录模式、安全事件、用户行为分析
   全部改为对 `user_activity` 与 `account_lockout` 的真实聚合（无 GeoIP 数据源，
   地理分布如实返回空）。
-- **`initial_data.sql` / `docs_permissions.sql` 改为幂等**（`UPSERT` + 确定性 ID）。
+- **`initial_data.sql` 改为幂等**（`UPSERT` + 确定性 ID）。
 
 #### 第三轮：可用性与性能
 - **密码账号现在也能走 SSO**：`POST /api/auth/login` 与 `/api/auth/mfa/login-verify`
@@ -215,6 +215,16 @@ GITHUB_CLIENT_SECRET=your-github-client-secret
 # OAuth回调URL
 OAUTH_REDIRECT_URL=http://localhost:8080/api/auth/callback
 
+# 可选：OAuth 端点根地址覆盖。留空即用官方端点。
+# 覆盖时沿用该 provider 真实的路径形状，只换根地址：
+#   Google  {base}/o/oauth2/v2/auth  /token  /oauth2/v2/userinfo
+#   GitHub  {base}/login/oauth/{authorize,access_token}  {base}/api/v3/user[/emails]
+# GitHub 这套正是 GitHub Enterprise 的约定，可直接指向自托管实例。
+# 明文 http 只允许指向环回地址：远端端点走明文等于把 client_secret
+# 与访问令牌交给链路上的任何人，这种配置会让服务拒绝启动。
+# GOOGLE_OAUTH_BASE_URL=
+# GITHUB_OAUTH_BASE_URL=
+
 # SMTP配置
 SMTP_HOST=smtp.example.com
 SMTP_PORT=587
@@ -262,8 +272,8 @@ VERIFY_EMAIL_PAGE_URL=https://app.example.com/verify-email
 # 本实例的登出/改密/停用会立即清缓存；多副本部署时其它副本最多滞后一个 TTL。
 AUTH_SESSION_CACHE_TTL_SECONDS=5
 
-# 可选：启动前等待的安装标记文件。不配置则不等待。
-# INSTALL_MARKER_PATH=../Rainbow-docs/.rainbow_docs_installed
+# 可选：HTTP 监听地址，默认 0.0.0.0:8080
+# BIND_ADDR=0.0.0.0:8080
 
 # 代理配置（可选）
 PROXY_ENABLED=false
@@ -1799,6 +1809,36 @@ curl http://localhost:8080/api/auth/security/lockout-status \
 - 数据库连接超时保护
 - CSRF 保护准备
 - 输入验证和错误处理
+
+## 测试
+
+两层，分工不同：
+
+```bash
+# 单元测试：纯逻辑与一致性断言，零外部依赖，约 5 秒
+cargo test
+
+# 集成测试：契约级行为，需要 surreal 可执行文件与四个空闲端口
+cargo build && ./tests/integration.sh
+
+# 端口被占时可覆盖
+SURREAL_PORT=8101 APP_PORT=8180 SINK_PORT=8125 OAUTH_PORT=8127 ./tests/integration.sh
+
+# 失败时保留现场（服务日志、信箱、最后一次响应体）
+KEEP_WORK=1 ./tests/integration.sh
+```
+
+集成测试会自起一个内存版 SurrealDB、一个服务进程，以及两个零依赖的替身
+（`tests/smtp_sink.py` 收信、`tests/mock_oauth.py` 扮演 Google / GitHub），
+导入 `schema.sql` 与 `initial_data.sql`，跑完 14 组共 91 项断言后自行清理。
+退出码：0 全过、1 有断言失败、2 前置条件不满足。
+
+覆盖范围包括：权限名命名空间前缀与 RBAC 守卫、授予撤销的**落库往返**
+（而非只看接口返回成功）、OIDC 授权码全流程与 `sid` 传递、PKCE 降级拒绝、
+授权码不可复用、认证会话缺失时拒签 ID Token、OAuth 登录 CSRF 的 cookie 绑定、
+账号锁定在并发下不丢计数、限流按路由模板计数、邮件投递的**信件内容**
+（含正文不得出现密码或签名密钥）与链接可用性、OAuth 换到令牌之后的整段
+（建号与关联既有账号、邮箱未验证时拒绝、重定向目标不越出本服务）。
 
 ## 开发路线图
 

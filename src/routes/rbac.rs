@@ -102,7 +102,7 @@ async fn create_role(
     Json(request): Json<CreateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
     let rbac_service = RBACService::new(db);
     
@@ -128,7 +128,7 @@ async fn list_roles(
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<RoleResponse>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -147,7 +147,7 @@ async fn get_role(
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -175,7 +175,7 @@ async fn update_role(
     Json(request): Json<UpdateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
     let rbac_service = RBACService::new(db);
     
@@ -202,7 +202,7 @@ async fn delete_role(
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.delete");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_DELETE);
 
     let rbac_service = RBACService::new(db);
 
@@ -236,7 +236,7 @@ async fn create_permission(
     Json(request): Json<CreatePermissionRequest>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
@@ -262,7 +262,7 @@ async fn list_permissions(
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<PermissionResponse>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -281,7 +281,7 @@ async fn get_permission(
     Path(permission_name): Path<String>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -303,7 +303,7 @@ async fn get_role_permissions(
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -324,7 +324,7 @@ async fn assign_permission_to_role(
     Json(request): Json<AssignPermissionToRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
@@ -356,7 +356,7 @@ async fn remove_permission_from_role(
     Json(request): Json<RemovePermissionFromRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
@@ -391,7 +391,7 @@ async fn get_user_roles(
     if requester_id != target_user_id {
         let rbac_service = RBACService::new(db.clone());
         let allowed = rbac_service
-            .check_user_permission(&requester_id, "users.read")
+            .check_user_permission(&requester_id, crate::models::permission::names::USERS_READ)
             .await
             .unwrap_or(false);
         if !allowed {
@@ -417,7 +417,7 @@ async fn assign_role_to_user(
     Json(request): Json<AssignRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &requester_id, "roles.write");
+    require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
     let target_user_id = normalize_user_id(&user_id);
     let rbac_service = RBACService::new(db);
@@ -453,7 +453,7 @@ async fn remove_role_from_user(
     Json(request): Json<RemoveRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &requester_id, "roles.write");
+    require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
     let target_user_id = normalize_user_id(&user_id);
     let rbac_service = RBACService::new(db);
@@ -489,7 +489,7 @@ async fn get_user_permissions(
     if requester_id != target_user_id {
         let rbac_service = RBACService::new(db.clone());
         let allowed = rbac_service
-            .check_user_permission(&requester_id, "users.read")
+            .check_user_permission(&requester_id, crate::models::permission::names::USERS_READ)
             .await
             .unwrap_or(false);
         if !allowed {

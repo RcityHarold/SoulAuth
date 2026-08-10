@@ -289,12 +289,6 @@ pub async fn load_user_from_claims(db: &Database, claims: &Claims) -> Result<Use
     }
 }
 
-/// 根据 Bearer 令牌取用户（含会话吊销校验）。
-pub async fn get_user_from_token(token: &str, db: &Arc<Database>) -> Result<User> {
-    let claims = decode_and_verify_token(db, token).await?;
-    load_user_from_claims(db, &claims).await
-}
-
 #[cfg(test)]
 mod tests {
     use super::{

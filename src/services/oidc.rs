@@ -104,6 +104,7 @@ impl OidcService {
         &self,
         request: &AuthorizeRequest,
         user_id: &str,
+        auth_session_ref: &str,
     ) -> Result<String> {
         // 验证客户端
         let client = self
@@ -177,6 +178,7 @@ impl OidcService {
             nonce: request.nonce.clone(),
             code_challenge: request.code_challenge.clone(),
             code_challenge_method: request.code_challenge_method.clone(),
+            auth_session_ref: Some(auth_session_ref.to_string()),
             used: false,
             expires_at,
             created_at: Utc::now().timestamp(),
@@ -307,6 +309,7 @@ impl OidcService {
             &auth_code.user_id,
             &auth_code.scope,
             auth_code.nonce.as_deref(),
+            auth_code.auth_session_ref.as_deref(),
         )
         .await
         .map_err(|e| anyhow!("generate tokens failed: {e}"))
@@ -364,7 +367,13 @@ impl OidcService {
             }
         };
 
-        self.generate_tokens(&client, &stored_refresh_token.user_id, &scope, None)
+        self.generate_tokens(
+            &client,
+            &stored_refresh_token.user_id,
+            &scope,
+            None,
+            stored_refresh_token.auth_session_ref.as_deref(),
+        )
             .await
     }
 
@@ -374,6 +383,7 @@ impl OidcService {
         user_id: &str,
         scope: &str,
         nonce: Option<&str>,
+        auth_session_ref: Option<&str>,
     ) -> Result<TokenResponse> {
         let now = Utc::now().timestamp();
 
@@ -408,6 +418,7 @@ impl OidcService {
                 user_id: user_id.to_string(),
                 access_token: access_token.clone(),
                 scope: scope.to_string(),
+                auth_session_ref: auth_session_ref.map(ToOwned::to_owned),
                 used: false,
                 expires_at: refresh_token_expires_at,
                 created_at: now,
@@ -427,7 +438,10 @@ impl OidcService {
                 .get_user_by_id(user_id)
                 .await
                 .map_err(|e| anyhow!("get id token user failed: {e}"))?;
-            Some(self.generate_id_token(client, &user, nonce).await?)
+            Some(
+                self.generate_id_token(client, &user, nonce, auth_session_ref)
+                    .await?,
+            )
         } else {
             None
         };
@@ -442,12 +456,26 @@ impl OidcService {
         })
     }
 
+    /// 签发 ID Token。
+    ///
+    /// `auth_session_ref` 是必需的：`sid` 按 P0-DECISION-10 DEC-10-06 为必填 claim。
+    /// 取不到会话引用时**拒签**，不签一张没有 `sid` 的 ID Token —— OS 的每条审计
+    /// 链路都要求 `auth_session_ref`，缺了下游只能编或留空，两者都比失败更糟。
+    ///
+    /// 影响：升级前签发的刷新令牌没有该字段，首次刷新会失败，用户需重新登录一次。
     async fn generate_id_token(
         &self,
         client: &OidcClient,
         user: &User,
         nonce: Option<&str>,
+        auth_session_ref: Option<&str>,
     ) -> Result<String> {
+        let sid = auth_session_ref
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow!("Missing auth session reference; refusing to issue ID token"))?
+            .to_string();
+
         let now = Utc::now().timestamp();
         let exp = now + client.id_token_lifetime;
 
@@ -460,6 +488,7 @@ impl OidcService {
             exp,
             iat: now,
             auth_time: user.last_login_at.unwrap_or(now),
+            sid,
             nonce: nonce.map(|n| n.to_string()),
             email: Some(user.email.clone()),
             email_verified: Some(user.is_email_verified),
@@ -652,6 +681,7 @@ impl OidcService {
                 nonce: $nonce ?? NONE,
                 code_challenge: $code_challenge ?? NONE,
                 code_challenge_method: $code_challenge_method ?? NONE,
+                auth_session_ref: $auth_session_ref ?? NONE,
                 used: $used,
                 expires_at: $expires_at,
                 created_at: $created_at
@@ -672,6 +702,7 @@ impl OidcService {
                     "nonce": code.nonce,
                     "code_challenge": code.code_challenge,
                     "code_challenge_method": code.code_challenge_method,
+                    "auth_session_ref": code.auth_session_ref,
                     "used": code.used,
                     "expires_at": code.expires_at,
                     "created_at": code.created_at,
@@ -695,6 +726,7 @@ impl OidcService {
                 nonce,
                 code_challenge,
                 code_challenge_method,
+                auth_session_ref,
                 used,
                 expires_at,
                 created_at
@@ -829,6 +861,7 @@ impl OidcService {
                 user_id: type::record('user', $user_key),
                 access_token: $access_token,
                 scope: $scope,
+                auth_session_ref: $auth_session_ref ?? NONE,
                 used: $used,
                 expires_at: $expires_at,
                 created_at: $created_at
@@ -844,6 +877,7 @@ impl OidcService {
                     "client_id": token.client_id,
                     "user_key": normalize_user_id(&token.user_id),
                     "access_token": token.access_token,
+                    "auth_session_ref": token.auth_session_ref,
                     "scope": token.scope,
                     "used": token.used,
                     "expires_at": token.expires_at,
@@ -864,6 +898,7 @@ impl OidcService {
                 type::string(user_id) AS user_id,
                 access_token,
                 scope,
+                auth_session_ref,
                 used,
                 expires_at,
                 created_at

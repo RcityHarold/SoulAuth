@@ -415,6 +415,7 @@ impl Database {
             self.client
                 .query(query)
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
             Ok(())
         })
@@ -514,6 +515,7 @@ impl Database {
                     .query(&query)
                     .bind(("value", rid.clone()))
                     .await
+                    .and_then(|response| response.check())
                     .map_err(|e| {
                         AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
                     })?;
@@ -574,6 +576,7 @@ impl Database {
                     .query(&query)
                     .bind(("value", value.to_string()))
                     .await
+                    .and_then(|response| response.check())
                     .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
 
                 debug!("原始查询结果: {:?}", result);
@@ -676,13 +679,20 @@ impl Database {
         Ok(deleted)
     }
 
+    /// 删除单条会话（登出）。
+    ///
+    /// 走 `raw_query` 而不是直接用 `self.client`：前者会 `.check()` 语句级错误、
+    /// 并在鉴权态过期时换新连接重试。以前这里是裸调用，写失败会被吞掉 ——
+    /// 登出接口照样返回成功，`session` 行却还在，令牌一直有效到自然过期。
+    /// 下面两个同族函数本来就是这么写的，唯独这个漏了。
     pub async fn delete_session_by_token(&self, token: &str) -> Result<()> {
-        let query = "DELETE session WHERE token = $session_token";
-        self.client
-            .query(query)
-            .bind(("session_token", token.to_owned()))
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
+        self.raw_query(
+            "delete_session_by_token",
+            "DELETE session WHERE token = $session_token",
+            serde_json::json!({ "session_token": token }),
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())
     }
 
@@ -831,7 +841,12 @@ impl Database {
             .await
     }
 
-    /// 公开的查询方法，供其他服务使用  
+    /// 公开的查询构造器，供其他服务使用。
+    ///
+    /// 注意：这里返回的是**未执行**的构造器，`.check()` 只能由调用方在 `.await`
+    /// 之后自己加。需要自动 check + 401 重试的场合请优先用 `raw_query`。
+    /// 当前无调用点，保留仅为对外扩展。
+    #[allow(dead_code)]
     pub fn query<'a>(&'a self, sql: &'a str) -> surrealdb::method::Query<'a, Client> {
         self.client.query(sql)
     }

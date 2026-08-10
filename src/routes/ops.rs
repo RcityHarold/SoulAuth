@@ -41,7 +41,7 @@ async fn get_membership_overview(
     Extension(db): Extension<Arc<Database>>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
     let user_id = user.id().map_err(|_| StatusCode::UNAUTHORIZED)?;
-    require_permission_status!(db, &user_id, "users.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::USERS_READ);
 
     let users: Vec<User> = db
         .query_take0_vec_no_bind(

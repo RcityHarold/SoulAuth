@@ -42,19 +42,37 @@ surreal import --conn http://localhost:8000 --user root --pass root --ns product
 
 ### 3. 安装文档系统权限（可选）
 
-如果需要集成 Rainbow-Docs 文档系统，请运行额外的权限扩展文件：
+### 清理 Rainbow-Docs 遗留权限（仅存量实例需要）
 
-```bash
-# 导入文档系统权限
-surreal import --conn http://localhost:8000 --user root --pass root --ns production --db auth docs_permissions.sql
+`docs_permissions.sql` 已删除。它曾往 SoulAuth 的权限表里塞入另一个项目
+（Rainbow-Docs）的 10 个权限、3 个角色和 31 条授权关联，而 SoulAuth 自身代码
+从未引用过它们 —— 按 P0-DECISION-09/10，Auth-local RBAC 只管 SoulAuth 自己的
+管理后台，别的应用的权限不该寄存在这里。
 
-# 或者手动执行SQL文件内容
+全新部署无需任何操作。**已经导入过该文件的实例**，其数据库里仍留有这些行，
+需手工清理（先删关联再删主体，避免留下孤儿关联）：
+
+```sql
+-- 1) 先删授权关联
+DELETE role_permission WHERE permission_id IN (
+    SELECT VALUE id FROM permission
+    WHERE string::starts_with(name, 'soulauth:docs.')
+       OR string::starts_with(name, 'soulauth:spaces.')
+       OR string::starts_with(name, 'soulauth:comments.')
+);
+DELETE role_permission WHERE role_id IN (
+    SELECT VALUE id FROM role WHERE name IN ['docs_admin', 'docs_editor', 'docs_reader']
+);
+
+-- 2) 再删权限与角色本体
+DELETE permission WHERE string::starts_with(name, 'soulauth:docs.')
+    OR string::starts_with(name, 'soulauth:spaces.')
+    OR string::starts_with(name, 'soulauth:comments.');
+DELETE role WHERE name IN ['docs_admin', 'docs_editor', 'docs_reader'];
+
+-- 3) 顺带清掉可能残留的用户-角色绑定
+DELETE user_role WHERE role_id NOT IN (SELECT VALUE id FROM role);
 ```
-
-**`docs_permissions.sql` 包含的内容**：
-- 文档管理权限（10个文档相关权限）
-- 文档系统角色（3个文档专用角色）
-- 权限关联（为现有角色分配文档权限）
 
 ## OIDC 签名密钥
 
@@ -120,8 +138,9 @@ chmod 600 /etc/soulauth/oidc-signing.pem
 10. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
     但建议让已启用 MFA 的用户重新生成一次（`POST /api/auth/mfa/setup`）。
 
-11. **`initial_data.sql` / `docs_permissions.sql` 现在是幂等的**（`CREATE` 全部
-    改为带确定性 ID 的 `UPSERT`），可以安全地重复执行。
+11. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
+    `UPSERT`），可以安全地重复执行。权限名前缀化后，重跑它即可就地改名 ——
+    `role_permission` 按 record ID 关联，角色授权关系不受影响。
 
 12. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
     现在跳 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带 `return_to`。

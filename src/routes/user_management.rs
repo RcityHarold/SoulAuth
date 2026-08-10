@@ -154,7 +154,7 @@ async fn list_users(
     Query(request): Query<UserListRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user::UserListResponse>>, AuthError> {
     let user_id = authed_user.id()?;
-    require_permission!(db, &user_id, "users.read");
+    require_permission!(db, &user_id, crate::models::permission::names::USERS_READ);
 
     let service = UserManagementService::new(db);
     let users = service.list_users(request).await?;
@@ -172,7 +172,7 @@ async fn update_user_account_status(
     Json(request): Json<UpdateAccountStatusRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user::AccountStatusResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "users.write");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_WRITE);
     let current_user = authed_user.user().clone();
 
     let service = UserManagementService::new(db);
@@ -199,7 +199,7 @@ async fn get_user_by_id(
     Extension(db): Extension<Arc<Database>>,
 ) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "users.read");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_READ);
 
     let service = UserManagementService::new(db);
     let user = service.get_user_by_id(&user_id).await?;
@@ -213,7 +213,7 @@ async fn update_user_membership(
     Json(request): Json<UpdateMembershipRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user::UserResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "users.write");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_WRITE);
 
     let service = UserManagementService::new(db);
     let user = service.update_membership(&user_id, request).await?;
@@ -226,7 +226,7 @@ async fn get_user_profile_by_id(
     Extension(db): Extension<Arc<Database>>,
 ) -> Result<Json<ApiResponse<crate::models::user_profile::UserProfileResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "users.read");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_READ);
 
     let service = UserManagementService::new(db);
     let profile = service.get_user_profile(&user_id).await?;
@@ -239,7 +239,7 @@ async fn get_user_preferences_by_id(
     Extension(db): Extension<Arc<Database>>,
 ) -> Result<Json<ApiResponse<crate::models::user_preferences::UserPreferencesResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "users.read");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_READ);
 
     let service = UserManagementService::new(db);
     let preferences = service.get_user_preferences(&user_id).await?;
@@ -253,7 +253,7 @@ async fn get_user_activity_log_by_id(
     Query(request): Query<ActivityLogRequest>,
 ) -> Result<Json<ApiResponse<crate::models::user_activity::ActivityLogResponse>>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(db, &current_user_id, "audit.read");
+    require_permission!(db, &current_user_id, crate::models::permission::names::AUDIT_READ);
 
     let service = UserManagementService::new(db);
     let activity_log = service.get_user_activity_log(&user_id, request).await?;

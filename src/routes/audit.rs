@@ -265,7 +265,7 @@ pub async fn get_audit_dashboard(
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<AuditDashboard>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, "audit.read");
+    require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
     let days = query.days.unwrap_or(7);
     let start_time = Utc::now() - Duration::days(days);
@@ -317,7 +317,7 @@ pub async fn get_security_metrics(
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<SecurityMetrics>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, "security.read");
+    require_permission!(&db, &user_id, crate::models::permission::names::SECURITY_READ);
 
     let hours = query.hours.unwrap_or(24);
     let start_time = Utc::now() - Duration::hours(hours);
@@ -352,7 +352,7 @@ pub async fn get_activity_summary(
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<ActivitySummary>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, "audit.read");
+    require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
     let days = query.days.unwrap_or(7);
     let start_time = Utc::now() - Duration::days(days);
@@ -384,7 +384,7 @@ pub async fn get_system_health(
     authed_user: AuthedUser,
 ) -> ApiResult<Json<SystemHealth>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, "security.read");
+    require_permission!(&db, &user_id, crate::models::permission::names::SECURITY_READ);
     
     tracing::info!("Checking system health");
 
@@ -412,7 +412,7 @@ pub async fn generate_security_report(
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<SecurityReport>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, "audit.read");
+    require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
     let days = query.days.unwrap_or(30);
     let start_time = Utc::now() - Duration::days(days);
@@ -443,7 +443,9 @@ pub async fn generate_security_report(
 // Helper functions for data aggregation (implementation details)
 async fn get_total_users(db: &Database) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM user WHERE account_status != 'Deleted' GROUP ALL";
-    let mut result = db.client.query(query).await
+    let mut result = db.client.query(query)
+        .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get total users: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -462,6 +464,7 @@ async fn get_active_sessions_count(db: &Database) -> ApiResult<i64> {
     let mut result = db.client.query(query)
         .bind(("now", Utc::now().timestamp()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get active sessions: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -480,6 +483,7 @@ async fn get_failed_logins_count(db: &Database, start_time: DateTime<Utc>) -> Ap
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get failed logins count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -498,6 +502,7 @@ async fn get_locked_accounts_count(db: &Database) -> ApiResult<i64> {
     let mut result = db.client.query(query)
         .bind(("now", Utc::now()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get locked accounts count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -516,6 +521,7 @@ async fn get_security_events_count(db: &Database, start_time: DateTime<Utc>) -> 
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get security events count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -534,6 +540,7 @@ async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResu
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get top activities: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -647,6 +654,7 @@ async fn get_total_activities_count(db: &Database, start_time: DateTime<Utc>) ->
     let mut result = db.client.query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get total activities count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -664,11 +672,17 @@ async fn check_database_health(db: &Database) -> ApiResult<DatabaseHealth> {
     let start = std::time::Instant::now();
     
     // Simple health check
+    //
+    // 这里也要 `.check()`：`query().await` 成功只说明请求送到了，语句本身失败
+    // （比如鉴权态过期）仍然会被算成"连接正常"，健康检查就永远报绿。
     let query = "INFO FOR DB";
-    let result = db.client.query(query).await;
-    
+    let result = db.client.query(query).await.and_then(|response| response.check());
+
     let response_time_ms = start.elapsed().as_millis() as i64;
     let connected = result.is_ok();
+    if let Err(error) = &result {
+        tracing::warn!(%error, "Database health check failed");
+    }
     
     // SurrealDB 的 HTTP 客户端不暴露连接池指标，原来那两个"连接池"字段
     // 一直是写死的 1/10，已删除，避免把假数字当监控数据看。
@@ -683,6 +697,7 @@ async fn get_pending_lockouts_count(db: &Database) -> ApiResult<i64> {
     let mut result = db.client.query(query)
         .bind(("now", Utc::now()))
         .await
+        .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get pending lockouts count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -799,7 +814,16 @@ async fn get_security_incidents(
     let lockouts: Vec<serde_json::Value> = db
         .query_take0_vec(
             "audit_security_incident_lockouts",
-            "SELECT identifier, lockout_type, failed_attempts, locked_at, status              FROM account_lockout WHERE locked_at >= type::datetime($start_time)",
+            // `locked_at` 必须投影成字符串。SDK 无法把原生 `Value::Datetime` 转成
+            // `serde_json::Value`（报 "Expected any, got datetime"），整个查询会直接
+            // 失败 —— 而下面的代码本来也是按 RFC3339 字符串解析它的。
+            //
+            // 这个错以前不显形：只有窗口内确实存在锁定记录时才会返回行，表是空的
+            // 就什么事都没有。也就是说 `/api/audit/security-report` 恰恰在
+            // “有账号被锁”时才 500，而那正是最需要看这份报告的时候。
+            "SELECT identifier, lockout_type, failed_attempts, \
+             type::string(locked_at) AS locked_at, status \
+             FROM account_lockout WHERE locked_at >= type::datetime($start_time)",
             json!({ "start_time": start_time.to_rfc3339() }),
         )
         .await?;
@@ -896,7 +920,11 @@ async fn generate_user_behavior_analysis(
     let per_user_logins: Vec<serde_json::Value> = db
         .query_take0_vec(
             "audit_login_counts_per_user",
-            "SELECT type::string(user_id) AS user_id, count() AS count FROM user_activity              WHERE action IN ['login_success', 'oauth_login'] AND timestamp >= $start_time              GROUP BY user_id",
+            // `user_id != NONE` 不能省：匿名活动（未知邮箱的登录失败、限流告警等）
+            // 会聚成一个 `NONE` 分组，在"每用户登录次数"的直方图里凭空多出一个用户。
+            "SELECT type::string(user_id) AS user_id, count() AS count FROM user_activity \
+             WHERE action IN ['login_success', 'oauth_login'] AND timestamp >= $start_time \
+             AND user_id != NONE GROUP BY user_id",
             json!({ "start_time": start_time.timestamp() }),
         )
         .await?;
@@ -1020,7 +1048,10 @@ async fn active_user_rate(
     let rows: Vec<serde_json::Value> = db
         .query_take0_vec(
             "audit_active_users",
-            "SELECT type::string(user_id) AS user_id FROM user_activity              WHERE timestamp >= $since GROUP BY user_id",
+            // 同上：不过滤的话 `NONE` 也算一个"活跃用户"，活跃率恒定虚高。
+            // 匿名活动几乎总是存在，所以这个偏差是常态而非偶发。
+            "SELECT type::string(user_id) AS user_id FROM user_activity \
+             WHERE timestamp >= $since AND user_id != NONE GROUP BY user_id",
             json!({ "since": since.timestamp() }),
         )
         .await?;

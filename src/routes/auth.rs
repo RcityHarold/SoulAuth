@@ -28,7 +28,8 @@ use crate::{
     routes::oidc::{
         build_cookie, build_expired_cookie, cookie_value, create_browser_session_token,
         create_oauth_state_token, decode_oauth_state_token, decode_oidc_return_token,
-        OIDC_RETURN_COOKIE, SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
+        IssuedOAuthState, OAUTH_STATE_COOKIE, OAUTH_STATE_COOKIE_TTL_SECONDS, OIDC_RETURN_COOKIE,
+        SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
     },
     models::user_activity::{ActivityCategory, ActivityStatus},
     services::{
@@ -207,7 +208,9 @@ async fn is_admin_console_user(
         return Ok(true);
     }
 
-    for permission in ["users.read", "roles.read", "security.read", "audit.read"] {
+    // 列表定义在 models::permission::names，不在这里就地铺开：
+    // 「哪些权限算后台准入」应当只有一个答案。
+    for permission in crate::models::permission::names::ADMIN_CONSOLE_READ {
         if rbac_service
             .check_user_permission(user_id, permission)
             .await
@@ -868,27 +871,58 @@ async fn google_login(
     Extension(auth_service): Extension<Arc<AuthService>>,
     Extension(config): Extension<Config>,
     Query(query): Query<OAuthLoginQuery>,
-) -> Result<axum::response::Redirect> {
+) -> Result<axum::response::Response> {
     let state = resolve_login_state(query.state, &config)?;
-    let auth_url = auth_service.get_google_auth_url_with_state(&state)?;
-    Ok(axum::response::Redirect::to(&auth_url))
+    let auth_url = auth_service.get_google_auth_url_with_state(&state.token)?;
+    oauth_login_redirect(&config, &auth_url, &state.nonce)
 }
 
 async fn github_login(
     Extension(auth_service): Extension<Arc<AuthService>>,
     Extension(config): Extension<Config>,
     Query(query): Query<OAuthLoginQuery>,
-) -> Result<axum::response::Redirect> {
+) -> Result<axum::response::Response> {
     let state = resolve_login_state(query.state, &config)?;
-    let auth_url = auth_service.get_github_auth_url_with_state(&state)?;
-    Ok(axum::response::Redirect::to(&auth_url))
+    let auth_url = auth_service.get_github_auth_url_with_state(&state.token)?;
+    oauth_login_redirect(&config, &auth_url, &state.nonce)
 }
 
-fn resolve_login_state(incoming: Option<String>, config: &Config) -> Result<String> {
+/// 跳去 IdP 的同时，把 state 的 nonce 写进 cookie。
+///
+/// 回调时要求两边一致，`state` 才真正起到 CSRF 防护作用。cookie 是 `SameSite=Lax`，
+/// 而 OAuth 回调是顶级 GET 跳转，浏览器会照常带上。
+fn oauth_login_redirect(
+    config: &Config,
+    auth_url: &str,
+    nonce: &str,
+) -> Result<axum::response::Response> {
+    let cookie = build_cookie(
+        OAUTH_STATE_COOKIE,
+        nonce,
+        OAUTH_STATE_COOKIE_TTL_SECONDS,
+        config.cookies_secure(),
+    );
+
+    let mut response = axum::response::Redirect::to(auth_url).into_response();
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&cookie)
+            .map_err(|e| AuthError::ServerError(format!("Invalid oauth state cookie: {e}")))?,
+    );
+    Ok(response)
+}
+
+fn resolve_login_state(incoming: Option<String>, config: &Config) -> Result<IssuedOAuthState> {
     match incoming {
-        // 只有本服务签发的 state 才允许透传。
-        Some(state) if decode_oauth_state_token(&state, &config.jwt_secret).is_ok() => Ok(state),
-        Some(_) => Err(AuthError::BadRequest("Invalid state parameter".to_string())),
+        // 只有本服务签发的 state 才允许透传；透传时沿用它自己的 nonce，
+        // 这样 cookie 和 state 仍然是配对的。
+        Some(state) => match decode_oauth_state_token(&state, &config.jwt_secret) {
+            Ok(decoded) => Ok(IssuedOAuthState {
+                token: state,
+                nonce: decoded.nonce,
+            }),
+            Err(_) => Err(AuthError::BadRequest("Invalid state parameter".to_string())),
+        },
         None => create_oauth_state_token(None, &config.jwt_secret),
     }
 }
@@ -902,7 +936,7 @@ async fn google_callback(
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     let ctx = request_context(&addr, &headers, &config);
-    let state_return_target = verify_callback_state(params.state.as_deref(), &config)?;
+    let state_return_target = verify_callback_state(params.state.as_deref(), &headers, &config)?;
 
     let issued = auth_service
         .handle_google_callback(params.code, &ctx)
@@ -936,7 +970,7 @@ async fn github_callback(
     headers: HeaderMap,
 ) -> Result<axum::response::Response> {
     let ctx = request_context(&addr, &headers, &config);
-    let state_return_target = verify_callback_state(params.state.as_deref(), &config)?;
+    let state_return_target = verify_callback_state(params.state.as_deref(), &headers, &config)?;
 
     let issued = auth_service
         .handle_github_callback(params.code, &ctx)
@@ -961,17 +995,46 @@ async fn github_callback(
     build_oauth_redirect(&config, &headers, &issued, state_return_target)
 }
 
-/// 校验回调里的 `state`：缺失或验签失败一律拒绝，避免 OAuth CSRF。
-fn verify_callback_state(state: Option<&str>, config: &Config) -> Result<Option<String>> {
+/// 校验回调里的 `state`，返回其中携带的 OIDC 回跳目标。
+///
+/// 三道判定缺一不可：
+/// 1. `state` 必须存在；
+/// 2. 必须验签通过且未过期；
+/// 3. 其中的 nonce 必须与浏览器 cookie 里的一致。
+///
+/// 第 3 条是真正防 CSRF 的那条。只做 1、2 的话，攻击者自己访问一次
+/// `/api/auth/login/google` 就能拿到一个合法 `state`，再配上自己账号的 `code`
+/// 诱导受害者访问回调 —— 受害者的浏览器会被登进攻击者的账号，之后录入的一切
+/// 都进了对方的账户。
+fn verify_callback_state(
+    state: Option<&str>,
+    headers: &HeaderMap,
+    config: &Config,
+) -> Result<Option<String>> {
     let state = state.ok_or_else(|| {
         warn!("OAuth callback rejected: missing state parameter");
         AuthError::BadRequest("Missing state parameter".to_string())
     })?;
 
-    decode_oauth_state_token(state, &config.jwt_secret).map_err(|_| {
+    let decoded = decode_oauth_state_token(state, &config.jwt_secret).map_err(|_| {
         warn!("OAuth callback rejected: invalid or expired state parameter");
         AuthError::BadRequest("Invalid or expired state parameter".to_string())
-    })
+    })?;
+
+    let cookie_nonce = cookie_value(headers, OAUTH_STATE_COOKIE).ok_or_else(|| {
+        warn!("OAuth callback rejected: missing state cookie");
+        AuthError::BadRequest("Invalid or expired state parameter".to_string())
+    })?;
+
+    // 定长比较，避免按字符早退。
+    if !crate::utils::crypto::constant_time_eq(cookie_nonce.as_bytes(), decoded.nonce.as_bytes()) {
+        warn!("OAuth callback rejected: state nonce does not match the browser cookie");
+        return Err(AuthError::BadRequest(
+            "Invalid or expired state parameter".to_string(),
+        ));
+    }
+
+    Ok(decoded.return_target)
 }
 
 fn build_oauth_redirect(
@@ -1026,13 +1089,75 @@ fn build_oauth_redirect(
         );
     }
 
+    // state 已经用掉了，cookie 立刻作废：同一个 nonce 不该能配第二次回调。
+    response.headers_mut().append(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&build_expired_cookie(
+            OAUTH_STATE_COOKIE,
+            config.cookies_secure(),
+        ))
+        .map_err(|e| AuthError::ServerError(format!("Invalid oauth state cookie: {e}")))?,
+    );
+
     Ok(response)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{LoginResponse, MfaLoginVerifyRequest};
+    use super::{verify_callback_state, LoginResponse, MfaLoginVerifyRequest};
     use crate::models::mfa::MfaMethod;
+    use crate::routes::oidc::{create_oauth_state_token, OAUTH_STATE_COOKIE};
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    fn test_config(secret: &str) -> crate::config::Config {
+        let mut config = crate::config::Config::test_default();
+        config.jwt_secret = secret.to_string();
+        config
+    }
+
+    fn headers_with_state_cookie(nonce: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&format!("{OAUTH_STATE_COOKIE}={nonce}")).unwrap(),
+        );
+        headers
+    }
+
+    #[test]
+    fn callback_state_requires_a_matching_browser_cookie() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let config = test_config(secret);
+        let state = create_oauth_state_token(None, secret).expect("state");
+
+        // nonce 对得上：放行。
+        assert!(verify_callback_state(
+            Some(&state.token),
+            &headers_with_state_cookie(&state.nonce),
+            &config
+        )
+        .is_ok());
+
+        // 没有 cookie：这正是攻击者能做到的全部 —— 他拿得到合法 state，
+        // 但拿不到受害者浏览器里的 nonce。
+        assert!(verify_callback_state(Some(&state.token), &HeaderMap::new(), &config).is_err());
+
+        // cookie 里是别的 nonce：同样拒绝。
+        let other = create_oauth_state_token(None, secret).expect("other");
+        assert!(verify_callback_state(
+            Some(&state.token),
+            &headers_with_state_cookie(&other.nonce),
+            &config
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn callback_state_is_mandatory() {
+        let secret = "0123456789abcdef0123456789abcdef";
+        let config = test_config(secret);
+        assert!(verify_callback_state(None, &HeaderMap::new(), &config).is_err());
+    }
 
     #[test]
     fn mfa_required_response_is_distinguishable_by_clients() {

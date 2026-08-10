@@ -29,6 +29,17 @@ pub struct Config {
     pub github_client_id: String,
     pub github_client_secret: String,
     pub oauth_redirect_url: String,
+    /// Google OAuth 端点根地址覆盖。留空即用 Google 官方端点。
+    ///
+    /// 之所以存在：官方端点写死在代码里时，「换到令牌之后」那一整段
+    /// —— 取用户信息、按 verified_email 放行、建号或关联既有账号 ——
+    /// 完全无法端到端验证。有了它就能指向一个本地替身走通全流程。
+    pub google_oauth_base_url: Option<String>,
+    /// GitHub OAuth 端点根地址覆盖。留空即用 github.com / api.github.com。
+    ///
+    /// 除测试外这条在生产也有真实用途：自托管 GitHub Enterprise 的端点
+    /// 正是 `{base}/login/oauth/*` 与 `{base}/api/v3/*` 这套路径。
+    pub github_oauth_base_url: Option<String>,
     // 代理配置
     pub proxy_enabled: bool,
     pub proxy_url: Option<String>,
@@ -62,10 +73,13 @@ pub struct Config {
     /// 邮箱验证页地址（验证邮件里的链接指向它）。
     /// 不配置时默认 `{app_url}/verify-email`。
     pub verify_email_page_url: Option<String>,
+    /// HTTP 服务的监听地址。
+    ///
+    /// 以前写死在 `main.rs` 里的 `0.0.0.0:8080`：同一台机器起不了第二个实例，
+    /// 端口冲突时无从规避，容器编排也改不了端口。
+    pub bind_addr: String,
     /// 已认证请求的会话校验缓存时长（秒）。0 表示关闭缓存。
     pub session_cache_ttl_seconds: u64,
-    /// 启动前需要等待的安装标记文件；不配置则不等待。
-    pub install_marker_path: Option<String>,
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
@@ -107,6 +121,49 @@ fn parse_bool(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+/// 校验 OAuth 端点覆盖：明文 http 只许指向环回地址。
+///
+/// 覆盖端点等于改写「授权码换令牌」发往何处 —— 走明文就是把 client_secret
+/// 和访问令牌交给链路上的任何人。测试需要明文（本地替身没有证书），
+/// 所以放行环回，其余一律拒绝启动，而不是打条警告日志了事：
+/// 配歪了要在启动时就炸，不能等到线上换令牌时才泄密。
+fn check_oauth_base_url(name: &'static str, value: Option<&str>) -> Result<(), ConfigError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+
+    if raw.ends_with('/') {
+        return Err(ConfigError::Invalid {
+            name,
+            reason: "must not end with a trailing slash".to_string(),
+        });
+    }
+
+    if raw.starts_with("https://") {
+        return Ok(());
+    }
+
+    // 取 scheme 之后、第一个 `/` 或 `:` 之前的主机名
+    let host = raw
+        .strip_prefix("http://")
+        .map(|rest| rest.split(['/', ':']).next().unwrap_or(""));
+
+    match host {
+        Some("127.0.0.1") | Some("localhost") | Some("[::1]") => Ok(()),
+        Some(_) => Err(ConfigError::Invalid {
+            name,
+            reason: "plaintext http is only allowed for loopback hosts; \
+                    a remote OAuth endpoint must use https or the client secret \
+                    and access tokens travel in the clear"
+                .to_string(),
+        }),
+        None => Err(ConfigError::Invalid {
+            name,
+            reason: "must start with https:// or http://".to_string(),
+        }),
+    }
+}
+
 impl Config {
     pub fn from_env() -> Result<Self, ConfigError> {
         let app_url = required("APP_URL")?;
@@ -137,6 +194,8 @@ impl Config {
             github_client_id: required("GITHUB_CLIENT_ID")?,
             github_client_secret: required("GITHUB_CLIENT_SECRET")?,
             oauth_redirect_url: required("OAUTH_REDIRECT_URL")?,
+            google_oauth_base_url: optional("GOOGLE_OAUTH_BASE_URL"),
+            github_oauth_base_url: optional("GITHUB_OAUTH_BASE_URL"),
             proxy_enabled: parse_bool("PROXY_ENABLED", false),
             proxy_url: optional("PROXY_URL"),
             smtp_host: required("SMTP_HOST")?,
@@ -155,8 +214,8 @@ impl Config {
             mfa_encryption_key: optional("MFA_SECRET_ENCRYPTION_KEY"),
             login_page_url: optional("LOGIN_PAGE_URL"),
             verify_email_page_url: optional("VERIFY_EMAIL_PAGE_URL"),
+            bind_addr: optional("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
             session_cache_ttl_seconds: parse_with_default("AUTH_SESSION_CACHE_TTL_SECONDS", 5u64)?,
-            install_marker_path: optional("INSTALL_MARKER_PATH"),
         };
 
         if config.jwt_secret.len() < 32 {
@@ -165,6 +224,9 @@ impl Config {
                 reason: "must be at least 32 characters".to_string(),
             });
         }
+
+        check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", config.google_oauth_base_url.as_deref())?;
+        check_oauth_base_url("GITHUB_OAUTH_BASE_URL", config.github_oauth_base_url.as_deref())?;
 
         Ok(config)
     }
@@ -200,14 +262,12 @@ impl Config {
             self.cors_allowed_origins.clone()
         }
     }
-}
 
-#[cfg(test)]
-mod tests {
-    use super::Config;
-
-    fn config_with_app_url(app_url: &str) -> Config {
-        Config {
+    /// 测试用的默认配置。放在这里而不是各个测试模块里各写一份，
+    /// 是为了新增字段时只有一处要改（漏改会直接编译不过）。
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        Self {
             database_url: "http://localhost:8000".to_string(),
             database_user: "root".to_string(),
             database_pass: "root".to_string(),
@@ -222,6 +282,8 @@ mod tests {
             github_client_id: "h".to_string(),
             github_client_secret: "h".to_string(),
             oauth_redirect_url: "https://auth.example/api/auth/callback".to_string(),
+            google_oauth_base_url: None,
+            github_oauth_base_url: None,
             proxy_enabled: false,
             proxy_url: None,
             smtp_host: "localhost".to_string(),
@@ -230,7 +292,7 @@ mod tests {
             smtp_password: String::new(),
             smtp_from: "noreply@example.com".to_string(),
             smtp_insecure: true,
-            app_url: app_url.to_string(),
+            app_url: "https://auth.example".to_string(),
             email_verification_enabled: false,
             trust_proxy_headers: false,
             cors_allowed_origins: Vec::new(),
@@ -240,10 +302,61 @@ mod tests {
             mfa_encryption_key: None,
             login_page_url: None,
             verify_email_page_url: None,
+            bind_addr: "0.0.0.0:8080".to_string(),
             session_cache_ttl_seconds: 5,
-            install_marker_path: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::check_oauth_base_url;
+
+    #[test]
+    fn plaintext_oauth_endpoint_is_rejected_unless_it_is_loopback() {
+        // 明文 http 指向远端 = client_secret 与访问令牌在链路上裸奔。
+        // 这类配置必须在启动时炸掉，不能只打条警告然后照常上线。
+        for host in ["http://oauth.evil.test", "http://10.0.0.5:8126", "ftp://x"] {
+            assert!(
+                check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", Some(host)).is_err(),
+                "should have rejected {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_and_https_overrides_are_accepted() {
+        for ok in [
+            "http://127.0.0.1:8126",
+            "http://localhost:8126",
+            "https://ghe.example.com",
+        ] {
+            assert!(
+                check_oauth_base_url("GITHUB_OAUTH_BASE_URL", Some(ok)).is_ok(),
+                "should have accepted {ok}"
+            );
+        }
+        // 未设置就是未设置，不该被当成非法值
+        assert!(check_oauth_base_url("GITHUB_OAUTH_BASE_URL", None).is_ok());
+        assert!(check_oauth_base_url("GITHUB_OAUTH_BASE_URL", Some("  ")).is_ok());
+    }
+
+    #[test]
+    fn a_trailing_slash_is_rejected_rather_than_silently_doubling_up() {
+        // 端点由 `{base}/token` 拼出，base 带斜杠就成了 `//token`。
+        // 有的服务端会 404，有的会重定向 —— 与其赌，不如不收。
+        assert!(check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", Some("https://x.test/")).is_err());
+    }
+
+    use super::Config;
+
+    fn config_with_app_url(app_url: &str) -> Config {
+        Config {
+            app_url: app_url.to_string(),
+            ..Config::test_default()
+        }
+    }
+
 
     #[test]
     fn cookies_are_secure_only_over_https() {

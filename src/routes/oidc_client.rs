@@ -19,9 +19,11 @@ use crate::{
 };
 
 /// OIDC 客户端注册表是整个 SSO 的信任根：能改 redirect_uris 就能劫持任意登录。
-/// 因此读写分别要求 `oidc_clients.read` / `oidc_clients.write`。
-const READ_PERMISSION: &str = "oidc_clients.read";
-const WRITE_PERMISSION: &str = "oidc_clients.write";
+/// 因此读写分别要求 `soulauth:oidc_clients.read` / `soulauth:oidc_clients.write`。
+///
+/// 权限名直接用 `models::permission::names` 的常量，不在本模块再起别名 ——
+/// 同一个权限有两个名字，改动时必然漏掉一个。
+use crate::models::permission::names::{OIDC_CLIENTS_READ, OIDC_CLIENTS_WRITE};
 
 pub fn oidc_client_routes() -> Router {
     Router::new()
@@ -64,7 +66,7 @@ async fn create_client(
     Json(request): Json<CreateOidcClientRequest>,
 ) -> Result<Json<OidcClientResponse>, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, WRITE_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_WRITE);
 
     request
         .validate()
@@ -86,7 +88,7 @@ async fn list_clients(
     Query(query): Query<ListClientsQuery>,
 ) -> Result<Json<ListClientsResponse>, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, READ_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_READ);
 
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
@@ -105,6 +107,24 @@ async fn list_clients(
     }
 }
 
+/// 把服务层的 `anyhow` 错误映射成 HTTP 错误。
+///
+/// 这四个接口以前一律写成 `Err(_) => NotFound("Client not found")`：**任何**失败
+/// 都以"没这个客户端"的面目出现。真正的写库失败因此被伪装成 404，管理员只会
+/// 反复核对 client_id，永远查不到数据库那一侧 —— 补上的 `.check()` 好不容易把
+/// 错误捞出来，又在这里被丢掉了。
+///
+/// 服务层用 `anyhow!("Client not found")` 表示确实不存在，只有这一种才是 404，
+/// 其余一律按服务端错误处理并记日志（响应体由 `AuthError` 统一遮蔽，不外泄细节）。
+fn client_error(operation: &str, error: anyhow::Error) -> AuthError {
+    if error.to_string().contains("Client not found") {
+        return AuthError::NotFound("Client not found".to_string());
+    }
+
+    tracing::error!(error = %error, operation, "OIDC client operation failed");
+    AuthError::InternalServerError(error.to_string())
+}
+
 // 获取单个客户端
 async fn get_client(
     user: AuthedUser,
@@ -113,7 +133,7 @@ async fn get_client(
     Path(client_id): Path<String>,
 ) -> Result<Json<OidcClientResponse>, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, READ_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_READ);
 
     match client_service.get_client(&client_id).await {
         Ok(client) => Ok(Json(OidcClientResponse {
@@ -134,7 +154,7 @@ async fn get_client(
             created_at: client.created_at,
             updated_at: client.updated_at,
         })),
-        Err(_) => Err(AuthError::NotFound("Client not found".to_string())),
+        Err(e) => Err(client_error("get client", e)),
     }
 }
 
@@ -147,7 +167,7 @@ async fn update_client(
     Json(request): Json<CreateOidcClientRequest>,
 ) -> Result<Json<OidcClientResponse>, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, WRITE_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_WRITE);
 
     request
         .validate()
@@ -156,7 +176,7 @@ async fn update_client(
 
     match client_service.update_client(&client_id, request).await {
         Ok(client) => Ok(Json(client)),
-        Err(_) => Err(AuthError::NotFound("Client not found".to_string())),
+        Err(e) => Err(client_error("update client", e)),
     }
 }
 
@@ -168,11 +188,11 @@ async fn disable_client(
     Path(client_id): Path<String>,
 ) -> Result<StatusCode, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, WRITE_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_WRITE);
 
     match client_service.disable_client(&client_id).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(_) => Err(AuthError::NotFound("Client not found".to_string())),
+        Err(e) => Err(client_error("disable client", e)),
     }
 }
 
@@ -184,14 +204,14 @@ async fn regenerate_secret(
     Path(client_id): Path<String>,
 ) -> Result<Json<RegenerateSecretResponse>, AuthError> {
     let user_id = user.id()?;
-    require_permission!(&db, &user_id, WRITE_PERMISSION);
+    require_permission!(&db, &user_id, OIDC_CLIENTS_WRITE);
 
     match client_service.regenerate_client_secret(&client_id).await {
         Ok(new_secret) => Ok(Json(RegenerateSecretResponse {
             client_secret: new_secret,
             message: "Client secret has been regenerated. Please update your application configuration.".to_string(),
         })),
-        Err(_) => Err(AuthError::NotFound("Client not found".to_string())),
+        Err(e) => Err(client_error("regenerate client secret", e)),
     }
 }
 

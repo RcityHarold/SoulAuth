@@ -46,15 +46,19 @@ pub fn validate_email(email: &str) -> Result<String> {
 
 /// 密码强度校验：长度 + 至少三类字符（大写 / 小写 / 数字 / 符号）。
 pub fn validate_password(password: &str, min_length: usize) -> Result<()> {
-    if password.len() < min_length {
+    // 下限必须按**字符数**算。`str::len()` 给的是字节数，一个汉字占 3 字节，
+    // 于是 "密码密码Abc1"（8 个字符）就能满足 12 位的下限 —— 提示语说的是
+    // "至少 12 个字符"，实际执行的却是"至少 12 字节"，两者对不上。
+    if password.chars().count() < min_length {
         return Err(AuthError::ValidationError(format!(
             "Password must be at least {min_length} characters long"
         )));
     }
-    // argon2 本身没有长度上限，但超长输入只会浪费 CPU，这里挡一下。
+    // 上限反过来按字节算：这里挡的是"超长输入浪费 Argon2 的 CPU"，
+    // 真正决定开销的是字节数（argon2 本身没有长度上限）。
     if password.len() > 1024 {
         return Err(AuthError::ValidationError(
-            "Password must be at most 1024 characters long".to_string(),
+            "Password must be at most 1024 bytes long".to_string(),
         ));
     }
 
@@ -128,6 +132,20 @@ mod tests {
     fn accepts_password_with_three_character_classes() {
         assert!(validate_password("CorrectHorse42", 12).is_ok());
         assert!(validate_password("correct-horse-42", 12).is_ok());
+    }
+
+    #[test]
+    fn password_length_counts_characters_not_bytes() {
+        // 8 个字符、16 字节：按字节算会放行，按字符算必须拒绝。
+        assert!(validate_password("密码密码Abc1", 12).is_err());
+        // 12 个字符、24 字节：字符数够了，且含大小写+数字三类。
+        assert!(validate_password("密码密码密码密码AAbb12", 12).is_ok());
+    }
+
+    #[test]
+    fn rejects_password_over_the_byte_cap() {
+        let huge = "A1b".repeat(400); // 1200 字节
+        assert!(validate_password(&huge, 12).is_err());
     }
 
     #[test]

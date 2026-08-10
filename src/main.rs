@@ -53,25 +53,6 @@ pub struct AppState {
     pub lockout_service: Arc<AccountLockoutService>,
 }
 
-/// 可选的安装等待：只有显式配置 `INSTALL_MARKER_PATH` 时才阻塞启动。
-///
-/// 以前这里无条件轮询 `../Rainbow-docs/.rainbow_docs_installed`，把认证服务
-/// 和另一个仓库的部署流程死绑在了一起。
-async fn wait_for_install_marker(marker: &str) {
-    if std::path::Path::new(marker).exists() {
-        return;
-    }
-
-    info!("Waiting for install marker at {marker} ...");
-    loop {
-        if std::path::Path::new(marker).exists() {
-            info!("Install marker found, continuing startup");
-            return;
-        }
-        tokio::time::sleep(Duration::from_secs(5)).await;
-    }
-}
-
 fn build_cors_layer(config: &Config) -> CorsLayer {
     // 以前是 allow_origin(Any) + allow_headers(Any)：任何站点都能带着用户的
     // Authorization 头调用本服务。现在收敛成显式白名单。
@@ -119,11 +100,6 @@ async fn main() -> anyhow::Result<()> {
 
     dotenv::dotenv().ok();
     let config = Config::from_env()?;
-
-    if let Some(marker) = config.install_marker_path.clone() {
-        wait_for_install_marker(&marker).await;
-        tokio::time::sleep(Duration::from_secs(3)).await;
-    }
 
     // 数据库 schema 由 schema.sql / initial_data.sql 负责，应用本身不做 DDL。
     let db = Database::new(&config).await?;
@@ -266,9 +242,11 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(sso_session_service))
         .layer(build_cors_layer(&config));
 
-    let addr = "0.0.0.0:8080";
+    let addr: SocketAddr = config.bind_addr.parse().map_err(|e| {
+        anyhow::anyhow!("Invalid BIND_ADDR `{}`: {e}", config.bind_addr)
+    })?;
     info!("Server listening on {}", addr);
-    axum::Server::bind(&addr.parse()?)
+    axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
         .await?;
 

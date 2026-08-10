@@ -14,6 +14,24 @@ use crate::{
     },
 };
 
+/// ID Token 的生命周期上限（秒）。
+///
+/// P0-DECISION-10 DEC-10-01：Phase 0 用 RS256 ID Token 本地验签，
+/// OS 不回调 SoulAuth。代价是**令牌在有效期内无法吊销** ——
+/// 用户登出、账号停用都要等它自然过期。所以寿命就是可接受的吊销延迟，
+/// 裁定上限 300 秒（高安全部署建议 120）。
+///
+/// 这里是**硬上限**不是默认值：只改默认值挡不住管理员显式传一个 3600。
+pub const MAX_ID_TOKEN_LIFETIME_SECS: i64 = 300;
+
+/// 把 ID Token 寿命夹到上限内。非正数一律回落到上限。
+fn clamp_id_token_lifetime(requested: i64) -> i64 {
+    if requested <= 0 {
+        return MAX_ID_TOKEN_LIFETIME_SECS;
+    }
+    requested.min(MAX_ID_TOKEN_LIFETIME_SECS)
+}
+
 #[derive(Clone)]
 pub struct OidcClientService {
     db: Arc<Database>,
@@ -57,7 +75,9 @@ impl OidcClientService {
             require_pkce: request.require_pkce.unwrap_or(true),
             access_token_lifetime: request.access_token_lifetime.unwrap_or(3600),
             refresh_token_lifetime: request.refresh_token_lifetime.unwrap_or(86400),
-            id_token_lifetime: request.id_token_lifetime.unwrap_or(3600),
+            id_token_lifetime: clamp_id_token_lifetime(
+                request.id_token_lifetime.unwrap_or(MAX_ID_TOKEN_LIFETIME_SECS),
+            ),
             is_active: true,
             created_by: created_by.to_string(),
             created_at: now,
@@ -184,7 +204,9 @@ impl OidcClientService {
         client.require_pkce = request.require_pkce.unwrap_or(client.require_pkce);
         client.access_token_lifetime = request.access_token_lifetime.unwrap_or(client.access_token_lifetime);
         client.refresh_token_lifetime = request.refresh_token_lifetime.unwrap_or(client.refresh_token_lifetime);
-        client.id_token_lifetime = request.id_token_lifetime.unwrap_or(client.id_token_lifetime);
+        client.id_token_lifetime = clamp_id_token_lifetime(
+            request.id_token_lifetime.unwrap_or(client.id_token_lifetime),
+        );
         client.updated_at = Utc::now().timestamp();
 
         // 保存更新
@@ -214,15 +236,24 @@ impl OidcClientService {
     pub async fn disable_client(&self, client_id: &str) -> Result<()> {
         // `updated_at` 是 `TYPE number`，不能写 `time::now()`（datetime）。
         // 而且必须 .check()，否则语句级错误被吞：接口返回 204 但客户端根本没被禁用。
+        //
+        // `RETURN VALUE client_id` 是用来判断"有没有真的命中一行"的：WHERE 匹配不到
+        // 任何记录时 UPDATE 一样成功，不看返回行数的话，对一个根本不存在的
+        // client_id 调用也会返回 204，调用方以为禁用成功了。
         let query = "UPDATE oidc_client SET is_active = false, updated_at = $updated_at \
-                     WHERE client_id = $client_id";
+                     WHERE client_id = $client_id RETURN VALUE client_id";
 
-        self.db.client
+        let mut response = self.db.client
             .query(query)
             .bind(("client_id", client_id.to_owned()))
             .bind(("updated_at", Utc::now().timestamp()))
             .await?
             .check()?;
+
+        let updated: Vec<String> = response.take(0)?;
+        if updated.is_empty() {
+            return Err(anyhow!("Client not found"));
+        }
 
         Ok(())
     }
@@ -234,16 +265,24 @@ impl OidcClientService {
 
         // 同上。这里尤其要命：不 check 的话密钥轮换会静默失败 ——
         // 调用方拿到新密钥并更新了自己的配置，服务端却还留着旧哈希，认证直接断。
+        //
+        // 同样要看返回行数：client_id 不存在时 UPDATE 也会"成功"，
+        // 调用方会拿到一个从未落库的新密钥，然后用它去改自己的配置。
         let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = $updated_at \
-                     WHERE client_id = $client_id";
+                     WHERE client_id = $client_id RETURN VALUE client_id";
 
-        self.db.client
+        let mut response = self.db.client
             .query(query)
             .bind(("hash", client_secret_hash))
             .bind(("client_id", client_id.to_owned()))
             .bind(("updated_at", Utc::now().timestamp()))
             .await?
             .check()?;
+
+        let updated: Vec<String> = response.take(0)?;
+        if updated.is_empty() {
+            return Err(anyhow!("Client not found"));
+        }
 
         Ok(client_secret)
     }
@@ -291,7 +330,10 @@ impl OidcClientService {
             .bind(("created_by", client.created_by.clone()))
             .bind(("created_at", client.created_at))
             .bind(("updated_at", client.updated_at))
-            .await?;
+            .await?
+            // `query().await` 只代表请求送到了，语句本身的错误藏在 Response 里。
+            // 不 check 的话，写失败也会一路返回 Ok —— 管理员看到"已保存"，库里没变。
+            .check()?;
 
         Ok(())
     }
@@ -330,7 +372,10 @@ impl OidcClientService {
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
             .bind(("id_token_lifetime", client.id_token_lifetime))
             .bind(("updated_at", client.updated_at))
-            .await?;
+            .await?
+            // `query().await` 只代表请求送到了，语句本身的错误藏在 Response 里。
+            // 不 check 的话，写失败也会一路返回 Ok —— 管理员看到"已保存"，库里没变。
+            .check()?;
 
         Ok(())
     }

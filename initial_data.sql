@@ -4,7 +4,7 @@
 -- 创建系统权限
 -- 用户管理权限
 UPSERT permission:users_read CONTENT {
-    name: "users.read",
+    name: "soulauth:users.read",
     display_name: "查看用户",
     description: "查看用户信息",
     resource: "users",
@@ -15,7 +15,7 @@ UPSERT permission:users_read CONTENT {
 };
 
 UPSERT permission:users_write CONTENT {
-    name: "users.write",
+    name: "soulauth:users.write",
     display_name: "编辑用户",
     description: "编辑用户信息",
     resource: "users",
@@ -26,7 +26,7 @@ UPSERT permission:users_write CONTENT {
 };
 
 UPSERT permission:users_delete CONTENT {
-    name: "users.delete",
+    name: "soulauth:users.delete",
     display_name: "删除用户",
     description: "删除用户账户",
     resource: "users",
@@ -38,7 +38,7 @@ UPSERT permission:users_delete CONTENT {
 
 -- 角色管理权限
 UPSERT permission:roles_read CONTENT {
-    name: "roles.read",
+    name: "soulauth:roles.read",
     display_name: "查看角色",
     description: "查看角色信息",
     resource: "roles",
@@ -49,7 +49,7 @@ UPSERT permission:roles_read CONTENT {
 };
 
 UPSERT permission:roles_write CONTENT {
-    name: "roles.write",
+    name: "soulauth:roles.write",
     display_name: "管理角色",
     description: "创建和编辑角色",
     resource: "roles",
@@ -60,7 +60,7 @@ UPSERT permission:roles_write CONTENT {
 };
 
 UPSERT permission:roles_delete CONTENT {
-    name: "roles.delete",
+    name: "soulauth:roles.delete",
     display_name: "删除角色",
     description: "删除角色",
     resource: "roles",
@@ -72,7 +72,7 @@ UPSERT permission:roles_delete CONTENT {
 
 -- 权限管理权限
 UPSERT permission:permissions_read CONTENT {
-    name: "permissions.read",
+    name: "soulauth:permissions.read",
     display_name: "查看权限",
     description: "查看权限信息",
     resource: "permissions",
@@ -83,7 +83,7 @@ UPSERT permission:permissions_read CONTENT {
 };
 
 UPSERT permission:permissions_write CONTENT {
-    name: "permissions.write",
+    name: "soulauth:permissions.write",
     display_name: "管理权限",
     description: "创建和编辑权限",
     resource: "permissions",
@@ -94,7 +94,7 @@ UPSERT permission:permissions_write CONTENT {
 };
 
 UPSERT permission:permissions_delete CONTENT {
-    name: "permissions.delete",
+    name: "soulauth:permissions.delete",
     display_name: "删除权限",
     description: "删除权限",
     resource: "permissions",
@@ -106,7 +106,7 @@ UPSERT permission:permissions_delete CONTENT {
 
 -- 安全管理权限
 UPSERT permission:security_read CONTENT {
-    name: "security.read",
+    name: "soulauth:security.read",
     display_name: "查看安全状态",
     description: "查看安全锁定状态",
     resource: "security",
@@ -117,7 +117,7 @@ UPSERT permission:security_read CONTENT {
 };
 
 UPSERT permission:security_write CONTENT {
-    name: "security.write",
+    name: "soulauth:security.write",
     display_name: "管理安全",
     description: "解锁账户等安全操作",
     resource: "security",
@@ -129,7 +129,7 @@ UPSERT permission:security_write CONTENT {
 
 -- 审计权限
 UPSERT permission:audit_read CONTENT {
-    name: "audit.read",
+    name: "soulauth:audit.read",
     display_name: "查看审计日志",
     description: "查看系统审计日志",
     resource: "audit",
@@ -141,7 +141,7 @@ UPSERT permission:audit_read CONTENT {
 
 -- 用户档案管理权限
 UPSERT permission:profile_read CONTENT {
-    name: "profile.read",
+    name: "soulauth:profile.read",
     display_name: "查看用户档案",
     description: "查看用户档案信息",
     resource: "profile",
@@ -152,7 +152,7 @@ UPSERT permission:profile_read CONTENT {
 };
 
 UPSERT permission:profile_write CONTENT {
-    name: "profile.write",
+    name: "soulauth:profile.write",
     display_name: "管理用户档案",
     description: "创建和编辑用户档案",
     resource: "profile",
@@ -164,7 +164,7 @@ UPSERT permission:profile_write CONTENT {
 
 -- 用户偏好设置权限
 UPSERT permission:preferences_read CONTENT {
-    name: "preferences.read",
+    name: "soulauth:preferences.read",
     display_name: "查看用户偏好",
     description: "查看用户偏好设置",
     resource: "preferences",
@@ -175,7 +175,7 @@ UPSERT permission:preferences_read CONTENT {
 };
 
 UPSERT permission:preferences_write CONTENT {
-    name: "preferences.write",
+    name: "soulauth:preferences.write",
     display_name: "管理用户偏好",
     description: "创建和编辑用户偏好设置",
     resource: "preferences",
@@ -458,7 +458,7 @@ UPSERT role_permission:auditor__audit_read CONTENT {
 -- 对已有部署：单独执行本段即可完成迁移。
 
 UPSERT permission:oidc_clients_read CONTENT {
-    name: "oidc_clients.read",
+    name: "soulauth:oidc_clients.read",
     display_name: "查看 OIDC 客户端",
     description: "查看已注册的 OIDC 客户端配置",
     resource: "oidc_clients",
@@ -469,7 +469,7 @@ UPSERT permission:oidc_clients_read CONTENT {
 };
 
 UPSERT permission:oidc_clients_write CONTENT {
-    name: "oidc_clients.write",
+    name: "soulauth:oidc_clients.write",
     display_name: "管理 OIDC 客户端",
     description: "创建、修改、禁用 OIDC 客户端并重置其密钥",
     resource: "oidc_clients",

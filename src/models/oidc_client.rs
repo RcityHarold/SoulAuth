@@ -99,7 +99,8 @@ impl Default for CreateOidcClientRequest {
             require_pkce: Some(true),
             access_token_lifetime: Some(3600),
             refresh_token_lifetime: Some(86400),
-            id_token_lifetime: Some(3600),
+            // 上限见 services::oidc_client_management::MAX_ID_TOKEN_LIFETIME_SECS。
+            id_token_lifetime: Some(300),
         }
     }
 }

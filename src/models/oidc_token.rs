@@ -12,6 +12,12 @@ pub struct OidcAuthorizationCode {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
+    /// 签发这张授权码时用户所处的 SoulAuth 认证会话（`session` 表主键）。
+    ///
+    /// 用来把 `sid` 一路带到 ID Token（P0-DECISION-10 DEC-10-06）。
+    /// 存量行没有该列，故为 `Option`；但兑换时若为空会 fail-closed。
+    #[serde(default)]
+    pub auth_session_ref: Option<String>,
     pub used: bool,
     pub expires_at: i64,
     pub created_at: i64,
@@ -37,6 +43,12 @@ pub struct OidcRefreshToken {
     pub user_id: String,
     pub access_token: String,
     pub scope: String,
+    /// 同 `OidcAuthorizationCode::auth_session_ref`。
+    ///
+    /// 刷新同样会签发 ID Token，所以 `sid` 必须能从刷新令牌继续传下去，
+    /// 否则刷新出来的 ID Token 就没有 `sid`。
+    #[serde(default)]
+    pub auth_session_ref: Option<String>,
     pub used: bool,
     pub expires_at: i64,
     pub created_at: i64,
@@ -86,6 +98,16 @@ pub struct IdTokenClaims {
     pub exp: i64,
     pub iat: i64,
     pub auth_time: i64,
+    /// 认证会话引用（OIDC `sid`，见 OpenID Connect Front-Channel Logout）。
+    ///
+    /// P0-DECISION-10 DEC-10-06 定为**必填**：OS 的每条审计链路都要求
+    /// `auth_session_ref`，缺了就没有来源。因此这里不是 `Option` ——
+    /// 取不到会话引用时宁可拒签，不签一张残缺的 ID Token。
+    ///
+    /// 边界：`sid` 只表示认证会话，OS 不得把它当成 Kernel Session、
+    /// Second Wing Session、Browser Runtime Session、ConnectorSession
+    /// 或 AccessTicket。
+    pub sid: String,
     pub nonce: Option<String>,
     pub email: Option<String>,
     pub email_verified: Option<bool>,

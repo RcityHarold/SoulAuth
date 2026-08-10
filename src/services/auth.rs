@@ -106,6 +106,12 @@ fn record_address(thing: &Thing) -> String {
 
 impl AuthService {
     pub fn new(db: Arc<Database>, config: Config, auth_cache: Arc<AuthCache>) -> Result<Self> {
+        // 在启动阶段就把哑哈希算出来。留给第一个请求懒初始化的话，进程起来后
+        // 第一次"邮箱不存在"的登录要额外背一次 Argon2 哈希（实测约 350ms），
+        // 恰好是这个哑哈希本该消除的那种耗时差异 —— 方向相反、只发生一次，
+        // 但没必要留着。这里多花的启动时间发生在监听端口之前。
+        let _ = dummy_password_hash();
+
         let email_service = EmailService::new(config.clone());
         let oauth_service = OAuthService::new(config.clone())?;
         let mfa_service = MfaService::new(db.clone(), config.clone())?;

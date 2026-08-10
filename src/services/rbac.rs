@@ -48,6 +48,7 @@ impl RBACService {
             .query(query)
             .bind(("role", role.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -74,6 +75,7 @@ impl RBACService {
             .query(query)
             .bind(("name", name.to_owned()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role by name: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -157,6 +159,7 @@ impl RBACService {
             .query(user_count_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check role usage: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -181,6 +184,7 @@ impl RBACService {
             .query(delete_permissions_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to delete role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -256,6 +260,7 @@ impl RBACService {
             .query(query)
             .bind(("permission", permission.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create permission: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -280,6 +285,7 @@ impl RBACService {
             .query(query)
             .bind(("name", name.to_owned()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get permission by name: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -338,6 +344,7 @@ impl RBACService {
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -365,6 +372,7 @@ impl RBACService {
             .query(query)
             .bind(("user_role", user_role.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to assign role to user: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -396,6 +404,7 @@ impl RBACService {
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to remove role from user: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -427,6 +436,7 @@ impl RBACService {
             .query(query)
             .bind(("user_key", user_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user roles: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -469,6 +479,7 @@ impl RBACService {
             .query(role_query)
             .bind(("role_ids", role_ids))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get roles: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -515,6 +526,7 @@ impl RBACService {
             .query(ids_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -534,6 +546,7 @@ impl RBACService {
             .query(names_query)
             .bind(("permission_ids", permission_ids))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -572,6 +585,7 @@ impl RBACService {
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check role permission: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -599,6 +613,7 @@ impl RBACService {
             .query(query)
             .bind(("role_permission", role_permission.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to assign permission to role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -633,6 +648,7 @@ impl RBACService {
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to remove permission from role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -751,6 +767,7 @@ impl RBACService {
             .query(query)
             .bind(("user_key", user_id))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())

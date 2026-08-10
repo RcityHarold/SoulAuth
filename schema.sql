@@ -222,6 +222,8 @@ DEFINE FIELD state ON oidc_authorization_code TYPE option<string>;
 DEFINE FIELD nonce ON oidc_authorization_code TYPE option<string>;
 DEFINE FIELD code_challenge ON oidc_authorization_code TYPE option<string>;
 DEFINE FIELD code_challenge_method ON oidc_authorization_code TYPE option<string>;
+-- 签发时的 SoulAuth 认证会话主键，用于把 sid 带到 ID Token（P0-DECISION-10）。
+DEFINE FIELD auth_session_ref ON oidc_authorization_code TYPE option<string>;
 DEFINE FIELD used ON oidc_authorization_code TYPE bool DEFAULT false;
 DEFINE FIELD expires_at ON oidc_authorization_code TYPE number;
 DEFINE FIELD created_at ON oidc_authorization_code TYPE number;
@@ -247,6 +249,8 @@ DEFINE FIELD client_id ON oidc_refresh_token TYPE string;
 DEFINE FIELD user_id ON oidc_refresh_token TYPE record<user>;
 DEFINE FIELD access_token ON oidc_refresh_token TYPE string; -- 关联的访问令牌
 DEFINE FIELD scope ON oidc_refresh_token TYPE string;
+-- 同上：刷新也会签 ID Token，sid 必须能继续传递。
+DEFINE FIELD auth_session_ref ON oidc_refresh_token TYPE option<string>;
 DEFINE FIELD used ON oidc_refresh_token TYPE bool DEFAULT false;
 DEFINE FIELD expires_at ON oidc_refresh_token TYPE number;
 DEFINE FIELD created_at ON oidc_refresh_token TYPE number;

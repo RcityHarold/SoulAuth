@@ -53,6 +53,7 @@ impl UserManagementService {
             .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -97,6 +98,7 @@ impl UserManagementService {
             .query(query)
             .bind(("profile", profile.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create user profile: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -134,6 +136,7 @@ impl UserManagementService {
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user profile: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -167,6 +170,15 @@ impl UserManagementService {
                 last_name = $last_name ?? last_name,
                 display_name = $display_name ?? display_name,
                 phone = $phone ?? phone,
+                -- `date_of_birth` 是 datetime 列，不能用上面那种 `$x ?? field`：
+                -- JSON 绑定给过来的是 RFC3339 字符串，直接赋值会因类型不符被拒。
+                -- 这个字段以前**根本没写进 UPDATE**：请求结构体里有、响应里也返回，
+                -- 客户端原样回传能拿到 200，值却从来不变——静默丢数据。
+                date_of_birth = IF $date_of_birth = NONE OR $date_of_birth = NULL {
+                    date_of_birth
+                } ELSE {
+                    type::datetime($date_of_birth)
+                },
                 timezone = $timezone ?? timezone,
                 locale = $locale ?? locale,
                 bio = $bio ?? bio,
@@ -182,6 +194,7 @@ impl UserManagementService {
             "last_name": request.last_name,
             "display_name": request.display_name,
             "phone": request.phone,
+            "date_of_birth": request.date_of_birth,
             "timezone": request.timezone,
             "locale": request.locale,
             "bio": request.bio,
@@ -283,6 +296,7 @@ impl UserManagementService {
             .query(query)
             .bind(("preferences", preferences.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create user preferences: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -320,6 +334,7 @@ impl UserManagementService {
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user preferences: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -428,6 +443,7 @@ impl UserManagementService {
             .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -450,6 +466,7 @@ impl UserManagementService {
             .bind(("updated_at", now.timestamp()))
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to update account status: {}", e);
                 AuthError::DatabaseError(e.to_string())

@@ -404,21 +404,44 @@ impl AccountLockoutService {
 
     /// 清理过期的锁定记录
     pub async fn cleanup_expired_lockouts(&self) -> Result<u32> {
+        // 两类都要清：
+        //
+        // 1. 锁定已经到期的记录（老逻辑）。
+        // 2. **停在 `Normal` 状态、且早已超出重置窗口的记录**。这类以前从不清理：
+        //    每一次失败登录都会建一条计数记录，连**不存在的邮箱**也会建
+        //    （这是对的，否则"有没有留下锁定记录"本身就成了账号枚举信道），于是
+        //    每个被试过的地址都在表里永久留一行，只增不减。反正超出重置窗口后
+        //    `check_*_lockout` 也会把计数清零，留着没有意义。
+        //
+        // `locked_until != NONE` 这个显式判空是必要的：`NONE < datetime` 不报错，
+        // 靠它挡住"没锁过、locked_until 为空"的记录被误判成"锁定已过期"。
         let query = r#"
-            DELETE account_lockout 
-            WHERE locked_until < type::datetime($now) 
-            AND status IN ['Locked', 'TemporaryLocked']
+            DELETE account_lockout
+            WHERE (
+                status IN ['Locked', 'TemporaryLocked']
+                AND locked_until != NONE
+                AND locked_until < type::datetime($now)
+            ) OR (
+                status = 'Normal'
+                AND (last_attempt_at = NONE OR last_attempt_at < type::datetime($stale_before))
+            )
         "#;
 
         // `Utc::now().to_string()` 产出 "2026-08-05 08:43:36.837 UTC"，
         // 不是 RFC3339，`type::datetime()` 转不了 —— 定时清理任务因此每小时报错一次。
-        let now = Utc::now().to_rfc3339();
+        let now = Utc::now();
+        let stale_before =
+            now - chrono::Duration::minutes(self.config.reset_window_minutes as i64);
+
         let _result = self
             .db
             .raw_query(
                 "cleanup_expired_lockouts",
                 query,
-                serde_json::json!({ "now": now }),
+                serde_json::json!({
+                    "now": now.to_rfc3339(),
+                    "stale_before": stale_before.to_rfc3339(),
+                }),
             )
             .await
             .map_err(|e| AuthError::DatabaseError(e.to_string()))?;

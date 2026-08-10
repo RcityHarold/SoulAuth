@@ -78,7 +78,7 @@ async fn get_session(
     match session_service.get_session(&session_id).await {
         Ok(session) => {
             if session.user_id != current_user_id {
-                require_permission!(&db, &current_user_id, "users.read");
+                require_permission!(&db, &current_user_id, crate::models::permission::names::USERS_READ);
             }
 
             let is_active = !session.is_expired();
@@ -93,8 +93,29 @@ async fn get_session(
             };
             Ok(Json(response))
         }
-        Err(_) => Err(AuthError::NotFound("Session not found".to_string())),
+        Err(e) => Err(session_lookup_error("get session", e)),
     }
+}
+
+/// 把服务层的 `anyhow` 错误映射成 HTTP 错误。
+///
+/// 这两个接口以前一律写成 `Err(_) => NotFound("Session not found")`：**任何**失败
+/// 都以"没这个会话"的面目出现，真正的库错误被伪装成 404，排查时只会去核对
+/// session_id，永远查不到数据库那一侧。
+///
+/// 服务层用 `anyhow!("Session not found")` 表示确实不存在，只有这一种才是 404；
+/// "会话已过期"另算一种业务错误；其余按服务端错误处理并记日志。
+fn session_lookup_error(operation: &str, error: anyhow::Error) -> AuthError {
+    let message = error.to_string();
+    if message.contains("Session not found") {
+        return AuthError::NotFound("Session not found".to_string());
+    }
+    if message.contains("expired") {
+        return AuthError::BadRequest("Session has expired".to_string());
+    }
+
+    tracing::error!(error = %error, operation, "SSO session operation failed");
+    AuthError::InternalServerError(message)
 }
 
 /// 把会话写入失败收敛成一句对外无害的话。
@@ -188,7 +209,7 @@ async fn resolve_target_user(
         return Ok(current_user_id);
     }
 
-    require_permission!(db, &current_user_id, "users.read");
+    require_permission!(db, &current_user_id, crate::models::permission::names::USERS_READ);
     Ok(requested)
 }
 
@@ -244,7 +265,7 @@ async fn logout_session(
 
     match session_service.logout_session(&session_id).await {
         Ok(_) => Ok(StatusCode::NO_CONTENT),
-        Err(_) => Err(AuthError::NotFound("Session not found".to_string())),
+        Err(e) => Err(session_lookup_error("logout session", e)),
     }
 }
 
@@ -270,7 +291,7 @@ async fn get_session_stats(
     authed_user: AuthedUser,
 ) -> Result<Json<SessionStats>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(&db, &current_user_id, "security.read");
+    require_permission!(&db, &current_user_id, crate::models::permission::names::SECURITY_READ);
 
     match session_service.get_session_stats().await {
         Ok(stats) => Ok(Json(stats)),
@@ -285,7 +306,7 @@ async fn cleanup_expired_sessions(
     authed_user: AuthedUser,
 ) -> Result<Json<CleanupResponse>, AuthError> {
     let current_user_id = authed_user.id()?;
-    require_permission!(&db, &current_user_id, "security.read");
+    require_permission!(&db, &current_user_id, crate::models::permission::names::SECURITY_READ);
 
     match session_service.cleanup_expired_sessions().await {
         Ok(count) => {

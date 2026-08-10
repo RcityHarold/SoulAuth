@@ -57,16 +57,26 @@ impl AuditService {
 
     // Lockout Statistics
     pub async fn get_lockout_stats(&self, start_time: DateTime<Utc>) -> ApiResult<LockoutStats> {
-        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= $start_time GROUP ALL";
-        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= $start_time GROUP ALL";
+        // `locked_at` 是 datetime 列，**必须**用 `type::datetime()` 转过再比。
+        // 直接拿它跟数字比不会报错，但 SurrealDB 是按**类型序**排的：任何 datetime
+        // 都大于任何数字，于是 `locked_at >= <时间戳>` 恒为真 —— 这两个统计以前
+        // 完全无视时间窗口，报的是有史以来的总数，只增不减。
+        // （实测：`time::now() >= <未来时间戳>` 返回 true。）
+        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= type::datetime($start_time) GROUP ALL";
+        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= type::datetime($start_time) GROUP ALL";
         let active_lockouts_query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
 
-        let user_lockouts = self.execute_count_query(user_lockouts_query, start_time).await?;
-        let ip_lockouts = self.execute_count_query(ip_lockouts_query, start_time).await?;
+        let user_lockouts = self
+            .execute_count_query_since(user_lockouts_query, start_time)
+            .await?;
+        let ip_lockouts = self
+            .execute_count_query_since(ip_lockouts_query, start_time)
+            .await?;
         
         let mut active_result = self.db.client.query(active_lockouts_query)
             .bind(("now", Utc::now()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get active lockouts count: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -84,6 +94,7 @@ impl AuditService {
         let mut duration_result = self.db.client.query(duration_query)
             .bind(("start_time", start_time))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get lockout durations: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -120,6 +131,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get rate limit violations: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -145,6 +157,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get failed login by IP: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -158,11 +171,16 @@ impl AuditService {
             let failed_attempts = row::i64_field(r, "failed_attempts");
             let last_attempt_timestamp = row::i64_field(r, "last_attempt");
             // Check if IP is currently locked
+            // `now` 以前绑的是 `Utc::now().to_string()` —— 一个字符串。datetime 跟
+            // 字符串比同样走类型序，`locked_until > <字符串>` 恒为真，于是**任何
+            // 曾经被锁过的 IP 都会被报成"当前锁定中"**，哪怕锁早就到期了。
+            // 这里绑原生 `DateTime`，和上面 active_lockouts 的写法保持一致。
             let lockout_query = "SELECT status FROM account_lockout WHERE identifier = $ip AND lockout_type = 'IpAddress' AND locked_until > $now";
             let mut lockout_result = self.db.client.query(lockout_query)
                 .bind(("ip", ip_address.clone()))
-                .bind(("now", Utc::now().to_string()))
+                .bind(("now", Utc::now()))
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| {
                     error!("Failed to check IP lockout status: {}", e);
                     AuthError::DatabaseError("Query execution failed".to_string())
@@ -195,6 +213,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get suspicious activities: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -237,6 +256,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get activities by category: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -264,6 +284,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get activities by status: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -293,6 +314,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get top active users: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -337,6 +359,7 @@ impl AuditService {
             let mut user_result = self.db.client.query(user_query)
                 .bind(("user_ids", user_keys))
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| {
                     error!("Failed to query user emails: {}", e);
                     AuthError::DatabaseError("Query execution failed".to_string())
@@ -386,6 +409,7 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get hourly activity distribution: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -496,6 +520,37 @@ impl AuditService {
     }
 
     // Helper methods
+    /// 同 [`Self::execute_count_query`]，但把 `$start_time` 绑成 **RFC3339 字符串**，
+    /// 供 SQL 里的 `type::datetime($start_time)` 使用。
+    ///
+    /// 两个版本必须分开：`user_activity.timestamp` 是 number 列，要绑数字；
+    /// `account_lockout.locked_at` 是 datetime 列，绑数字会因为类型序而恒真。
+    async fn execute_count_query_since(
+        &self,
+        query: &str,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<i64> {
+        let count_result: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "audit_execute_count_query_since",
+                query,
+                json!({ "start_time": start_time.to_rfc3339() }),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to execute count query: {}", e);
+                AuthError::DatabaseError("Query execution failed".to_string())
+            })?;
+
+        Ok(count_result
+            .first()
+            .and_then(|c| c.get("count"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0))
+    }
+
+    /// 按 `user_activity.timestamp`（number 列）统计。
     async fn execute_count_query(&self, query: &str, start_time: DateTime<Utc>) -> ApiResult<i64> {
         let count_result: Vec<serde_json::Value> = self
             .db

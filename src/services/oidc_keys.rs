@@ -164,40 +164,8 @@ mod tests {
 
     fn test_config(pem: Option<String>) -> Config {
         Config {
-            database_url: "http://localhost:8000".to_string(),
-            database_user: "root".to_string(),
-            database_pass: "root".to_string(),
-            database_namespace: "auth".to_string(),
-            database_name: "main".to_string(),
-            database_connection_timeout: 30,
-            database_max_connections: 10,
-            jwt_secret: "0123456789abcdef0123456789abcdef".to_string(),
-            jwt_expiration: 3600,
-            google_client_id: "google-client".to_string(),
-            google_client_secret: "google-secret".to_string(),
-            github_client_id: "github-client".to_string(),
-            github_client_secret: "github-secret".to_string(),
-            oauth_redirect_url: "https://auth.example/api/auth/callback".to_string(),
-            proxy_enabled: false,
-            proxy_url: None,
-            smtp_host: "localhost".to_string(),
-            smtp_port: 1025,
-            smtp_username: String::new(),
-            smtp_password: String::new(),
-            smtp_from: "noreply@example.com".to_string(),
-            smtp_insecure: true,
-            app_url: "https://auth.example".to_string(),
-            email_verification_enabled: false,
-            trust_proxy_headers: false,
-            cors_allowed_origins: Vec::new(),
             oidc_rsa_private_key_pem: pem,
-            oidc_rsa_private_key_path: None,
-            password_min_length: 12,
-            mfa_encryption_key: None,
-            login_page_url: None,
-            verify_email_page_url: None,
-            session_cache_ttl_seconds: 5,
-            install_marker_path: None,
+            ..Config::test_default()
         }
     }
 
