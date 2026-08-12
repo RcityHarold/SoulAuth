@@ -66,6 +66,12 @@ pub enum AuthError {
     
     #[error("Bad request: {0}")]
     BadRequest(String),
+    /// 该功能未在本部署中启用（例如没有配置第三方登录的凭证）。
+    ///
+    /// 与 404 的区别：路由存在、语义明确，只是本实例没开。运维看到 501
+    /// 就知道该去补配置，而 404 会让人以为版本不对或路由写错了。
+    #[error("Not configured: {0}")]
+    NotConfigured(String),
     
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
@@ -154,6 +160,7 @@ impl axum::response::IntoResponse for AuthError {
             AuthError::AccountDeleted => (StatusCode::FORBIDDEN, "Account deleted".to_string()),
             AuthError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AuthError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AuthError::NotConfigured(msg) => (StatusCode::NOT_IMPLEMENTED, msg.clone()),
             AuthError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
         };
 

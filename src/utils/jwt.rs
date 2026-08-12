@@ -184,12 +184,18 @@ pub fn strip_bearer_scheme(value: &str) -> Option<&str> {
 }
 
 /// 账号状态检查：被停用 / 删除的账号，已签发的令牌也应立即失效。
+///
+/// 判定按**白名单**：只有 `Active` 放行，其余一律拒。以前写成
+/// `_ => Ok(())`，等于「没被显式列为坏的就算好的」—— 将来 `AccountStatus`
+/// 新增一个变体而忘了更新这里，它会**静默地变成可用状态**，
+/// 而这种漏洞不会有任何报错提示。放行的集合必须是闭的。
 fn ensure_account_usable(user: &User) -> Result<()> {
-    match user.account_status.as_str() {
-        "Suspended" => Err(AuthError::AccountSuspended),
-        "Inactive" => Err(AuthError::AccountInactive),
-        "PendingDeletion" | "Deleted" => Err(AuthError::AccountDeleted),
-        _ => Ok(()),
+    use crate::models::user::AccountStatus;
+    match user.account_status_parsed() {
+        AccountStatus::Active => Ok(()),
+        AccountStatus::Suspended => Err(AuthError::AccountSuspended),
+        AccountStatus::Inactive => Err(AuthError::AccountInactive),
+        AccountStatus::PendingDeletion | AccountStatus::Deleted => Err(AuthError::AccountDeleted),
     }
 }
 

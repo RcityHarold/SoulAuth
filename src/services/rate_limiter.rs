@@ -1,8 +1,13 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+
+use crate::services::database::Database;
+
+/// 撞上乐观并发时的重试次数。与账号锁定服务同口径。
+const WRITE_CONFLICT_RETRIES: u32 = 4;
 
 /// 速率限制规则
 #[derive(Debug, Clone)]
@@ -96,8 +101,17 @@ pub struct RateLimiter {
     default_rule: RateLimitRule,
     /// 特定端点的规则
     endpoint_rules: HashMap<String, RateLimitRule>,
-    /// 请求记录存储
+    /// 请求记录存储（本进程内）
     records: Arc<RwLock<HashMap<String, RequestRecord>>>,
+    /// 跨副本共享的计数后端。为 `None` 时退化成纯进程内限流。
+    ///
+    /// **只对显式配了端点规则的端点生效**，默认规则（一般 API）仍走进程内。
+    /// 这条线不是随意划的：显式配规则的恰好是登录 / 注册 / 改密 / 验邮箱这些
+    /// 会被暴力破解的端点，它们本身是低频的 —— 高频就是攻击本身；
+    /// 而一般 API 是每个请求都要过的热路径，给它加一次数据库往返
+    /// 是把限流器变成新的瓶颈。以后新增敏感端点只要配上端点规则，
+    /// 就自动获得跨副本计数，不需要再维护第二份名单。
+    shared: Option<Arc<Database>>,
 }
 
 impl RateLimiter {
@@ -107,7 +121,17 @@ impl RateLimiter {
             default_rule: RateLimitRule::default(),
             endpoint_rules: HashMap::new(),
             records: Arc::new(RwLock::new(HashMap::new())),
+            shared: None,
         }
+    }
+
+    /// 接上跨副本共享的计数后端。
+    ///
+    /// 不接的话，限流状态只在本进程内存里：部署 N 个副本，攻击者把尝试摊到
+    /// 各副本上就能拿到 N 倍配额，暴力破解防护被直接稀释 N 倍。
+    pub fn with_shared_backend(mut self, db: Arc<Database>) -> Self {
+        self.shared = Some(db);
+        self
     }
 
     /// 设置默认规则
@@ -185,7 +209,148 @@ impl RateLimiter {
         debug!("Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}",
               key, endpoint, record.timestamps.len(), rule.max_requests);
 
-        Ok(RateLimitDecision::Allowed)
+        // 进程内这一关过了，还要过跨副本这一关。锁在这里就得放掉：
+        // 共享计数要走一次数据库往返，攥着写锁会把本进程的所有请求串起来。
+        let rule = rule.clone();
+        drop(records);
+
+        self.check_shared(key, endpoint, &rule).await
+    }
+
+    /// 跨副本计数。未接后端、或该端点走默认规则时直接放行（判定已由进程内那层给出）。
+    ///
+    /// 共享层出错时**降级为放行**，只留一条 error 日志：进程内那层仍在生效，
+    /// 而反过来做（数据库一抖就拒登录）等于给自己造一个拒绝服务开关。
+    /// 这是一次明确的取舍，不是疏忽。
+    async fn check_shared(
+        &self,
+        key: &str,
+        endpoint: &str,
+        rule: &RateLimitRule,
+    ) -> Result<RateLimitDecision, crate::error::AppError> {
+        let Some(db) = self.shared.as_ref() else {
+            return Ok(RateLimitDecision::Allowed);
+        };
+        if !self.endpoint_rules.contains_key(endpoint) {
+            return Ok(RateLimitDecision::Allowed);
+        }
+
+        match self.shared_decision(db, key, endpoint, rule).await {
+            Ok(decision) => Ok(decision),
+            Err(e) => {
+                error!(
+                    "Shared rate-limit backend unavailable for {endpoint}; \
+                     falling back to per-process limiting only: {e}"
+                );
+                Ok(RateLimitDecision::Allowed)
+            }
+        }
+    }
+
+    /// 固定窗口的共享计数，语义与进程内那层对齐：超过 `max_requests` 即封禁
+    /// `block_duration`。
+    ///
+    /// 四条语句一次往返，全部原子，不做读-改-写：
+    ///   1. 窗口号变了就清零（条件 UPDATE，无需先读旧值）
+    ///   2. `hits += 1` 自增（UPSERT 在新记录上得 1）
+    ///   3. 超限且当前未封禁才写封禁时间，`RETURN VALUE` 非空即"这次刚封"
+    ///      —— 条件里带 `blocked_until < time::now()`，所以封禁不会被后续请求无限续期
+    ///   4. 读回最终值，**是否封禁在库内比较**：datetime 与其他类型在
+    ///      SurrealDB 里按类型序比较而非值序，把 now 传进去比会得到恒真的结果
+    async fn shared_decision(
+        &self,
+        db: &Arc<Database>,
+        key: &str,
+        endpoint: &str,
+        rule: &RateLimitRule,
+    ) -> Result<RateLimitDecision, crate::error::AppError> {
+        let window_secs = rule.window_duration.as_secs().max(1);
+        let now_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let window_index = now_secs / window_secs;
+
+        let query = r#"
+            UPDATE type::record('rate_limit', $bucket) SET
+                hits = 0, window_index = $window_index
+            WHERE window_index != $window_index;
+
+            UPSERT type::record('rate_limit', $bucket) SET
+                hits += 1,
+                window_index = $window_index,
+                client_key = $client_key,
+                endpoint = $endpoint,
+                updated_at = time::now();
+
+            UPDATE type::record('rate_limit', $bucket) SET
+                blocked_until = time::now() + type::duration($block_duration)
+            WHERE hits > $max_requests
+              AND (blocked_until IS NONE OR blocked_until < time::now())
+            RETURN VALUE hits;
+
+            SELECT
+                hits,
+                (blocked_until != NONE AND blocked_until > time::now()) AS blocked
+            FROM type::record('rate_limit', $bucket);
+        "#;
+
+        let bindings = serde_json::json!({
+            "bucket": Self::shared_bucket_id(key, endpoint),
+            "window_index": window_index,
+            "client_key": key,
+            "endpoint": endpoint,
+            "max_requests": rule.max_requests,
+            "block_duration": format!("{}s", rule.block_duration.as_secs().max(1)),
+        });
+
+        let mut last_error = None;
+        for attempt in 0..WRITE_CONFLICT_RETRIES {
+            match db.raw_query("rate_limit_shared", query, bindings.clone()).await {
+                Ok(mut response) => {
+                    let just_blocked: Vec<u32> = response.take(2).unwrap_or_default();
+                    let rows: Vec<serde_json::Value> = response.take(3).unwrap_or_default();
+                    let blocked = rows
+                        .first()
+                        .and_then(|row| row.get("blocked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    return Ok(if !just_blocked.is_empty() {
+                        warn!("Shared rate limit exceeded for {key} on {endpoint}");
+                        RateLimitDecision::JustBlocked
+                    } else if blocked {
+                        RateLimitDecision::StillBlocked
+                    } else {
+                        RateLimitDecision::Allowed
+                    });
+                }
+                // 纯粹的乐观并发撞车。不重试就会静默少记一次 ——
+                // 实测 20 个并发里有 3 个会撞上，等于白送 3 次尝试。
+                Err(e) if Self::is_write_conflict(&e) && attempt + 1 < WRITE_CONFLICT_RETRIES => {
+                    tokio::time::sleep(Duration::from_millis(5 * (attempt as u64 + 1))).await;
+                    last_error = Some(e);
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_error.expect("retry loop always records the last error"))
+    }
+
+    fn is_write_conflict(error: &crate::error::AppError) -> bool {
+        error.to_string().contains("Transaction conflict")
+    }
+
+    /// 共享桶的记录 ID。客户端标识可能含 `:` 等在记录 ID 里有含义的字符，
+    /// 所以取摘要而不是直接拼接。
+    fn shared_bucket_id(client_key: &str, endpoint: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        client_key.hash(&mut hasher);
+        0u8.hash(&mut hasher);      // 分隔，免得 ("ab","c") 与 ("a","bc") 撞同一个桶
+        endpoint.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
     }
 
     /// 重置某个客户端在所有端点上的限制
@@ -236,6 +401,31 @@ impl RateLimiter {
         });
         
         info!("Cleaned up rate limiter records, remaining: {}", records.len());
+        drop(records);
+
+        self.cleanup_shared_records().await;
+    }
+
+    /// 清理共享计数表。不清的话它只增不减：每个 (客户端, 端点) 组合留一条，
+    /// 而客户端标识来自 IP，长期跑下来就是一张无界增长的表。
+    ///
+    /// 只删「既不在封禁中、又已经很久没动」的行，避免把正封着的记录删掉
+    /// 而变相解封。
+    async fn cleanup_shared_records(&self) {
+        let Some(db) = self.shared.as_ref() else {
+            return;
+        };
+        let query = r#"
+            DELETE rate_limit
+            WHERE (blocked_until IS NONE OR blocked_until < time::now())
+              AND (updated_at IS NONE OR updated_at < time::now() - 1h);
+        "#;
+        if let Err(e) = db
+            .raw_query("rate_limit_cleanup", query, serde_json::json!({}))
+            .await
+        {
+            warn!("Failed to clean up shared rate-limit records: {e}");
+        }
     }
 }
 

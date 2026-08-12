@@ -277,3 +277,15 @@ DEFINE FIELD user_agent ON sso_session TYPE string;
 DEFINE INDEX sso_session_id_idx ON sso_session COLUMNS session_id UNIQUE;
 DEFINE INDEX sso_session_user_idx ON sso_session COLUMNS user_id;
 DEFINE INDEX sso_session_expiry_idx ON sso_session COLUMNS expires_at;
+
+-- 跨副本共享的限流计数桶。
+-- 记录 ID 是 (客户端标识, 端点) 的摘要；window_index 为固定窗口序号，
+-- 换窗口即清零，因此不需要保留时间戳列表。
+DEFINE TABLE IF NOT EXISTS rate_limit SCHEMALESS;
+DEFINE FIELD IF NOT EXISTS hits ON rate_limit TYPE number DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS window_index ON rate_limit TYPE number DEFAULT 0;
+DEFINE FIELD IF NOT EXISTS client_key ON rate_limit TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS endpoint ON rate_limit TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS blocked_until ON rate_limit TYPE option<datetime>;
+DEFINE FIELD IF NOT EXISTS updated_at ON rate_limit TYPE option<datetime>;
+DEFINE INDEX IF NOT EXISTS rate_limit_updated ON rate_limit FIELDS updated_at;

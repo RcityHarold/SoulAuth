@@ -137,7 +137,11 @@ async fn main() -> anyhow::Result<()> {
             .with_endpoint_rule(
                 "/api/auth/initialize-password".to_string(),
                 RateLimitRules::password_reset(),
-            ),
+            )
+            // 上面这些端点的计数走共享后端，跨副本合账。不接的话，部署 N 个
+            // 副本就等于把暴力破解配额放大 N 倍 —— 每个副本各算各的。
+            // 一般 API（默认规则）仍走进程内，不给每个请求加一次数据库往返。
+            .with_shared_backend(shared_db.clone()),
     );
 
     let audit_logger = Arc::new(AuditLogger::new(shared_db.clone()));

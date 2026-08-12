@@ -81,8 +81,11 @@ const OUTBOUND_CONNECT_TIMEOUT_SECS: u64 = 5;
 
 pub struct OAuthService {
     config: Config,
-    google_client: BasicClient,
-    github_client: BasicClient,
+    // 未配置凭证的 provider **没有 client**，而不是拿空串硬造一个。
+    // 造出来的话，登录会一路走到「拿假 client_id 去 Google 换令牌」才失败，
+    // 报错还指向 OAuth 库 —— 运维看不出这是「没配」而不是「配错」。
+    google_client: Option<BasicClient>,
+    github_client: Option<BasicClient>,
     // 授权 / 换令牌两个端点已经进了 BasicClient，不必重复保存；
     // 这三个是「换到令牌之后」才用的，得自己拿着。
     google_userinfo_url: String,
@@ -157,6 +160,36 @@ mod tests {
     }
 
     #[test]
+    fn an_unconfigured_provider_reports_not_configured_rather_than_failing_later() {
+        // 不配凭证时必须在入口就说清「本部署没开这个」，
+        // 而不是拿空 client_id 一路走到换令牌才失败、还把错误指向 OAuth 库。
+        let mut config = test_config();
+        config.google_client_id = None;
+        config.google_client_secret = None;
+        let service = OAuthService::new(config).expect("service");
+
+        let err = service
+            .get_google_auth_url_with_state("state")
+            .expect_err("must not hand out an auth url for an unconfigured provider");
+        assert!(
+            matches!(err, crate::error::AuthError::NotConfigured(_)),
+            "expected NotConfigured, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn one_provider_can_be_configured_without_the_other() {
+        // 只用 GitHub 的部署不该被迫为 Google 填假凭证。
+        let mut config = test_config();
+        config.google_client_id = None;
+        config.google_client_secret = None;
+        let service = OAuthService::new(config).expect("service");
+
+        assert!(service.get_github_auth_url_with_state("state").is_ok());
+        assert!(service.get_google_auth_url_with_state("state").is_err());
+    }
+
+    #[test]
     fn github_auth_url_carries_the_supplied_signed_state() {
         let service = OAuthService::new(test_config()).expect("service");
         let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
@@ -217,27 +250,59 @@ impl OAuthService {
         let (github_auth, github_token, github_user_url, github_emails_url) =
             github_endpoints(base(&config.github_oauth_base_url).as_deref());
 
-        let google_client = BasicClient::new(
-            ClientId::new(config.google_client_id.clone()),
-            Some(ClientSecret::new(config.google_client_secret.clone())),
-            AuthUrl::new(google_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            Some(TokenUrl::new(google_token).map_err(|e| AuthError::OAuthError(e.to_string()))?),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(format!("{}/google", config.oauth_redirect_url))
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-        );
+        // 回调地址在「配了 provider 就必须有」这条上由 Config 校验保证，
+        // 这里取不到就等同于未配置。
+        let redirect_base = config.oauth_redirect_url.clone();
 
-        let github_client = BasicClient::new(
-            ClientId::new(config.github_client_id.clone()),
-            Some(ClientSecret::new(config.github_client_secret.clone())),
-            AuthUrl::new(github_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
-            Some(TokenUrl::new(github_token).map_err(|e| AuthError::OAuthError(e.to_string()))?),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(format!("{}/github", config.oauth_redirect_url))
-                .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-        );
+        let google_client = if config.google_configured() {
+            Some(
+                BasicClient::new(
+                    ClientId::new(config.google_client_id.clone().unwrap_or_default()),
+                    Some(ClientSecret::new(
+                        config.google_client_secret.clone().unwrap_or_default(),
+                    )),
+                    AuthUrl::new(google_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    Some(
+                        TokenUrl::new(google_token)
+                            .map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    ),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(format!(
+                        "{}/google",
+                        redirect_base.as_deref().unwrap_or_default()
+                    ))
+                    .map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                ),
+            )
+        } else {
+            None
+        };
+
+        let github_client = if config.github_configured() {
+            Some(
+                BasicClient::new(
+                    ClientId::new(config.github_client_id.clone().unwrap_or_default()),
+                    Some(ClientSecret::new(
+                        config.github_client_secret.clone().unwrap_or_default(),
+                    )),
+                    AuthUrl::new(github_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    Some(
+                        TokenUrl::new(github_token)
+                            .map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    ),
+                )
+                .set_redirect_uri(
+                    RedirectUrl::new(format!(
+                        "{}/github",
+                        redirect_base.as_deref().unwrap_or_default()
+                    ))
+                    .map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                ),
+            )
+        } else {
+            None
+        };
 
         Ok(Self {
             config,
@@ -278,6 +343,21 @@ impl OAuthService {
             .map_err(|e| AuthError::OAuthError(format!("Failed to create HTTP client: {}", e)))
     }
 
+    /// 取某个 provider 的 client；未配置就是 501。
+    ///
+    /// 四个使用点共用这一处，错误文案只有一份 —— 分头写的话迟早出现
+    /// 「入口说没配、回调说 OAuth 错误」这种自相矛盾的提示。
+    fn client<'a>(
+        client: &'a Option<BasicClient>,
+        provider: &str,
+    ) -> Result<&'a BasicClient> {
+        client.as_ref().ok_or_else(|| {
+            AuthError::NotConfigured(format!(
+                "{provider} sign-in is not enabled on this deployment"
+            ))
+        })
+    }
+
     /// 生成 Google 授权 URL。
     ///
     /// `state` 必须是调用方（`routes::oidc::create_oauth_state_token`）签发的令牌：
@@ -285,7 +365,7 @@ impl OAuthService {
     /// `CsrfToken` 然后直接丢弃，回调侧根本没有可校验的东西。
     pub fn get_google_auth_url_with_state(&self, state: &str) -> Result<String> {
         let csrf_token = state.to_owned();
-        let (auth_url, _) = self.google_client
+        let (auth_url, _) = Self::client(&self.google_client, "Google")?
             .authorize_url(|| CsrfToken::new(csrf_token))
             .add_scope(Scope::new(
                 "https://www.googleapis.com/auth/userinfo.email".to_string(),
@@ -307,8 +387,7 @@ impl OAuthService {
         // client —— 默认**没有超时**，等于把上面那份超时配置绕开了。
         let client = self.create_http_client()?;
 
-        let token = self
-            .google_client
+        let token = Self::client(&self.google_client, "Google")?
             .exchange_code(oauth2::AuthorizationCode::new(code))
             .request_async({
                 let client = client.clone();
@@ -362,8 +441,7 @@ impl OAuthService {
     /// 生成 GitHub 授权 URL，`state` 语义同 Google。
     pub fn get_github_auth_url_with_state(&self, state: &str) -> Result<String> {
         let csrf_token = state.to_owned();
-        let (auth_url, _) = self
-            .github_client
+        let (auth_url, _) = Self::client(&self.github_client, "GitHub")?
             .authorize_url(|| CsrfToken::new(csrf_token))
             .add_scope(Scope::new("user:email".to_string()))
             .url();
@@ -375,8 +453,7 @@ impl OAuthService {
         // 交换授权码获取访问令牌（同 Google：统一走带超时的 client）
         let client = self.create_http_client()?;
 
-        let token = self
-            .github_client
+        let token = Self::client(&self.github_client, "GitHub")?
             .exchange_code(oauth2::AuthorizationCode::new(code))
             .request_async({
                 let client = client.clone();

@@ -509,12 +509,17 @@ impl AuthService {
         self.create_session_with_metadata(user, ctx).await
     }
 
+    /// 登录闸门。与 `utils::jwt` 的令牌闸门共用同一份状态判定
+    /// （`AccountStatus::parse`），两处以前是逐字副本，谁也拦不住它们走偏。
     fn ensure_account_usable(user: &User) -> Result<()> {
-        match user.account_status.as_str() {
-            "Suspended" => Err(AuthError::AccountSuspended),
-            "Inactive" => Err(AuthError::AccountInactive),
-            "PendingDeletion" | "Deleted" => Err(AuthError::AccountDeleted),
-            _ => Ok(()),
+        use crate::models::user::AccountStatus;
+        match user.account_status_parsed() {
+            AccountStatus::Active => Ok(()),
+            AccountStatus::Suspended => Err(AuthError::AccountSuspended),
+            AccountStatus::Inactive => Err(AuthError::AccountInactive),
+            AccountStatus::PendingDeletion | AccountStatus::Deleted => {
+                Err(AuthError::AccountDeleted)
+            }
         }
     }
 
