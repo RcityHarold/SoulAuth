@@ -12,7 +12,6 @@ use serde_json::Value as JsonValue;
 use surrealdb::engine::remote::http::{Client, Http};
 use surrealdb::opt::auth::Root;
 use surrealdb::{Surreal, types::RecordId};
-use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 use tokio::time::sleep;
 use tracing::{debug, warn};
@@ -45,6 +44,18 @@ impl Database {
     fn mark_prefer_fresh_for(&self, seconds: u64) {
         self.prefer_fresh_until_epoch
             .store(Self::unix_now_secs() + seconds, Ordering::Relaxed);
+    }
+
+    /// surrealdb 的 `Http` 连接器只接受 `host:port`，带上 `http://` 会被当成
+    /// 主机名解析（报 "DNS resolution failed for http:80"）。而 README 和本文件
+    /// 里的默认值一直写的是 `http://localhost:8000` —— 也就是照文档配置反而起不来。
+    /// 这里统一剥掉 scheme，两种写法都能用。
+    fn endpoint_without_scheme(raw: &str) -> String {
+        let ep = raw.trim().trim_end_matches('/');
+        ep.strip_prefix("http://")
+            .or_else(|| ep.strip_prefix("https://"))
+            .unwrap_or(ep)
+            .to_string()
     }
 
     fn endpoint_with_scheme(raw: &str) -> String {
@@ -130,7 +141,7 @@ impl Database {
 
     pub async fn fresh_client(&self) -> Result<Surreal<Client>> {
         let endpoint_raw = env::var("DATABASE_URL").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
-        let endpoint = endpoint_raw.trim().trim_end_matches('/').to_string();
+        let endpoint = Self::endpoint_without_scheme(&endpoint_raw);
         let with_scheme = Self::endpoint_with_scheme(&endpoint_raw);
         let ns = self.database_namespace.trim().to_string();
         let db = self.database_name.trim().to_string();
@@ -326,9 +337,10 @@ impl Database {
         debug!("Connecting to database url={}", config.database_url);
         
         // 设置连接超时
+        let endpoint = Self::endpoint_without_scheme(&config.database_url);
         let client = tokio::time::timeout(
             Duration::from_secs(config.database_connection_timeout),
-            Surreal::<Client>::new::<Http>(&config.database_url)
+            Surreal::<Client>::new::<Http>(&endpoint)
         ).await
         .map_err(|_| AuthError::DatabaseError("Database connection timeout".to_string()))?
         .map_err(|e| AuthError::DatabaseError(format!("Failed to connect: {}", e)))?;
@@ -403,6 +415,7 @@ impl Database {
             self.client
                 .query(query)
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
             Ok(())
         })
@@ -502,6 +515,7 @@ impl Database {
                     .query(&query)
                     .bind(("value", rid.clone()))
                     .await
+                    .and_then(|response| response.check())
                     .map_err(|e| {
                         AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
                     })?;
@@ -562,6 +576,7 @@ impl Database {
                     .query(&query)
                     .bind(("value", value.to_string()))
                     .await
+                    .and_then(|response| response.check())
                     .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
 
                 debug!("原始查询结果: {:?}", result);
@@ -664,50 +679,58 @@ impl Database {
         Ok(deleted)
     }
 
+    /// 删除单条会话（登出）。
+    ///
+    /// 走 `raw_query` 而不是直接用 `self.client`：前者会 `.check()` 语句级错误、
+    /// 并在鉴权态过期时换新连接重试。以前这里是裸调用，写失败会被吞掉 ——
+    /// 登出接口照样返回成功，`session` 行却还在，令牌一直有效到自然过期。
+    /// 下面两个同族函数本来就是这么写的，唯独这个漏了。
     pub async fn delete_session_by_token(&self, token: &str) -> Result<()> {
-        let query = "DELETE session WHERE token = $session_token";
-        self.client
-            .query(query)
-            .bind(("session_token", token.to_owned()))
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
+        self.raw_query(
+            "delete_session_by_token",
+            "DELETE session WHERE token = $session_token",
+            serde_json::json!({ "session_token": token }),
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
         Ok(())
     }
 
+    /// 删除某用户的全部会话（全端登出、改密后强制下线）。
+    ///
+    /// 必须用 `type::record(table, id)` 两参形式：单参形式会把
+    /// `"user:e81b4aa8-05f6-..."` 在第一个连字符处截断成 `user:e81b4aa8`，
+    /// 于是条件永远匹配不到任何行 —— 全端登出和改密下线都会变成空操作。
     pub async fn delete_sessions_by_user_id(&self, user_id: &str) -> Result<()> {
-        let query = "DELETE session WHERE user_id = type::thing($user_id)";
-        let user_thing_str = if user_id.starts_with("user:") {
-            user_id.to_string()
-        } else {
-            format!("user:{}", user_id)
-        };
-        self.client
-            .query(query)
-            .bind(("user_id", user_thing_str))
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to delete sessions: {}", e)))?;
+        self.raw_query(
+            "delete_sessions_by_user_id",
+            "DELETE session WHERE user_id = type::record('user', $user_key)",
+            serde_json::json!({
+                "user_key": crate::utils::record_id::normalize_user_id(user_id),
+            }),
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(format!("Failed to delete sessions: {}", e)))?;
         Ok(())
     }
 
+    /// 列出某用户的全部会话。两参形式的原因同 `delete_sessions_by_user_id`。
     pub async fn get_sessions_by_user_id(&self, user_id: &str) -> Result<Vec<crate::models::session::Session>> {
-        let query = "SELECT * FROM session WHERE user_id = type::thing($user_id) ORDER BY created_at DESC";
-        let user_thing_str = if user_id.starts_with("user:") {
-            user_id.to_string()
-        } else {
-            format!("user:{}", user_id)
-        };
         let mut result = self
-            .client
-            .query(query)
-            .bind(("user_id", user_thing_str))
+            .raw_query(
+                "get_sessions_by_user_id",
+                "SELECT * FROM session WHERE user_id = type::record('user', $user_key) \
+                 ORDER BY created_at DESC",
+                serde_json::json!({
+                    "user_key": crate::utils::record_id::normalize_user_id(user_id),
+                }),
+            )
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to query sessions: {}", e)))?;
-        
-        let sessions = result
+
+        result
             .take(0)
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse sessions: {}", e)))?;
-            
-        Ok(sessions)
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse sessions: {}", e)))
     }
 
     pub async fn raw_query(
@@ -818,7 +841,12 @@ impl Database {
             .await
     }
 
-    /// 公开的查询方法，供其他服务使用  
+    /// 公开的查询构造器，供其他服务使用。
+    ///
+    /// 注意：这里返回的是**未执行**的构造器，`.check()` 只能由调用方在 `.await`
+    /// 之后自己加。需要自动 check + 401 重试的场合请优先用 `raw_query`。
+    /// 当前无调用点，保留仅为对外扩展。
+    #[allow(dead_code)]
     pub fn query<'a>(&'a self, sql: &'a str) -> surrealdb::method::Query<'a, Client> {
         self.client.query(sql)
     }
@@ -827,6 +855,19 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn endpoint_without_scheme_accepts_both_forms() {
+        assert_eq!(Database::endpoint_without_scheme("http://localhost:8000"), "localhost:8000");
+        assert_eq!(Database::endpoint_without_scheme("https://db.example:8000/"), "db.example:8000");
+        assert_eq!(Database::endpoint_without_scheme(" 127.0.0.1:8000 "), "127.0.0.1:8000");
+    }
+
+    #[test]
+    fn endpoint_with_scheme_adds_http_when_missing() {
+        assert_eq!(Database::endpoint_with_scheme("127.0.0.1:8000"), "http://127.0.0.1:8000");
+        assert_eq!(Database::endpoint_with_scheme("https://db.example:8000/"), "https://db.example:8000");
+    }
 
     #[test]
     fn verify_connection_retries_with_fresh_client_for_expired_auth() {

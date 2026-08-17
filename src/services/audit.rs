@@ -1,18 +1,16 @@
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use serde_json::Value;
 use std::collections::HashMap;
-use tracing::{error, info, warn};
+use tracing::error;
 
 use crate::{
     error::{Result as ApiResult, AuthError},
     services::database::Database,
     routes::audit::{
-        ActivityMetric, AuthenticationStats, CategoryMetric, ExecutiveSummary,
-        FrequencyMetric, GeographicMetric, HourlyActivity, IpActivityMetric,
-        LockoutStats, RetentionMetrics, SecurityIncident, SecurityRecommendation,
-        StatusMetric, SuspiciousActivity, TimeseriesData, UserActivityMetric,
-        UserBehaviorAnalysis,
+        AuthenticationStats, CategoryMetric, ExecutiveSummary, HourlyActivity,
+        IpActivityMetric, LockoutStats, SecurityRecommendation, StatusMetric,
+        SuspiciousActivity, UserActivityMetric,
     },
 };
 
@@ -59,16 +57,26 @@ impl AuditService {
 
     // Lockout Statistics
     pub async fn get_lockout_stats(&self, start_time: DateTime<Utc>) -> ApiResult<LockoutStats> {
-        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= $start_time GROUP ALL";
-        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= $start_time GROUP ALL";
+        // `locked_at` 是 datetime 列，**必须**用 `type::datetime()` 转过再比。
+        // 直接拿它跟数字比不会报错，但 SurrealDB 是按**类型序**排的：任何 datetime
+        // 都大于任何数字，于是 `locked_at >= <时间戳>` 恒为真 —— 这两个统计以前
+        // 完全无视时间窗口，报的是有史以来的总数，只增不减。
+        // （实测：`time::now() >= <未来时间戳>` 返回 true。）
+        let user_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'User' AND locked_at >= type::datetime($start_time) GROUP ALL";
+        let ip_lockouts_query = "SELECT count() as count FROM account_lockout WHERE lockout_type = 'IpAddress' AND locked_at >= type::datetime($start_time) GROUP ALL";
         let active_lockouts_query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
 
-        let user_lockouts = self.execute_count_query(user_lockouts_query, start_time).await?;
-        let ip_lockouts = self.execute_count_query(ip_lockouts_query, start_time).await?;
+        let user_lockouts = self
+            .execute_count_query_since(user_lockouts_query, start_time)
+            .await?;
+        let ip_lockouts = self
+            .execute_count_query_since(ip_lockouts_query, start_time)
+            .await?;
         
         let mut active_result = self.db.client.query(active_lockouts_query)
             .bind(("now", Utc::now()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get active lockouts count: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -80,23 +88,32 @@ impl AuditService {
         })?;
 
         // Calculate average lockout duration
-        let duration_query = "SELECT locked_at, locked_until FROM account_lockout WHERE locked_at >= $start_time AND locked_until IS NOT NULL";
+        let duration_query = "SELECT type::string(locked_at) AS locked_at, \
+             type::string(locked_until) AS locked_until FROM account_lockout \
+             WHERE locked_at >= $start_time AND locked_until != NONE";
         let mut duration_result = self.db.client.query(duration_query)
             .bind(("start_time", start_time))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get lockout durations: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let durations: Vec<(DateTime<Utc>, DateTime<Utc>)> = duration_result.take(0).unwrap_or_default();
-        let average_lockout_duration_minutes = if !durations.is_empty() {
-            let total_minutes: i64 = durations.iter()
-                .map(|(start, end)| (*end - *start).num_minutes())
-                .sum();
-            total_minutes as f64 / durations.len() as f64
-        } else {
+        // 时间列以字符串投影出来（SDK 无法把 Value::Datetime 转成 serde_json::Value）。
+        let duration_rows: Vec<Value> = duration_result.take(0).unwrap_or_default();
+        let spans: Vec<i64> = duration_rows
+            .iter()
+            .filter_map(|r| {
+                let start = DateTime::parse_from_rfc3339(&row::str_field(r, "locked_at")).ok()?;
+                let end = DateTime::parse_from_rfc3339(&row::str_field(r, "locked_until")).ok()?;
+                Some((end - start).num_minutes())
+            })
+            .collect();
+        let average_lockout_duration_minutes = if spans.is_empty() {
             0.0
+        } else {
+            spans.iter().sum::<i64>() as f64 / spans.len() as f64
         };
 
         Ok(LockoutStats {
@@ -114,13 +131,17 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get rate limit violations: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let violations: Vec<(String, i64)> = result.take(0).unwrap_or_default();
-        Ok(violations.into_iter().filter(|(_, count)| *count > 10).count() as i64)
+        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        Ok(rows
+            .iter()
+            .filter(|r| row::i64_field(r, "count") > 10)
+            .count() as i64)
     }
 
     // Permission Denials
@@ -136,21 +157,30 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get failed login by IP: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let ip_data: Vec<(String, i64, i64)> = result.take(0).unwrap_or_default();
-        
+        let ip_rows: Vec<Value> = result.take(0).unwrap_or_default();
+
         let mut metrics = Vec::new();
-        for (ip_address, failed_attempts, last_attempt_timestamp) in ip_data {
+        for r in &ip_rows {
+            let ip_address = row::str_field(r, "ip_address");
+            let failed_attempts = row::i64_field(r, "failed_attempts");
+            let last_attempt_timestamp = row::i64_field(r, "last_attempt");
             // Check if IP is currently locked
+            // `now` 以前绑的是 `Utc::now().to_string()` —— 一个字符串。datetime 跟
+            // 字符串比同样走类型序，`locked_until > <字符串>` 恒为真，于是**任何
+            // 曾经被锁过的 IP 都会被报成"当前锁定中"**，哪怕锁早就到期了。
+            // 这里绑原生 `DateTime`，和上面 active_lockouts 的写法保持一致。
             let lockout_query = "SELECT status FROM account_lockout WHERE identifier = $ip AND lockout_type = 'IpAddress' AND locked_until > $now";
             let mut lockout_result = self.db.client.query(lockout_query)
                 .bind(("ip", ip_address.clone()))
-                .bind(("now", Utc::now().to_string()))
+                .bind(("now", Utc::now()))
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| {
                     error!("Failed to check IP lockout status: {}", e);
                     AuthError::DatabaseError("Query execution failed".to_string())
@@ -183,15 +213,22 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get suspicious activities: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let activities: Vec<(String, Option<String>, String, i64, i64, i64)> = result.take(0).unwrap_or_default();
-        
+        let activity_rows: Vec<Value> = result.take(0).unwrap_or_default();
+
         let mut suspicious = Vec::new();
-        for (ip_address, user_id, activity_type, count, first_seen_ts, last_seen_ts) in activities {
+        for r in &activity_rows {
+            let ip_address = row::str_field(r, "ip_address");
+            let user_id = row::opt_str_field(r, "user_id");
+            let activity_type = row::str_field(r, "action");
+            let count = row::i64_field(r, "count");
+            let first_seen_ts = row::i64_field(r, "first_seen");
+            let last_seen_ts = row::i64_field(r, "last_seen");
             if count <= 5 {
                 continue;
             }
@@ -219,12 +256,17 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get activities by category: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let categories: Vec<(String, i64)> = result.take(0).unwrap_or_default();
+        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let categories: Vec<(String, i64)> = rows
+            .iter()
+            .map(|r| (row::str_field(r, "category"), row::i64_field(r, "count")))
+            .collect();
         let total: i64 = categories.iter().map(|(_, count)| count).sum();
 
         Ok(categories.into_iter().map(|(category, count)| {
@@ -242,12 +284,17 @@ impl AuditService {
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get activities by status: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let statuses: Vec<(String, i64)> = result.take(0).unwrap_or_default();
+        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let statuses: Vec<(String, i64)> = rows
+            .iter()
+            .map(|r| (row::str_field(r, "status"), row::i64_field(r, "count")))
+            .collect();
         let total: i64 = statuses.iter().map(|(_, count)| count).sum();
 
         Ok(statuses.into_iter().map(|(status, count)| {
@@ -262,11 +309,12 @@ impl AuditService {
     // Top Active Users
     pub async fn get_top_active_users(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<UserActivityMetric>> {
         // SurrealDB 3.x: avoid JOIN; aggregate first, then resolve user email map.
-        let query = "SELECT type::string(user_id) as user_id, count() as activity_count, math::max(timestamp) as last_activity FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL GROUP BY user_id ORDER BY activity_count DESC LIMIT 20";
+        let query = "SELECT type::string(user_id) as user_id, count() as activity_count, math::max(timestamp) as last_activity FROM user_activity WHERE timestamp >= $start_time AND user_id != NONE GROUP BY user_id ORDER BY activity_count DESC LIMIT 20";
 
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get top active users: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
@@ -311,6 +359,7 @@ impl AuditService {
             let mut user_result = self.db.client.query(user_query)
                 .bind(("user_ids", user_keys))
                 .await
+                .and_then(|response| response.check())
                 .map_err(|e| {
                     error!("Failed to query user emails: {}", e);
                     AuthError::DatabaseError("Query execution failed".to_string())
@@ -351,20 +400,29 @@ impl AuditService {
 
     // Hourly Activity Distribution
     pub async fn get_hourly_activity_distribution(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<HourlyActivity>> {
-        let query = "SELECT time::hour(timestamp) as hour, count() as count FROM user_activity WHERE timestamp >= $start_time GROUP BY hour ORDER BY hour";
+        // `timestamp` 是 Unix 秒（number）。`time::hour()` 只接受 datetime，
+        // 对数字列不会报错但恒返回 NONE —— 实测确认。这里直接用算术取 UTC 小时。
+        let query = "SELECT math::floor((timestamp % 86400) / 3600) as hour, count() as count \
+                     FROM user_activity WHERE timestamp >= $start_time \
+                     GROUP BY hour ORDER BY hour";
         
         let mut result = self.db.client.query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get hourly activity distribution: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let hourly_data: Vec<(i32, i64)> = result.take(0).unwrap_or_default();
+        let hourly_rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let hourly_data: Vec<(i32, i64)> = hourly_rows
+            .iter()
+            .map(|r| (row::i64_field(r, "hour") as i32, row::i64_field(r, "count")))
+            .collect();
         
         // Fill in missing hours with 0 count
-        let mut hourly_map: HashMap<i32, i64> = hourly_data.into_iter().collect();
+        let hourly_map: HashMap<i32, i64> = hourly_data.into_iter().collect();
         let mut distribution = Vec::new();
         
         for hour in 0..24 {
@@ -462,6 +520,37 @@ impl AuditService {
     }
 
     // Helper methods
+    /// 同 [`Self::execute_count_query`]，但把 `$start_time` 绑成 **RFC3339 字符串**，
+    /// 供 SQL 里的 `type::datetime($start_time)` 使用。
+    ///
+    /// 两个版本必须分开：`user_activity.timestamp` 是 number 列，要绑数字；
+    /// `account_lockout.locked_at` 是 datetime 列，绑数字会因为类型序而恒真。
+    async fn execute_count_query_since(
+        &self,
+        query: &str,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<i64> {
+        let count_result: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "audit_execute_count_query_since",
+                query,
+                json!({ "start_time": start_time.to_rfc3339() }),
+            )
+            .await
+            .map_err(|e| {
+                error!("Failed to execute count query: {}", e);
+                AuthError::DatabaseError("Query execution failed".to_string())
+            })?;
+
+        Ok(count_result
+            .first()
+            .and_then(|c| c.get("count"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0))
+    }
+
+    /// 按 `user_activity.timestamp`（number 列）统计。
     async fn execute_count_query(&self, query: &str, start_time: DateTime<Utc>) -> ApiResult<i64> {
         let count_result: Vec<serde_json::Value> = self
             .db
@@ -502,7 +591,7 @@ impl AuditService {
     }
 
     async fn get_active_users_count(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        let query = "SELECT type::string(user_id) as user_id FROM user_activity WHERE timestamp >= $start_time AND user_id IS NOT NULL GROUP BY user_id";
+        let query = "SELECT type::string(user_id) as user_id FROM user_activity WHERE timestamp >= $start_time AND user_id != NONE GROUP BY user_id";
         let rows: Vec<Value> = self
             .db
             .query_take0_vec(
@@ -549,5 +638,30 @@ impl AuditService {
         } else {
             "Low".to_string()
         }
+    }
+}
+
+/// SurrealDB 返回的每一行都是**对象**，不是元组。
+///
+/// 这个文件里原先有 8 处写成 `take::<Vec<(String, i64)>>(0)` 之类的元组解析，
+/// 全部会失败（"Expected [string, int], got object"）。其中 7 处套了
+/// `.unwrap_or_default()`，于是静默返回空数组 —— 接口照样 200，数据却是空的；
+/// 剩下 1 处用 `?`，直接把 `/api/audit/dashboard` 打成 500。
+mod row {
+    use serde_json::Value;
+
+    pub fn str_field(row: &Value, key: &str) -> String {
+        row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+    }
+
+    pub fn opt_str_field(row: &Value, key: &str) -> Option<String> {
+        row.get(key)
+            .and_then(|v| v.as_str())
+            .map(|v| v.to_string())
+            .filter(|v| !v.is_empty())
+    }
+
+    pub fn i64_field(row: &Value, key: &str) -> i64 {
+        row.get(key).and_then(|v| v.as_i64()).unwrap_or(0)
     }
 }

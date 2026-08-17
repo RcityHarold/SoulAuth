@@ -1,6 +1,18 @@
 use serde::Deserialize;
 use std::env;
 
+/// 配置读取错误。
+///
+/// 以前这里对所有必填项直接 `expect` 导致进程 panic，堆栈里看不出到底缺哪个变量。
+/// 现在统一走 `ConfigError`，由 `main` 打印后正常退出。
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("Missing required environment variable: {0}")]
+    Missing(&'static str),
+    #[error("Invalid value for environment variable {name}: {reason}")]
+    Invalid { name: &'static str, reason: String },
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub database_url: String,
@@ -12,11 +24,26 @@ pub struct Config {
     pub database_max_connections: u32,
     pub jwt_secret: String,
     pub jwt_expiration: i64,
-    pub google_client_id: String,
-    pub google_client_secret: String,
-    pub github_client_id: String,
-    pub github_client_secret: String,
-    pub oauth_redirect_url: String,
+    // 第三方登录的凭证是**可选**的：只用邮箱密码登录的部署不该被迫在配置里
+    // 填四个假值。以前这四个是必填，运维只能写 dummy 混过去 —— 而配置里的
+    // 假数据一旦哪天被当真就是事故。未配置时对应的登录入口返回 501，
+    // 而不是拿假凭证去 Google 换令牌、再吐一个看不懂的 OAuth 错误。
+    pub google_client_id: Option<String>,
+    pub google_client_secret: Option<String>,
+    pub github_client_id: Option<String>,
+    pub github_client_secret: Option<String>,
+    pub oauth_redirect_url: Option<String>,
+    /// Google OAuth 端点根地址覆盖。留空即用 Google 官方端点。
+    ///
+    /// 之所以存在：官方端点写死在代码里时，「换到令牌之后」那一整段
+    /// —— 取用户信息、按 verified_email 放行、建号或关联既有账号 ——
+    /// 完全无法端到端验证。有了它就能指向一个本地替身走通全流程。
+    pub google_oauth_base_url: Option<String>,
+    /// GitHub OAuth 端点根地址覆盖。留空即用 github.com / api.github.com。
+    ///
+    /// 除测试外这条在生产也有真实用途：自托管 GitHub Enterprise 的端点
+    /// 正是 `{base}/login/oauth/*` 与 `{base}/api/v3/*` 这套路径。
+    pub github_oauth_base_url: Option<String>,
     // 代理配置
     pub proxy_enabled: bool,
     pub proxy_url: Option<String>,
@@ -29,72 +56,500 @@ pub struct Config {
     pub smtp_insecure: bool,
     pub app_url: String,
     pub email_verification_enabled: bool,
+    /// 是否信任 `X-Forwarded-For` / `X-Real-IP`。
+    /// 只有当服务确实跑在受控反向代理之后时才应打开：否则客户端可以任意伪造
+    /// 来源 IP，从而绕过限流与 IP 维度的账号锁定。
+    pub trust_proxy_headers: bool,
+    /// CORS 白名单。为空表示只允许 `app_url` 自身。
+    pub cors_allowed_origins: Vec<String>,
+    /// OIDC ID Token 的 RSA 私钥（PEM，PKCS#8 或 PKCS#1）。
+    pub oidc_rsa_private_key_pem: Option<String>,
+    /// OIDC ID Token 的 RSA 私钥文件路径，与上面的 PEM 二选一。
+    pub oidc_rsa_private_key_path: Option<String>,
+    /// 密码最小长度。
+    pub password_min_length: usize,
+    /// MFA TOTP 密钥的加密密钥（base64 编码的 32 字节）。
+    /// 不配置时从 `jwt_secret` 派生，并在启动时告警。
+    pub mfa_encryption_key: Option<String>,
+    /// 前端登录页地址。`/api/oidc/authorize` 在用户未登录时跳到这里。
+    /// 不配置时默认 `{app_url}/login`。
+    pub login_page_url: Option<String>,
+    /// 邮箱验证页地址（验证邮件里的链接指向它）。
+    /// 不配置时默认 `{app_url}/verify-email`。
+    pub verify_email_page_url: Option<String>,
+    /// HTTP 服务的监听地址。
+    ///
+    /// 以前写死在 `main.rs` 里的 `0.0.0.0:8080`：同一台机器起不了第二个实例，
+    /// 端口冲突时无从规避，容器编排也改不了端口。
+    pub bind_addr: String,
+    /// 已认证请求的会话校验缓存时长（秒）。0 表示关闭缓存。
+    pub session_cache_ttl_seconds: u64,
+}
+
+fn required(name: &'static str) -> Result<String, ConfigError> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .ok_or(ConfigError::Missing(name))
+}
+
+fn optional(name: &str) -> Option<String> {
+    env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_with_default<T: std::str::FromStr>(
+    name: &'static str,
+    default: T,
+) -> Result<T, ConfigError> {
+    match optional(name) {
+        None => Ok(default),
+        Some(raw) => raw.parse::<T>().map_err(|_| ConfigError::Invalid {
+            name,
+            reason: format!("cannot parse `{raw}`"),
+        }),
+    }
+}
+
+fn parse_bool(name: &str, default: bool) -> bool {
+    optional(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+/// 两个可选配置项是否都提供了非空值。
+fn both_present(a: &Option<String>, b: &Option<String>) -> bool {
+    let filled = |v: &Option<String>| v.as_deref().map(str::trim).is_some_and(|s| !s.is_empty());
+    filled(a) && filled(b)
+}
+
+/// 取 URL 里 scheme 之后的主机名（含端口前的部分）。
+///
+/// IPv6 字面量必须单独处理：`http://[::1]:8080` 直接按 `:` 切会切在方括号里，
+/// 得到 `"["`，于是 `[::1]` 被判成非环回。
+fn host_of(url: &str) -> Option<&str> {
+    let (_, rest) = url.split_once("://")?;
+
+    if let Some(inner) = rest.strip_prefix('[') {
+        // 方括号内整体是主机名，端口在 `]` 之后
+        let end = inner.find(']')?;
+        return Some(&rest[..end + 2]); // 含两侧方括号
+    }
+
+    rest.split(['/', ':']).next().filter(|h| !h.is_empty())
+}
+
+/// 是否为环回地址。**「是不是生产」在本文件里只有这一处判定**：
+/// 多写一份迟早会和这份走偏，出现「这里算生产、那里不算」的裂缝。
+fn is_loopback_host(host: &str) -> bool {
+    matches!(host, "127.0.0.1" | "localhost" | "[::1]" | "::1")
+}
+
+/// 校验 OAuth 端点覆盖：明文 http 只许指向环回地址。
+///
+/// 覆盖端点等于改写「授权码换令牌」发往何处 —— 走明文就是把 client_secret
+/// 和访问令牌交给链路上的任何人。测试需要明文（本地替身没有证书），
+/// 所以放行环回，其余一律拒绝启动，而不是打条警告日志了事：
+/// 配歪了要在启动时就炸，不能等到线上换令牌时才泄密。
+fn check_oauth_base_url(name: &'static str, value: Option<&str>) -> Result<(), ConfigError> {
+    let Some(raw) = value.map(str::trim).filter(|v| !v.is_empty()) else {
+        return Ok(());
+    };
+
+    if raw.ends_with('/') {
+        return Err(ConfigError::Invalid {
+            name,
+            reason: "must not end with a trailing slash".to_string(),
+        });
+    }
+
+    if raw.starts_with("https://") {
+        return Ok(());
+    }
+
+    match host_of(raw) {
+        Some(host) if is_loopback_host(host) => Ok(()),
+        Some(_) => Err(ConfigError::Invalid {
+            name,
+            reason: "plaintext http is only allowed for loopback hosts; \
+                    a remote OAuth endpoint must use https or the client secret \
+                    and access tokens travel in the clear"
+                .to_string(),
+        }),
+        None => Err(ConfigError::Invalid {
+            name,
+            reason: "must start with https:// or http://".to_string(),
+        }),
+    }
 }
 
 impl Config {
-    pub fn from_env() -> Result<Self, config::ConfigError> {
+    pub fn from_env() -> Result<Self, ConfigError> {
+        let app_url = required("APP_URL")?;
+
+        let cors_allowed_origins = optional("CORS_ALLOWED_ORIGINS")
+            .map(|raw| {
+                raw.split(',')
+                    .map(|origin| origin.trim().trim_end_matches('/').to_string())
+                    .filter(|origin| !origin.is_empty())
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+
         let config = Self {
-            database_url: env::var("DATABASE_URL")
-                .unwrap_or_else(|_| "http://localhost:8000".to_string()),
-            database_user: env::var("DATABASE_USER")
-                .unwrap_or_else(|_| "root".to_string()),
-            database_pass: env::var("DATABASE_PASS")
-                .unwrap_or_else(|_| "root".to_string()),
-            database_namespace: env::var("DATABASE_NAMESPACE")
-                .unwrap_or_else(|_| "auth".to_string()),
-            database_name: env::var("DATABASE_NAME")
-                .unwrap_or_else(|_| "main".to_string()),
-            database_connection_timeout: env::var("DATABASE_CONNECTION_TIMEOUT")
-                .unwrap_or_else(|_| "30".to_string())
-                .parse()
-                .unwrap_or(30),
-            database_max_connections: env::var("DATABASE_MAX_CONNECTIONS")
-                .unwrap_or_else(|_| "10".to_string())
-                .parse()
-                .unwrap_or(10),
-            jwt_secret: env::var("JWT_SECRET")
-                .expect("JWT_SECRET must be set"),
-            jwt_expiration: env::var("JWT_EXPIRATION")
-                .unwrap_or_else(|_| "86400".to_string())
-                .parse()
-                .unwrap(),
-            google_client_id: env::var("GOOGLE_CLIENT_ID")
-                .expect("GOOGLE_CLIENT_ID must be set"),
-            google_client_secret: env::var("GOOGLE_CLIENT_SECRET")
-                .expect("GOOGLE_CLIENT_SECRET must be set"),
-            github_client_id: env::var("GITHUB_CLIENT_ID")
-                .expect("GITHUB_CLIENT_ID must be set"),
-            github_client_secret: env::var("GITHUB_CLIENT_SECRET")
-                .expect("GITHUB_CLIENT_SECRET must be set"),
-            oauth_redirect_url: env::var("OAUTH_REDIRECT_URL")
-                .expect("OAUTH_REDIRECT_URL must be set"),
-            // 代理配置
-            proxy_enabled: env::var("PROXY_ENABLED")
-                .map(|v| v.parse().unwrap_or(false))
-                .unwrap_or(false),
-            proxy_url: env::var("PROXY_URL").ok(),
-            smtp_host: env::var("SMTP_HOST")
-                .expect("SMTP_HOST must be set"),
-            smtp_port: env::var("SMTP_PORT")
-                .expect("SMTP_PORT must be set")
-                .parse()
-                .expect("SMTP_PORT must be a number"),
-            smtp_username: env::var("SMTP_USERNAME")
-                .expect("SMTP_USERNAME must be set"),
-            smtp_password: env::var("SMTP_PASSWORD")
-                .expect("SMTP_PASSWORD must be set"),
-            smtp_from: env::var("SMTP_FROM")
-                .expect("SMTP_FROM must be set"),
-            smtp_insecure: env::var("SMTP_INSECURE")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false),
-            app_url: env::var("APP_URL")
-                .expect("APP_URL must be set"),
-            email_verification_enabled: env::var("EMAIL_VERIFICATION_ENABLED")
-                .map(|v| v.parse().unwrap_or(false))
-                .unwrap_or(false),
+            database_url: optional("DATABASE_URL")
+                .unwrap_or_else(|| "http://localhost:8000".to_string()),
+            database_user: optional("DATABASE_USER").unwrap_or_else(|| "root".to_string()),
+            database_pass: optional("DATABASE_PASS").unwrap_or_else(|| "root".to_string()),
+            database_namespace: optional("DATABASE_NAMESPACE")
+                .unwrap_or_else(|| "auth".to_string()),
+            database_name: optional("DATABASE_NAME").unwrap_or_else(|| "main".to_string()),
+            database_connection_timeout: parse_with_default("DATABASE_CONNECTION_TIMEOUT", 30)?,
+            database_max_connections: parse_with_default("DATABASE_MAX_CONNECTIONS", 10)?,
+            jwt_secret: required("JWT_SECRET")?,
+            jwt_expiration: parse_with_default("JWT_EXPIRATION", 86_400)?,
+            google_client_id: optional("GOOGLE_CLIENT_ID"),
+            google_client_secret: optional("GOOGLE_CLIENT_SECRET"),
+            github_client_id: optional("GITHUB_CLIENT_ID"),
+            github_client_secret: optional("GITHUB_CLIENT_SECRET"),
+            oauth_redirect_url: optional("OAUTH_REDIRECT_URL"),
+            google_oauth_base_url: optional("GOOGLE_OAUTH_BASE_URL"),
+            github_oauth_base_url: optional("GITHUB_OAUTH_BASE_URL"),
+            proxy_enabled: parse_bool("PROXY_ENABLED", false),
+            proxy_url: optional("PROXY_URL"),
+            smtp_host: required("SMTP_HOST")?,
+            smtp_port: parse_with_default("SMTP_PORT", 587u16)?,
+            smtp_username: env::var("SMTP_USERNAME").unwrap_or_default(),
+            smtp_password: env::var("SMTP_PASSWORD").unwrap_or_default(),
+            smtp_from: required("SMTP_FROM")?,
+            smtp_insecure: parse_bool("SMTP_INSECURE", false),
+            app_url,
+            email_verification_enabled: parse_bool("EMAIL_VERIFICATION_ENABLED", false),
+            trust_proxy_headers: parse_bool("TRUST_PROXY_HEADERS", false),
+            cors_allowed_origins,
+            oidc_rsa_private_key_pem: optional("OIDC_RSA_PRIVATE_KEY_PEM"),
+            oidc_rsa_private_key_path: optional("OIDC_RSA_PRIVATE_KEY_PATH"),
+            password_min_length: parse_with_default("PASSWORD_MIN_LENGTH", 12usize)?,
+            mfa_encryption_key: optional("MFA_SECRET_ENCRYPTION_KEY"),
+            login_page_url: optional("LOGIN_PAGE_URL"),
+            verify_email_page_url: optional("VERIFY_EMAIL_PAGE_URL"),
+            bind_addr: optional("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
+            session_cache_ttl_seconds: parse_with_default("AUTH_SESSION_CACHE_TTL_SECONDS", 5u64)?,
         };
 
+        if config.jwt_secret.len() < 32 {
+            return Err(ConfigError::Invalid {
+                name: "JWT_SECRET",
+                reason: "must be at least 32 characters".to_string(),
+            });
+        }
+
+        check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", config.google_oauth_base_url.as_deref())?;
+        check_oauth_base_url("GITHUB_OAUTH_BASE_URL", config.github_oauth_base_url.as_deref())?;
+
+        // 半配置状态要当场拦下：配了 provider 却没有回调地址，重定向 URI 会被
+        // 拼成没有前缀的残缺地址，登录到第一步才失败，而且报错指向 OAuth 库。
+        if config.any_oauth_provider_configured() && config.oauth_redirect_url.is_none() {
+            return Err(ConfigError::Invalid {
+                name: "OAUTH_REDIRECT_URL",
+                reason: "must be set when any OAuth provider is configured".to_string(),
+            });
+        }
+
+        config.check_production_secrets()?;
+
         Ok(config)
+    }
+
+    /// 是否配置了任意一个第三方登录 provider。
+    pub fn any_oauth_provider_configured(&self) -> bool {
+        self.google_configured() || self.github_configured()
+    }
+
+    /// Google 登录是否可用：id 与 secret 必须同时具备。
+    /// 只配一半比两个都不配更危险 —— 它看起来是开着的。
+    pub fn google_configured(&self) -> bool {
+        both_present(&self.google_client_id, &self.google_client_secret)
+    }
+
+    pub fn github_configured(&self) -> bool {
+        both_present(&self.github_client_id, &self.github_client_secret)
+    }
+
+    /// 本实例是否面向环回地址之外提供服务。
+    fn serves_remote_clients(&self) -> bool {
+        host_of(self.app_url.trim()).is_none_or(|host| !is_loopback_host(host))
+    }
+
+    /// 生产部署必须显式配置的密钥。缺了就拒绝启动，而不是打条警告继续跑。
+    ///
+    /// 这两项以前只是启动警告。问题在于：它们的后果都**不在启动时显现**，
+    /// 而是等到重启之后、或轮换密钥之后才爆，那时候已经是线上事故：
+    ///   · 缺 OIDC 私钥 → 用临时密钥，进程一重启，已签发的 ID Token 全部
+    ///     无法验证；多副本部署里每个副本各签各的，从第一天起就互不认账。
+    ///   · 缺 MFA 密钥 → 从 JWT_SECRET 派生，哪天轮换 JWT_SECRET，
+    ///     所有已存的 TOTP 密钥变成无法解密，全体 MFA 用户被锁在门外。
+    ///
+    /// 环回地址仍然放行：本地开发要能一条命令跑起来。
+    fn check_production_secrets(&self) -> Result<(), ConfigError> {
+        if !self.serves_remote_clients() {
+            return Ok(());
+        }
+
+        if self.oidc_rsa_private_key_pem.is_none() && self.oidc_rsa_private_key_path.is_none() {
+            return Err(ConfigError::Invalid {
+                name: "OIDC_RSA_PRIVATE_KEY_PEM",
+                reason: "a persistent OIDC signing key is required when APP_URL is not a \
+                        loopback address; without it every restart invalidates all issued \
+                        ID tokens and replicas sign with different keys. Set \
+                        OIDC_RSA_PRIVATE_KEY_PEM or OIDC_RSA_PRIVATE_KEY_PATH"
+                    .to_string(),
+            });
+        }
+
+        if self.mfa_encryption_key.is_none() {
+            return Err(ConfigError::Invalid {
+                name: "MFA_SECRET_ENCRYPTION_KEY",
+                reason: "a dedicated MFA encryption key is required when APP_URL is not a \
+                        loopback address; deriving it from JWT_SECRET means rotating \
+                        JWT_SECRET locks every MFA user out. Generate one with \
+                        `openssl rand -base64 32`"
+                    .to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Cookie 是否应带 `Secure`。
+    ///
+    /// 恒定带 `Secure` 会让 `http://localhost` 的本地开发完全跑不通（浏览器
+    /// 直接丢弃 cookie，OIDC 流程走不下去）。这里按部署协议决定：
+    /// `app_url` 是 https 就带，否则不带。
+    pub fn cookies_secure(&self) -> bool {
+        self.app_url.trim().to_ascii_lowercase().starts_with("https://")
+    }
+
+    /// 未登录用户从 `/api/oidc/authorize` 被引导去的登录页。
+    pub fn login_page_url(&self) -> String {
+        self.login_page_url.clone().unwrap_or_else(|| {
+            format!("{}/login", self.app_url.trim_end_matches('/'))
+        })
+    }
+
+    /// 验证邮件里链接指向的前端页面。
+    pub fn verify_email_page_url(&self) -> String {
+        self.verify_email_page_url.clone().unwrap_or_else(|| {
+            format!("{}/verify-email", self.app_url.trim_end_matches('/'))
+        })
+    }
+
+    /// CORS 允许的来源列表：显式白名单优先，否则回落到自身 `app_url`。
+    pub fn effective_cors_origins(&self) -> Vec<String> {
+        if self.cors_allowed_origins.is_empty() {
+            vec![self.app_url.trim_end_matches('/').to_string()]
+        } else {
+            self.cors_allowed_origins.clone()
+        }
+    }
+
+    /// 测试用的默认配置。放在这里而不是各个测试模块里各写一份，
+    /// 是为了新增字段时只有一处要改（漏改会直接编译不过）。
+    #[cfg(test)]
+    pub(crate) fn test_default() -> Self {
+        Self {
+            database_url: "http://localhost:8000".to_string(),
+            database_user: "root".to_string(),
+            database_pass: "root".to_string(),
+            database_namespace: "auth".to_string(),
+            database_name: "main".to_string(),
+            database_connection_timeout: 30,
+            database_max_connections: 10,
+            jwt_secret: "0123456789abcdef0123456789abcdef".to_string(),
+            jwt_expiration: 3600,
+            google_client_id: Some("g".to_string()),
+            google_client_secret: Some("g".to_string()),
+            github_client_id: Some("h".to_string()),
+            github_client_secret: Some("h".to_string()),
+            oauth_redirect_url: Some("https://auth.example/api/auth/callback".to_string()),
+            google_oauth_base_url: None,
+            github_oauth_base_url: None,
+            proxy_enabled: false,
+            proxy_url: None,
+            smtp_host: "localhost".to_string(),
+            smtp_port: 1025,
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_from: "noreply@example.com".to_string(),
+            smtp_insecure: true,
+            app_url: "https://auth.example".to_string(),
+            email_verification_enabled: false,
+            trust_proxy_headers: false,
+            cors_allowed_origins: Vec::new(),
+            oidc_rsa_private_key_pem: None,
+            oidc_rsa_private_key_path: None,
+            password_min_length: 12,
+            mfa_encryption_key: None,
+            login_page_url: None,
+            verify_email_page_url: None,
+            bind_addr: "0.0.0.0:8080".to_string(),
+            session_cache_ttl_seconds: 5,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::host_of;
+
+    #[test]
+    fn host_of_handles_ipv6_literals() {
+        // 按 `:` 切会切进方括号里，得到 "["，于是 [::1] 被判成非环回。
+        assert_eq!(host_of("http://[::1]:8080"), Some("[::1]"));
+        assert_eq!(host_of("https://[2001:db8::1]/path"), Some("[2001:db8::1]"));
+        assert_eq!(host_of("http://[::1]"), Some("[::1]"));
+    }
+
+    #[test]
+    fn host_of_handles_ordinary_hosts() {
+        assert_eq!(host_of("http://localhost:8080"), Some("localhost"));
+        assert_eq!(host_of("https://auth.example.com"), Some("auth.example.com"));
+        assert_eq!(host_of("https://auth.example.com/a/b"), Some("auth.example.com"));
+        assert_eq!(host_of("not-a-url"), None);
+        assert_eq!(host_of("https://"), None);
+    }
+
+    #[test]
+    fn a_deployment_with_no_oauth_provider_is_valid() {
+        // 这条是本次改动的目的：只用邮箱密码登录的部署，
+        // 不该被迫在配置里填四个假的第三方凭证。
+        let mut config = Config::test_default();
+        config.google_client_id = None;
+        config.google_client_secret = None;
+        config.github_client_id = None;
+        config.github_client_secret = None;
+        config.oauth_redirect_url = None;
+        assert!(!config.any_oauth_provider_configured());
+    }
+
+    #[test]
+    fn half_configured_provider_counts_as_unconfigured() {
+        // 只配 id 不配 secret 比两个都不配更危险：它看起来是开着的。
+        let mut config = Config::test_default();
+        config.google_client_secret = None;
+        assert!(!config.google_configured());
+
+        config.google_client_secret = Some("   ".to_string());
+        assert!(!config.google_configured(), "空白值不算配置");
+    }
+
+    #[test]
+    fn production_requires_persistent_signing_and_mfa_keys() {
+        // 这两项的后果都不在启动时显现 —— 一个要等重启，一个要等轮换密钥，
+        // 到那时候已经是线上事故。所以宁可起不来。
+        let mut config = Config::test_default();
+        config.app_url = "https://auth.example.com".to_string();
+        config.oidc_rsa_private_key_pem = None;
+        config.oidc_rsa_private_key_path = None;
+        config.mfa_encryption_key = Some("k".to_string());
+        assert!(config.check_production_secrets().is_err(), "缺 OIDC 私钥应拒绝启动");
+
+        config.oidc_rsa_private_key_pem = Some("pem".to_string());
+        config.mfa_encryption_key = None;
+        assert!(config.check_production_secrets().is_err(), "缺 MFA 密钥应拒绝启动");
+
+        config.mfa_encryption_key = Some("k".to_string());
+        assert!(config.check_production_secrets().is_ok());
+    }
+
+    #[test]
+    fn loopback_deployments_still_start_without_those_keys() {
+        // 本地开发要能一条命令跑起来，否则这道闸门会被人用环境变量绕过去。
+        for url in ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"] {
+            let mut config = Config::test_default();
+            config.app_url = url.to_string();
+            config.oidc_rsa_private_key_pem = None;
+            config.oidc_rsa_private_key_path = None;
+            config.mfa_encryption_key = None;
+            assert!(config.check_production_secrets().is_ok(), "{url} 应放行");
+        }
+    }
+
+    use super::check_oauth_base_url;
+
+    #[test]
+    fn plaintext_oauth_endpoint_is_rejected_unless_it_is_loopback() {
+        // 明文 http 指向远端 = client_secret 与访问令牌在链路上裸奔。
+        // 这类配置必须在启动时炸掉，不能只打条警告然后照常上线。
+        for host in ["http://oauth.evil.test", "http://10.0.0.5:8126", "ftp://x"] {
+            assert!(
+                check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", Some(host)).is_err(),
+                "should have rejected {host}"
+            );
+        }
+    }
+
+    #[test]
+    fn loopback_and_https_overrides_are_accepted() {
+        for ok in [
+            "http://127.0.0.1:8126",
+            "http://localhost:8126",
+            "https://ghe.example.com",
+        ] {
+            assert!(
+                check_oauth_base_url("GITHUB_OAUTH_BASE_URL", Some(ok)).is_ok(),
+                "should have accepted {ok}"
+            );
+        }
+        // 未设置就是未设置，不该被当成非法值
+        assert!(check_oauth_base_url("GITHUB_OAUTH_BASE_URL", None).is_ok());
+        assert!(check_oauth_base_url("GITHUB_OAUTH_BASE_URL", Some("  ")).is_ok());
+    }
+
+    #[test]
+    fn a_trailing_slash_is_rejected_rather_than_silently_doubling_up() {
+        // 端点由 `{base}/token` 拼出，base 带斜杠就成了 `//token`。
+        // 有的服务端会 404，有的会重定向 —— 与其赌，不如不收。
+        assert!(check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", Some("https://x.test/")).is_err());
+    }
+
+    use super::Config;
+
+    fn config_with_app_url(app_url: &str) -> Config {
+        Config {
+            app_url: app_url.to_string(),
+            ..Config::test_default()
+        }
+    }
+
+
+    #[test]
+    fn cookies_are_secure_only_over_https() {
+        assert!(config_with_app_url("https://auth.example").cookies_secure());
+        assert!(!config_with_app_url("http://localhost:8080").cookies_secure());
+    }
+
+    #[test]
+    fn login_page_defaults_to_app_url_login() {
+        assert_eq!(
+            config_with_app_url("https://auth.example/").login_page_url(),
+            "https://auth.example/login"
+        );
+    }
+
+    #[test]
+    fn cors_falls_back_to_app_url() {
+        assert_eq!(
+            config_with_app_url("https://auth.example/").effective_cors_origins(),
+            vec!["https://auth.example".to_string()]
+        );
     }
 }

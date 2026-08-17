@@ -25,6 +25,9 @@ pub struct User {
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub verification_token: Option<String>,
+    /// 验证令牌的过期时间（Unix 秒）。以前的验证令牌永不过期。
+    #[serde(default)]
+    pub verification_token_expires_at: Option<i64>,
     pub account_status: String,
     #[serde(default = "default_membership_level")]
     pub membership_level: String,
@@ -34,7 +37,7 @@ pub struct User {
     pub last_login_ip: Option<String>,
 }
 
-#[derive(Debug, Clone, SurrealValue)]
+#[derive(Debug, Clone, PartialEq, Eq, SurrealValue)]
 pub enum AccountStatus {
     Active,
     Inactive,
@@ -44,6 +47,23 @@ pub enum AccountStatus {
 }
 
 impl AccountStatus {
+    /// 由库中存的字符串还原状态。
+    ///
+    /// **未知值一律落到 `Inactive`（不可用）**，而不是 `Active`。以前三处调用点
+    /// 各写各的 match，且都以「没被列为坏的就算好的」收尾；只要 `AccountStatus`
+    /// 新增一个变体而漏改其中一处，那处就静默放行 —— 没有任何编译错误或运行时
+    /// 报错会提示这件事。放行的集合必须是闭的，且只能有一份。
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "Active" => AccountStatus::Active,
+            "Inactive" => AccountStatus::Inactive,
+            "Suspended" => AccountStatus::Suspended,
+            "PendingDeletion" => AccountStatus::PendingDeletion,
+            "Deleted" => AccountStatus::Deleted,
+            _ => AccountStatus::Inactive,
+        }
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             AccountStatus::Active => "Active",
@@ -172,16 +192,16 @@ pub struct UpdateMembershipRequest {
     pub membership_expiry: Option<String>,
 }
 
+impl User {
+    /// 账号是否处于可用状态。鉴权闸门与登录闸门都走这里，不各写各的。
+    pub fn account_status_parsed(&self) -> AccountStatus {
+        AccountStatus::parse(&self.account_status)
+    }
+}
+
 impl From<User> for UserResponse {
     fn from(user: User) -> Self {
-        let account_status = match user.account_status.as_str() {
-            "Active" => AccountStatus::Active,
-            "Inactive" => AccountStatus::Inactive,
-            "Suspended" => AccountStatus::Suspended,
-            "PendingDeletion" => AccountStatus::PendingDeletion,
-            "Deleted" => AccountStatus::Deleted,
-            _ => AccountStatus::Active,
-        };
+        let account_status = AccountStatus::parse(&user.account_status);
 
         let created_at = DateTime::<Utc>::from_timestamp(user.created_at, 0)
             .unwrap_or_else(Utc::now);
@@ -190,7 +210,13 @@ impl From<User> for UserResponse {
             .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0));
 
         Self {
-            id: crate::utils::record_id::record_id_key_to_string(&user.id.unwrap()),
+            // `id` 是 Option（新建时还没有），这里用 unwrap 会把一条缺 id 的记录
+            // 变成整个 handler 线程 panic。降级成空串，交由上层按“找不到用户”处理。
+            id: user
+                .id
+                .as_ref()
+                .map(crate::utils::record_id::record_id_key_to_string)
+                .unwrap_or_default(),
             email: user.email,
             username: user.username,
             is_admin: false,
@@ -208,5 +234,47 @@ impl From<User> for UserResponse {
 impl Default for AccountStatus {
     fn default() -> Self {
         AccountStatus::Active
+    }
+}
+
+#[cfg(test)]
+mod account_status_tests {
+    use super::AccountStatus;
+
+    #[test]
+    fn an_unknown_status_is_not_usable() {
+        // 这是本文件最重要的一条：未知值必须落到不可用。
+        // 反过来（未知 → Active）意味着任何一次拼写错误、数据迁移遗漏或
+        // 新增变体漏改，都会变成一个不报错的放行漏洞。
+        for raw in ["", "active", "ACTIVE", "Locked", "Banned", "已停用"] {
+            assert_ne!(
+                AccountStatus::parse(raw),
+                AccountStatus::Active,
+                "{raw:?} must not be treated as an active account"
+            );
+        }
+    }
+
+    #[test]
+    fn only_active_maps_to_active() {
+        assert_eq!(AccountStatus::parse("Active"), AccountStatus::Active);
+        for raw in ["Inactive", "Suspended", "PendingDeletion", "Deleted"] {
+            assert_ne!(AccountStatus::parse(raw), AccountStatus::Active, "{raw}");
+        }
+    }
+
+    #[test]
+    fn parse_round_trips_every_variant() {
+        // as_str 与 parse 必须互逆。任一侧漏掉一个变体，这条就会红 ——
+        // 而漏掉的那个变体在 parse 里会落进未知分支，变成永久不可用。
+        for v in [
+            AccountStatus::Active,
+            AccountStatus::Inactive,
+            AccountStatus::Suspended,
+            AccountStatus::PendingDeletion,
+            AccountStatus::Deleted,
+        ] {
+            assert_eq!(AccountStatus::parse(v.as_str()), v, "{} did not round-trip", v.as_str());
+        }
     }
 }

@@ -3,6 +3,9 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
+/// 注意：持久化字段的时间一律用 Unix 秒（i64），与 `schema.sql` 里的
+/// `TYPE number` 对齐。以前这里用 `DateTime<Utc>`，写进 SCHEMAFULL 的
+/// number 列会被数据库拒绝。对外的 Response 结构仍然返回 RFC3339 时间。
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct UserPreferences {
     pub id: Option<Thing>,
@@ -19,8 +22,8 @@ pub struct UserPreferences {
     pub timezone: String,
     pub date_format: String,
     pub time_format: String,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,15 +97,15 @@ impl From<UserPreferences> for UserPreferencesResponse {
             timezone: prefs.timezone,
             date_format: prefs.date_format,
             time_format: prefs.time_format,
-            created_at: prefs.created_at,
-            updated_at: prefs.updated_at,
+            created_at: chrono::DateTime::<Utc>::from_timestamp(prefs.created_at, 0).unwrap_or_else(Utc::now),
+            updated_at: chrono::DateTime::<Utc>::from_timestamp(prefs.updated_at, 0).unwrap_or_else(Utc::now),
         }
     }
 }
 
 impl Default for UserPreferences {
     fn default() -> Self {
-        let now = Utc::now();
+        let now = Utc::now().timestamp();
         Self {
             id: None,
             user_id: Thing::new("user", "default"),

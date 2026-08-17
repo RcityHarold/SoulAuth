@@ -73,7 +73,16 @@ impl Default for LockoutConfig {
 }
 
 impl AccountLockout {
-    /// 创建新的账户锁定记录
+    /// 构造一条空白记录。
+    ///
+    /// 生产路径不再需要它：计数与上锁都由
+    /// `AccountLockoutService::increment_failed_attempts` 在数据库里完成，读出来的
+    /// 记录一律走 `serde_json::from_value`。这里只留给单测用。
+    ///
+    /// 原先还有 `record_failed_attempt` / `lock_account` 两个方法在内存里做
+    /// "+1 然后判断是否超阈值"，已随读-改-写路径一并删除 —— 留着会让人以为
+    /// 应用侧还在管计数，而实际判据早就只在 SQL 里了。
+    #[cfg(test)]
     pub fn new(identifier: String, lockout_type: LockoutType) -> Self {
         let now = Utc::now();
         Self {
@@ -87,27 +96,6 @@ impl AccountLockout {
             created_at: now,
             updated_at: now,
         }
-    }
-
-    /// 记录失败尝试
-    pub fn record_failed_attempt(&mut self, config: &LockoutConfig) {
-        self.failed_attempts += 1;
-        self.last_attempt_at = Utc::now();
-        self.updated_at = Utc::now();
-
-        // 检查是否需要锁定
-        if self.failed_attempts >= config.max_attempts {
-            self.lock_account(config.lockout_duration_minutes);
-        }
-    }
-
-    /// 锁定账户
-    pub fn lock_account(&mut self, duration_minutes: u32) {
-        let now = Utc::now();
-        self.status = LockoutStatus::Locked;
-        self.locked_at = Some(now);
-        self.locked_until = Some(now + chrono::Duration::minutes(duration_minutes as i64));
-        self.updated_at = now;
     }
 
     /// 解锁账户
@@ -229,39 +217,40 @@ mod tests {
         assert!(!lockout.is_locked());
     }
 
-    #[test]
-    fn test_failed_attempt_recording() {
-        let mut lockout = AccountLockout::new("test_user".to_string(), LockoutType::User);
+    /// 把一条记录置成"已锁定"，模拟数据库那条 UPDATE 的结果。
+    ///
+    /// 计数与上锁的判据现在都在 SQL 里（`failed_attempts >= $max_attempts`），
+    /// 没法在纯 Rust 单测里覆盖，只能靠跑起来实测；这里测的是读回来之后
+    /// 应用侧对锁定状态的解释是否正确。
+    fn locked_record() -> AccountLockout {
         let config = LockoutConfig::default();
-        
-        // 记录几次失败尝试
-        for i in 1..config.max_attempts {
-            lockout.record_failed_attempt(&config);
-            assert_eq!(lockout.failed_attempts, i);
-            assert!(!lockout.is_locked());
-        }
-        
-        // 第5次失败尝试应该触发锁定
-        lockout.record_failed_attempt(&config);
-        assert_eq!(lockout.failed_attempts, config.max_attempts);
+        let mut lockout = AccountLockout::new("test_user".to_string(), LockoutType::User);
+        lockout.failed_attempts = config.max_attempts;
+        lockout.status = LockoutStatus::Locked;
+        lockout.locked_at = Some(Utc::now());
+        lockout.locked_until =
+            Some(Utc::now() + chrono::Duration::minutes(config.lockout_duration_minutes as i64));
+        lockout
+    }
+
+    #[test]
+    fn test_locked_record_is_reported_as_locked() {
+        let lockout = locked_record();
+
         assert!(lockout.is_locked());
+        assert!(!lockout.is_lock_expired());
+        assert_eq!(lockout.failed_attempts, LockoutConfig::default().max_attempts);
     }
 
     #[test]
     fn test_unlock_account() {
-        let mut lockout = AccountLockout::new("test_user".to_string(), LockoutType::User);
-        let config = LockoutConfig::default();
-        
-        // 触发锁定
-        for _ in 0..config.max_attempts {
-            lockout.record_failed_attempt(&config);
-        }
+        let mut lockout = locked_record();
         assert!(lockout.is_locked());
-        
-        // 解锁
+
         lockout.unlock_account();
         assert!(!lockout.is_locked());
         assert_eq!(lockout.failed_attempts, 0);
+        assert!(lockout.locked_until.is_none());
     }
 
     #[test]

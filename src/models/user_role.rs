@@ -32,14 +32,18 @@ pub struct RemoveRoleRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// 角色名从路径参数取（`/roles/:role_name/permissions/...`），
+/// 请求体只需要权限名。此前这里还有一个必填的 `role_name`，
+/// handler 从不使用它，却会让不传该字段的请求直接 422。
 pub struct AssignPermissionToRoleRequest {
-    pub role_name: String,
     pub permission_name: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+/// 角色名从路径参数取（`/roles/:role_name/permissions/...`），
+/// 请求体只需要权限名。此前这里还有一个必填的 `role_name`，
+/// handler 从不使用它，却会让不传该字段的请求直接 422。
 pub struct RemovePermissionFromRoleRequest {
-    pub role_name: String,
     pub permission_name: String,
 }
 

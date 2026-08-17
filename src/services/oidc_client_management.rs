@@ -2,16 +2,35 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rand::{distributions::Alphanumeric, Rng};
-use sha2::{Digest, Sha256};
 
 use crate::{
     models::oidc_client::{
-        OidcClient, CreateOidcClientRequest, OidcClientResponse, 
+        OidcClient, CreateOidcClientRequest, OidcClientResponse,
         ClientType, GrantType, ResponseType
     },
-    services::database::Database,
-    error::AuthError,
+    services::{
+        database::Database,
+        oidc::hash_client_secret,
+    },
 };
+
+/// ID Token 的生命周期上限（秒）。
+///
+/// P0-DECISION-10 DEC-10-01：Phase 0 用 RS256 ID Token 本地验签，
+/// OS 不回调 SoulAuth。代价是**令牌在有效期内无法吊销** ——
+/// 用户登出、账号停用都要等它自然过期。所以寿命就是可接受的吊销延迟，
+/// 裁定上限 300 秒（高安全部署建议 120）。
+///
+/// 这里是**硬上限**不是默认值：只改默认值挡不住管理员显式传一个 3600。
+pub const MAX_ID_TOKEN_LIFETIME_SECS: i64 = 300;
+
+/// 把 ID Token 寿命夹到上限内。非正数一律回落到上限。
+fn clamp_id_token_lifetime(requested: i64) -> i64 {
+    if requested <= 0 {
+        return MAX_ID_TOKEN_LIFETIME_SECS;
+    }
+    requested.min(MAX_ID_TOKEN_LIFETIME_SECS)
+}
 
 #[derive(Clone)]
 pub struct OidcClientService {
@@ -32,7 +51,7 @@ impl OidcClientService {
         // 生成客户端ID和密钥
         let client_id = generate_client_id();
         let client_secret = generate_client_secret();
-        let client_secret_hash = hash_client_secret(&client_secret);
+        let client_secret_hash = hash_client_secret(&client_secret)?;
 
         let now = Utc::now().timestamp();
 
@@ -56,7 +75,9 @@ impl OidcClientService {
             require_pkce: request.require_pkce.unwrap_or(true),
             access_token_lifetime: request.access_token_lifetime.unwrap_or(3600),
             refresh_token_lifetime: request.refresh_token_lifetime.unwrap_or(86400),
-            id_token_lifetime: request.id_token_lifetime.unwrap_or(3600),
+            id_token_lifetime: clamp_id_token_lifetime(
+                request.id_token_lifetime.unwrap_or(MAX_ID_TOKEN_LIFETIME_SECS),
+            ),
             is_active: true,
             created_by: created_by.to_string(),
             created_at: now,
@@ -88,16 +109,32 @@ impl OidcClientService {
     }
 
     // 获取客户端信息
+    /// 客户端记录里三个枚举字段（client_type / grant / response）写入时是
+    /// 纯字符串（见 `client_type_value` 等），因此读取必须走 serde。
+    /// 用 `take::<OidcClient>` 走 SurrealValue 解码会对不上 —— 这与
+    /// `LockoutType` 上实测到的 "no variants matched" 是同一类问题。
+    const CLIENT_PROJECTION: &'static str = "type::string(id) AS id, client_id, client_secret_hash, client_name, client_type, redirect_uris, post_logout_redirect_uris, allowed_scopes, allowed_grant_types, allowed_response_types, require_pkce, access_token_lifetime, refresh_token_lifetime, id_token_lifetime, is_active, type::string(created_by) AS created_by, created_at, updated_at";
+
     pub async fn get_client(&self, client_id: &str) -> Result<OidcClient> {
-        let query = "SELECT * FROM oidc_client WHERE client_id = $client_id AND is_active = true";
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("client_id", client_id.to_owned()))
+        let query = format!(
+            "SELECT {} FROM oidc_client WHERE client_id = $client_id AND is_active = true LIMIT 1",
+            Self::CLIENT_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "oidc_client_get",
+                &query,
+                serde_json::json!({ "client_id": client_id }),
+            )
             .await?;
 
-        let client: Option<OidcClient> = result.take(0)?;
-        client.ok_or_else(|| anyhow!("Client not found"))
+        rows.into_iter()
+            .next()
+            .map(serde_json::from_value::<OidcClient>)
+            .transpose()?
+            .ok_or_else(|| anyhow!("Client not found"))
     }
 
     // 获取客户端列表
@@ -109,16 +146,25 @@ impl OidcClientService {
         let limit = limit.unwrap_or(50);
         let offset = offset.unwrap_or(0);
 
-        let query = "SELECT * FROM oidc_client WHERE is_active = true LIMIT $limit START $offset";
-        
-        let mut result = self.db.client
-            .query(query)
-            .bind(("limit", limit))
-            .bind(("offset", offset))
+        let query = format!(
+            "SELECT {} FROM oidc_client WHERE is_active = true LIMIT $limit START $offset",
+            Self::CLIENT_PROJECTION
+        );
+
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec(
+                "oidc_client_list",
+                &query,
+                serde_json::json!({ "limit": limit, "offset": offset }),
+            )
             .await?;
 
-        let clients: Vec<OidcClient> = result.take(0)?;
-        
+        let clients = rows
+            .into_iter()
+            .map(serde_json::from_value::<OidcClient>)
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
         Ok(clients.into_iter().map(|client| OidcClientResponse {
             client_id: client.client_id,
             client_secret: "***".to_string(), // 不返回密钥
@@ -158,7 +204,9 @@ impl OidcClientService {
         client.require_pkce = request.require_pkce.unwrap_or(client.require_pkce);
         client.access_token_lifetime = request.access_token_lifetime.unwrap_or(client.access_token_lifetime);
         client.refresh_token_lifetime = request.refresh_token_lifetime.unwrap_or(client.refresh_token_lifetime);
-        client.id_token_lifetime = request.id_token_lifetime.unwrap_or(client.id_token_lifetime);
+        client.id_token_lifetime = clamp_id_token_lifetime(
+            request.id_token_lifetime.unwrap_or(client.id_token_lifetime),
+        );
         client.updated_at = Utc::now().timestamp();
 
         // 保存更新
@@ -186,12 +234,26 @@ impl OidcClientService {
 
     // 禁用客户端
     pub async fn disable_client(&self, client_id: &str) -> Result<()> {
-        let query = "UPDATE oidc_client SET is_active = false, updated_at = time::now() WHERE client_id = $client_id";
-        
-        self.db.client
+        // `updated_at` 是 `TYPE number`，不能写 `time::now()`（datetime）。
+        // 而且必须 .check()，否则语句级错误被吞：接口返回 204 但客户端根本没被禁用。
+        //
+        // `RETURN VALUE client_id` 是用来判断"有没有真的命中一行"的：WHERE 匹配不到
+        // 任何记录时 UPDATE 一样成功，不看返回行数的话，对一个根本不存在的
+        // client_id 调用也会返回 204，调用方以为禁用成功了。
+        let query = "UPDATE oidc_client SET is_active = false, updated_at = $updated_at \
+                     WHERE client_id = $client_id RETURN VALUE client_id";
+
+        let mut response = self.db.client
             .query(query)
             .bind(("client_id", client_id.to_owned()))
-            .await?;
+            .bind(("updated_at", Utc::now().timestamp()))
+            .await?
+            .check()?;
+
+        let updated: Vec<String> = response.take(0)?;
+        if updated.is_empty() {
+            return Err(anyhow!("Client not found"));
+        }
 
         Ok(())
     }
@@ -199,24 +261,30 @@ impl OidcClientService {
     // 重新生成客户端密钥
     pub async fn regenerate_client_secret(&self, client_id: &str) -> Result<String> {
         let client_secret = generate_client_secret();
-        let client_secret_hash = hash_client_secret(&client_secret);
+        let client_secret_hash = hash_client_secret(&client_secret)?;
 
-        let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = time::now() WHERE client_id = $client_id";
-        
-        self.db.client
+        // 同上。这里尤其要命：不 check 的话密钥轮换会静默失败 ——
+        // 调用方拿到新密钥并更新了自己的配置，服务端却还留着旧哈希，认证直接断。
+        //
+        // 同样要看返回行数：client_id 不存在时 UPDATE 也会"成功"，
+        // 调用方会拿到一个从未落库的新密钥，然后用它去改自己的配置。
+        let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = $updated_at \
+                     WHERE client_id = $client_id RETURN VALUE client_id";
+
+        let mut response = self.db.client
             .query(query)
             .bind(("hash", client_secret_hash))
             .bind(("client_id", client_id.to_owned()))
-            .await?;
+            .bind(("updated_at", Utc::now().timestamp()))
+            .await?
+            .check()?;
+
+        let updated: Vec<String> = response.take(0)?;
+        if updated.is_empty() {
+            return Err(anyhow!("Client not found"));
+        }
 
         Ok(client_secret)
-    }
-
-    // 验证客户端密钥
-    pub async fn verify_client_secret(&self, client_id: &str, client_secret: &str) -> Result<bool> {
-        let client = self.get_client(client_id).await?;
-        let provided_hash = hash_client_secret(client_secret);
-        Ok(provided_hash == client.client_secret_hash)
     }
 
     // 私有方法：保存客户端到数据库
@@ -262,7 +330,10 @@ impl OidcClientService {
             .bind(("created_by", client.created_by.clone()))
             .bind(("created_at", client.created_at))
             .bind(("updated_at", client.updated_at))
-            .await?;
+            .await?
+            // `query().await` 只代表请求送到了，语句本身的错误藏在 Response 里。
+            // 不 check 的话，写失败也会一路返回 Ok —— 管理员看到"已保存"，库里没变。
+            .check()?;
 
         Ok(())
     }
@@ -301,7 +372,10 @@ impl OidcClientService {
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
             .bind(("id_token_lifetime", client.id_token_lifetime))
             .bind(("updated_at", client.updated_at))
-            .await?;
+            .await?
+            // `query().await` 只代表请求送到了，语句本身的错误藏在 Response 里。
+            // 不 check 的话，写失败也会一路返回 Ok —— 管理员看到"已保存"，库里没变。
+            .check()?;
 
         Ok(())
     }
@@ -324,10 +398,6 @@ fn generate_client_secret() -> String {
         .take(64)
         .map(char::from)
         .collect()
-}
-
-fn hash_client_secret(secret: &str) -> String {
-    format!("{:x}", Sha256::digest(secret.as_bytes()))
 }
 
 fn client_type_value(value: &ClientType) -> &'static str {

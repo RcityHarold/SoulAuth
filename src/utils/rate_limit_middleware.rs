@@ -1,139 +1,144 @@
 use axum::{
-    extract::ConnectInfo,
-    http::{HeaderMap, StatusCode, Request},
+    extract::{ConnectInfo, MatchedPath},
+    http::{HeaderMap, Request, StatusCode},
     middleware::Next,
-    response::Response,
-    Json,
+    response::{IntoResponse, Response},
+    Extension, Json,
 };
 use serde_json::json;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::warn;
 
-use crate::services::rate_limiter::RateLimiter;
+use crate::{
+    config::Config,
+    models::user_activity::{ActivityCategory, ActivityStatus},
+    services::{
+        audit_logger::{actions, AuditEvent, AuditLogger},
+        rate_limiter::RateLimitDecision,
+    },
+    AppState,
+};
 
-/// 简单的速率限制中间件
-pub async fn rate_limit_middleware(
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    req: Request<axum::body::Body>,
-    next: Next<axum::body::Body>,
-) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
-    // 从请求扩展中获取速率限制器 (将在路由层添加)
-    // 这里先实现一个简单的版本，后续优化
-    let client_id = get_client_identifier(&addr, &headers);
-    let endpoint = req.uri().path().to_string();
-    
-    // 临时创建一个速率限制器用于测试
-    // 在实际使用中，这应该从应用状态中获取
-    let limiter = RateLimiter::new();
-    
-    match limiter.check_rate_limit(&client_id, &endpoint).await {
-        Ok(true) => {
-            let response = next.run(req).await;
-            let remaining = limiter.get_remaining_requests(&client_id, &endpoint).await;
-            
-            let mut response = response;
-            let headers = response.headers_mut();
-            headers.insert("X-RateLimit-Remaining", remaining.to_string().parse().unwrap());
-            
-            Ok(response)
+/// 解析客户端 IP。
+///
+/// `trust_proxy_headers` 为 false（默认）时**只**采用 TCP 连接地址：否则任何客户端
+/// 都能通过伪造 `X-Forwarded-For` 绕开限流和 IP 维度的账号锁定。只有当服务确实
+/// 部署在受控反向代理之后时才应打开该开关。
+pub fn client_ip(addr: &SocketAddr, headers: &HeaderMap, trust_proxy_headers: bool) -> String {
+    if trust_proxy_headers {
+        if let Some(forwarded_for) = headers.get("X-Forwarded-For") {
+            if let Ok(forwarded_str) = forwarded_for.to_str() {
+                if let Some(ip) = forwarded_str.split(',').next() {
+                    let ip = ip.trim();
+                    if !ip.is_empty() {
+                        return ip.to_string();
+                    }
+                }
+            }
         }
-        Ok(false) => {
-            warn!("Rate limit exceeded for client: {}, endpoint: {}", client_id, endpoint);
-            
-            Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": "Rate limit exceeded",
-                    "message": "Too many requests. Please try again later.",
-                    "code": "RATE_LIMIT_EXCEEDED"
-                })),
-            ))
-        }
-        Err(e) => {
-            warn!("Rate limiter error: {}", e);
-            Ok(next.run(req).await)
-        }
-    }
-}
 
-/// 获取客户端标识符
-fn get_client_identifier(addr: &SocketAddr, headers: &HeaderMap) -> String {
-    // 尝试从头部获取真实IP
-    if let Some(forwarded_for) = headers.get("X-Forwarded-For") {
-        if let Ok(forwarded_str) = forwarded_for.to_str() {
-            // 取第一个IP地址
-            if let Some(ip) = forwarded_str.split(',').next() {
-                return ip.trim().to_string();
+        if let Some(real_ip) = headers.get("X-Real-IP") {
+            if let Ok(ip_str) = real_ip.to_str() {
+                let ip_str = ip_str.trim();
+                if !ip_str.is_empty() {
+                    return ip_str.to_string();
+                }
             }
         }
     }
 
-    if let Some(real_ip) = headers.get("X-Real-IP") {
-        if let Ok(ip_str) = real_ip.to_str() {
-            return ip_str.to_string();
-        }
-    }
-
-    // 回退到连接地址
     addr.ip().to_string()
 }
 
-/// 速率限制检查辅助函数
-/// 这个函数可以在路由处理器中直接调用来实现速率限制
-pub async fn check_rate_limit_for_request(
-    limiter: &RateLimiter,
-    client_ip: &str,
-    endpoint: &str,
-) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
-    match limiter.check_rate_limit(client_ip, endpoint).await {
-        Ok(true) => Ok(()),
-        Ok(false) => {
-            warn!("Rate limit exceeded for client: {}, endpoint: {}", client_ip, endpoint);
-            Err((
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(json!({
-                    "error": "Rate limit exceeded",
-                    "message": "Too many requests. Please try again later.",
-                    "code": "RATE_LIMIT_EXCEEDED"
-                })),
-            ))
+/// 限流桶要用的端点标识：优先取**路由模板**，拿不到才退回原始路径。
+///
+/// 用原始路径当键是有实际后果的：计数桶按 (IP, 端点) 建，
+/// `/api/auth/verify-email/<token>` 每换一个 token 就是一个全新的桶，等于该端点
+/// 完全没有限流——正好是最需要限流的猜令牌场景。同时攻击者能用无限多个不同路径
+/// 把记录表撑爆（清理任务一小时才跑一次）。取 `/api/auth/verify-email/:token`
+/// 这样的模板后，同一路由的所有请求共用一个桶。
+///
+/// 拿得到 `MatchedPath` 的前提是本中间件挂在 `route_layer` 上（路由匹配之后执行）；
+/// 若将来改回 `layer`，这里会静默退回旧行为，所以两边必须一起改。
+fn rate_limit_endpoint<B>(req: &Request<B>) -> String {
+    req.extensions()
+        .get::<MatchedPath>()
+        .map(|matched| matched.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string())
+}
+
+/// 全局限流中间件。
+///
+/// 以前限流只在少数几个 handler 里手动调用，其余端点完全没有保护；现在统一挂在
+/// 路由外层，按请求路径套用对应规则。
+///
+/// 注意：计数器保存在单进程内存里，多副本部署时每个副本各算各的。需要跨副本
+/// 限流请把 `RateLimiter` 换成共享存储实现。
+pub async fn rate_limit_layer<B>(
+    Extension(app_state): Extension<Arc<AppState>>,
+    Extension(audit): Extension<Arc<AuditLogger>>,
+    Extension(config): Extension<Config>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    req: Request<B>,
+    next: Next<B>,
+) -> Response {
+    let ip = client_ip(&addr, &headers, config.trust_proxy_headers);
+    let endpoint = rate_limit_endpoint(&req);
+
+    match app_state
+        .rate_limiter
+        .check_rate_limit_verbose(&ip, &endpoint)
+        .await
+    {
+        Ok(RateLimitDecision::Allowed) => next.run(req).await,
+        Ok(decision) => {
+            // 只在阻塞被触发的那一刻记审计。以前每个被拒的请求都写一条：返回 429
+            // 很便宜，但每条 429 都换来一次数据库写入，洪水打过来时限流器自己就是
+            // 放大器。阻塞期内的后续请求直接丢弃，信息量也没有损失 —— 触发那一条
+            // 已经记下了 IP、端点和时间。
+            if decision == RateLimitDecision::JustBlocked {
+                let user_agent = headers
+                    .get(axum::http::header::USER_AGENT)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("Unknown")
+                    .chars()
+                    .take(256)
+                    .collect::<String>();
+
+                audit.record(
+                    AuditEvent::new(
+                        actions::RATE_LIMIT_VIOLATION,
+                        ActivityCategory::Security,
+                        ActivityStatus::Warning,
+                        ip.clone(),
+                        user_agent,
+                    )
+                    .with_details(serde_json::json!({ "endpoint": endpoint })),
+                );
+            }
+
+            rate_limited_response(&ip, &endpoint)
         }
         Err(e) => {
-            warn!("Rate limiter error: {}", e);
-            Ok(()) // 发生错误时允许请求继续
+            // 限流器自身故障不应导致全站不可用。
+            warn!("Rate limiter error on {}: {}", endpoint, e);
+            next.run(req).await
         }
     }
 }
 
-/// 从JWT token中提取用户ID (可选功能)
-fn extract_user_id_from_token(headers: &HeaderMap) -> Option<String> {
-    let auth_header = headers.get("Authorization")?;
-    let auth_str = auth_header.to_str().ok()?;
-    
-    if !auth_str.starts_with("Bearer ") {
-        return None;
-    }
-    
-    let token = &auth_str[7..];
-    
-    use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
-    use serde::{Deserialize, Serialize};
-    
-    #[derive(Debug, Serialize, Deserialize)]
-    struct Claims {
-        sub: String,
-        exp: usize,
-    }
-    
-    let secret = std::env::var("JWT_SECRET").unwrap_or_else(|_| "default_secret".to_string());
-    let key = DecodingKey::from_secret(secret.as_ref());
-    let validation = Validation::new(Algorithm::HS256);
-    
-    match decode::<Claims>(token, &key, &validation) {
-        Ok(token_data) => Some(token_data.claims.sub),
-        Err(_) => None,
-    }
+fn rate_limited_response(ip: &str, endpoint: &str) -> Response {
+    warn!("Rate limit exceeded for client: {}, endpoint: {}", ip, endpoint);
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(json!({
+            "error": "Rate limit exceeded",
+            "message": "Too many requests. Please try again later.",
+            "code": "RATE_LIMIT_EXCEEDED"
+        })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -141,32 +146,34 @@ mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr};
 
+    fn addr() -> SocketAddr {
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7)), 8080)
+    }
+
     #[test]
-    fn test_get_client_identifier_from_forwarded_for() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+    fn ignores_forwarded_headers_when_proxy_is_not_trusted() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Forwarded-For", "192.168.1.1, 10.0.0.1".parse().unwrap());
-        
-        let client_id = get_client_identifier(&addr, &headers);
-        assert_eq!(client_id, "192.168.1.1");
+        headers.insert("X-Real-IP", "192.168.1.100".parse().unwrap());
+
+        assert_eq!(client_ip(&addr(), &headers, false), "203.0.113.7");
     }
 
     #[test]
-    fn test_get_client_identifier_from_real_ip() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8080);
+    fn uses_first_forwarded_hop_when_proxy_is_trusted() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Forwarded-For", "192.168.1.1, 10.0.0.1".parse().unwrap());
+
+        assert_eq!(client_ip(&addr(), &headers, true), "192.168.1.1");
+    }
+
+    #[test]
+    fn falls_back_to_real_ip_then_socket_addr() {
         let mut headers = HeaderMap::new();
         headers.insert("X-Real-IP", "192.168.1.100".parse().unwrap());
-        
-        let client_id = get_client_identifier(&addr, &headers);
-        assert_eq!(client_id, "192.168.1.100");
-    }
+        assert_eq!(client_ip(&addr(), &headers, true), "192.168.1.100");
 
-    #[test]
-    fn test_get_client_identifier_fallback() {
-        let addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), 8080);
-        let headers = HeaderMap::new();
-        
-        let client_id = get_client_identifier(&addr, &headers);
-        assert_eq!(client_id, "192.168.1.50");
+        let empty = HeaderMap::new();
+        assert_eq!(client_ip(&addr(), &empty, true), "203.0.113.7");
     }
 }

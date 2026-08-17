@@ -2,14 +2,14 @@ use anyhow::Result;
 use chrono::Utc;
 use std::sync::Arc;
 use serde_json::json;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use surrealdb_types::SurrealValue;
 
 use crate::{
     error::AuthError,
     models::{
         role::{Role, CreateRoleRequest, UpdateRoleRequest, RoleResponse},
-        permission::{Permission, CreatePermissionRequest, UpdatePermissionRequest, PermissionResponse},
+        permission::{Permission, CreatePermissionRequest, PermissionResponse},
         user_role::{UserRole, RolePermission, UserRoleResponse, RoleWithPermissions},
         user::User,
     },
@@ -48,6 +48,7 @@ impl RBACService {
             .query(query)
             .bind(("role", role.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -74,26 +75,9 @@ impl RBACService {
             .query(query)
             .bind(("name", name.to_owned()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role by name: {}", e);
-                AuthError::DatabaseError(e.to_string())
-            })?;
-
-        let roles: Vec<Role> = response.take(0).map_err(|e| {
-            error!("Failed to parse role: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
-
-        Ok(roles.into_iter().next())
-    }
-
-    pub async fn get_role_by_id(&self, role_id: &str) -> Result<Option<Role>, AuthError> {
-        let query = format!("SELECT * FROM role:{}", role_id);
-        let mut response = self.db.client
-            .query(&query)
-            .await
-            .map_err(|e| {
-                error!("Failed to get role by id: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
@@ -115,25 +99,31 @@ impl RBACService {
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
 
-        let mut updates = Vec::new();
-        if let Some(display_name) = &request.display_name {
-            updates.push(format!("display_name = '{}'", display_name));
-        }
-        if let Some(description) = &request.description {
-            updates.push(format!("description = '{}'", description));
-        }
-        updates.push(format!("updated_at = {}", Utc::now().timestamp()));
-
-        if updates.is_empty() {
+        if request.display_name.is_none() && request.description.is_none() {
             return Err(AuthError::ValidationError("No fields to update".to_string()));
         }
 
+        // 全部走绑定参数：以前这里把 display_name / description 直接内插进 SurrealQL，
+        // 任何带引号的输入都能改写整条语句。
         let role_key = crate::utils::record_id::record_id_key_to_string(&role_id);
-        let query = format!("UPDATE role:{} SET {}", role_key, updates.join(", "));
+        let query = r#"
+            UPDATE type::record('role', $role_key) SET
+                display_name = $display_name ?? display_name,
+                description = $description ?? description,
+                updated_at = $updated_at
+        "#;
         let mut response = self
             .db
-            .client
-            .query(&query)
+            .raw_query(
+                "rbac_update_role",
+                query,
+                json!({
+                    "role_key": role_key,
+                    "display_name": request.display_name,
+                    "description": request.description,
+                    "updated_at": Utc::now().timestamp(),
+                }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to update role: {}", e);
@@ -169,6 +159,7 @@ impl RBACService {
             .query(user_count_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check role usage: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -193,6 +184,7 @@ impl RBACService {
             .query(delete_permissions_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to delete role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -200,9 +192,12 @@ impl RBACService {
 
         // 删除角色
         let role_key = crate::utils::record_id::record_id_key_to_string(&role_id);
-        let delete_query = format!("DELETE role:{}", role_key);
-        self.db.client
-            .query(&delete_query)
+        self.db
+            .raw_query(
+                "rbac_delete_role",
+                "DELETE type::record('role', $role_key)",
+                json!({ "role_key": role_key }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to delete role: {}", e);
@@ -214,15 +209,18 @@ impl RBACService {
     }
 
     pub async fn list_roles(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<RoleResponse>, AuthError> {
-        let page = page.unwrap_or(1);
-        let limit = limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
+        let page = page.unwrap_or(1).max(1);
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
-        let query = format!("SELECT * FROM role ORDER BY created_at DESC LIMIT {} START {}", limit, offset);
         let mut response = self
             .db
-            .client
-            .query(&query)
+            .raw_query(
+                "rbac_list_roles",
+                "SELECT * FROM role ORDER BY created_at DESC LIMIT $limit START $offset",
+                json!({ "limit": limit, "offset": offset }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to list roles: {}", e);
@@ -262,6 +260,7 @@ impl RBACService {
             .query(query)
             .bind(("permission", permission.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create permission: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -286,6 +285,7 @@ impl RBACService {
             .query(query)
             .bind(("name", name.to_owned()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get permission by name: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -300,13 +300,18 @@ impl RBACService {
     }
 
     pub async fn list_permissions(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<PermissionResponse>, AuthError> {
-        let page = page.unwrap_or(1);
-        let limit = limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
+        let page = page.unwrap_or(1).max(1);
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
-        let query = format!("SELECT * FROM permission ORDER BY resource, action LIMIT {} START {}", limit, offset);
-        let mut response = self.db.client
-            .query(&query)
+        let mut response = self
+            .db
+            .raw_query(
+                "rbac_list_permissions",
+                "SELECT * FROM permission ORDER BY resource, action LIMIT $limit START $offset",
+                json!({ "limit": limit, "offset": offset }),
+            )
             .await
             .map_err(|e| {
                 error!("Failed to list permissions: {}", e);
@@ -328,7 +333,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = surrealdb::types::RecordId::new("user", user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
         let assigned_by_thing = assigned_by.id.as_ref()
             .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
 
@@ -339,6 +344,7 @@ impl RBACService {
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -366,6 +372,7 @@ impl RBACService {
             .query(query)
             .bind(("user_role", user_role.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to assign role to user: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -389,7 +396,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = surrealdb::types::RecordId::new("user", user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id);
 
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         self.db.client
@@ -397,6 +404,7 @@ impl RBACService {
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to remove role from user: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -413,20 +421,22 @@ impl RBACService {
             assigned_at: Option<i64>,
         }
 
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
+        let user_id = crate::utils::record_id::normalize_user_id(user_id);
 
+        // 直接比较 record，不再拼字符串。此前这里只列了 `user:⟨id⟩` 和 `user:id`
+        // 两种形式，而 `type::string(user_id)` 实际产出的是带反引号的
+        // `` user:`id` `` —— 两种都匹配不上，导致「查用户角色」永远返回空。
         let query = r#"
             SELECT string::replace(type::string(role_id), 'role:', '') as role_id, assigned_at
             FROM user_role
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain]
+            WHERE user_id = type::record('user', $user_key)
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
+            .bind(("user_key", user_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user roles: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -469,6 +479,7 @@ impl RBACService {
             .query(role_query)
             .bind(("role_ids", role_ids))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get roles: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -515,6 +526,7 @@ impl RBACService {
             .query(ids_query)
             .bind(("role_id", role_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -534,6 +546,7 @@ impl RBACService {
             .query(names_query)
             .bind(("permission_ids", permission_ids))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get role permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -572,6 +585,7 @@ impl RBACService {
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check role permission: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -599,6 +613,7 @@ impl RBACService {
             .query(query)
             .bind(("role_permission", role_permission.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to assign permission to role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -633,6 +648,7 @@ impl RBACService {
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to remove permission from role: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -644,9 +660,7 @@ impl RBACService {
 
     // 权限检查
     pub async fn check_user_permission(&self, user_id: &str, permission_name: &str) -> Result<bool, AuthError> {
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
+        let user_id = crate::utils::record_id::normalize_user_id(user_id);
         
         let query = r#"
             SELECT count() as count
@@ -654,7 +668,7 @@ impl RBACService {
             WHERE role_id IN (
                 SELECT VALUE role_id
                 FROM user_role
-                WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+                WHERE user_id = type::record('user', $user_key)
             )
               AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
@@ -665,9 +679,7 @@ impl RBACService {
                 "check_user_permission",
                 query,
                 json!({
-                    "user_id_bracketed": user_id_bracketed,
-                    "user_id_plain": user_id_plain,
-                    "user_id_quoted": user_id_quoted,
+                    "user_key": user_id,
                     "permission_name": permission_name,
                 }),
             )
@@ -694,14 +706,12 @@ impl RBACService {
     }
 
     pub async fn check_user_role(&self, user_id: &str, role_name: &str) -> Result<bool, AuthError> {
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
+        let user_id = crate::utils::record_id::normalize_user_id(user_id);
         
         let query = r#"
             SELECT count() as count
             FROM user_role
-            WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+            WHERE user_id = type::record('user', $user_key)
               AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
@@ -711,9 +721,7 @@ impl RBACService {
                 "check_user_role",
                 query,
                 json!({
-                    "user_id_bracketed": user_id_bracketed,
-                    "user_id_plain": user_id_plain,
-                    "user_id_quoted": user_id_quoted,
+                    "user_key": user_id,
                     "role_name": role_name,
                 }),
             )
@@ -740,9 +748,7 @@ impl RBACService {
     }
 
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AuthError> {
-        let user_id_bracketed = format!("user:⟨{}⟩", user_id);
-        let user_id_plain = format!("user:{}", user_id);
-        let user_id_quoted = format!("user:`{}`", user_id);
+        let user_id = crate::utils::record_id::normalize_user_id(user_id);
         
         let query = r#"
             SELECT name
@@ -752,17 +758,16 @@ impl RBACService {
                 WHERE role_id IN (
                     SELECT VALUE role_id
                     FROM user_role
-                    WHERE type::string(user_id) IN [$user_id_bracketed, $user_id_plain, $user_id_quoted]
+                    WHERE user_id = type::record('user', $user_key)
                 )
             )
         "#;
 
         let mut response = self.db.client
             .query(query)
-            .bind(("user_id_bracketed", user_id_bracketed))
-            .bind(("user_id_plain", user_id_plain))
-            .bind(("user_id_quoted", user_id_quoted))
+            .bind(("user_key", user_id))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user permissions: {}", e);
                 AuthError::DatabaseError(e.to_string())

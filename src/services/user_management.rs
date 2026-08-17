@@ -7,12 +7,20 @@ use tracing::{error, info};
 use crate::{
     error::AuthError,
     models::{
-        user::{User, AccountStatus, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse, UpdateMembershipRequest},
+        user::{User, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse, UpdateMembershipRequest},
         user_profile::{UserProfile, CreateUserProfileRequest, UpdateUserProfileRequest, UserProfileResponse},
         user_preferences::{UserPreferences, CreateUserPreferencesRequest, UpdateUserPreferencesRequest, UserPreferencesResponse},
-        user_activity::{UserActivity, ActivityCategory, ActivityStatus, UserActivityResponse, ActivityLogRequest, ActivityLogResponse},
+        user_activity::{
+            ActivityCategory, ActivityLogRequest, ActivityLogResponse, ActivityStatus,
+            UserActivityResponse, UserActivityRow,
+        },
     },
-    services::{database::Database, rbac::RBACService},
+    services::{
+        audit_logger::{AuditEvent, AuditLogger},
+        auth::RequestContext,
+        database::Database,
+        rbac::RBACService,
+    },
 };
 
 pub struct UserManagementService {
@@ -32,7 +40,12 @@ impl UserManagementService {
     }
 
     // 用户档案管理
-    pub async fn create_user_profile(&self, user_id: &str, request: CreateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
+    pub async fn create_user_profile(
+        &self,
+        user_id: &str,
+        request: CreateUserProfileRequest,
+        ctx: &RequestContext,
+    ) -> Result<UserProfileResponse, AuthError> {
         let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查用户是否存在
@@ -40,6 +53,7 @@ impl UserManagementService {
             .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -60,7 +74,7 @@ impl UserManagementService {
             return Err(AuthError::ValidationError("User profile already exists".to_string()));
         }
 
-        let now = Utc::now();
+        let now = Utc::now().timestamp();
         let profile = UserProfile {
             id: None,
             user_id: user_thing,
@@ -84,6 +98,7 @@ impl UserManagementService {
             .query(query)
             .bind(("profile", profile.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create user profile: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -104,8 +119,8 @@ impl UserManagementService {
             "profile_created",
             ActivityCategory::Profile,
             ActivityStatus::Success,
-            "127.0.0.1",
-            "System",
+            &ctx.ip_address,
+            &ctx.user_agent,
             serde_json::json!({"action": "profile_created"}),
         ).await?;
 
@@ -121,6 +136,7 @@ impl UserManagementService {
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user profile: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -136,54 +152,60 @@ impl UserManagementService {
             .ok_or_else(|| AuthError::NotFound("User profile not found".to_string()))
     }
 
-    pub async fn update_user_profile(&self, user_id: &str, request: UpdateUserProfileRequest) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+    pub async fn update_user_profile(
+        &self,
+        user_id: &str,
+        request: UpdateUserProfileRequest,
+        ctx: &RequestContext,
+    ) -> Result<UserProfileResponse, AuthError> {
+        // 档案不存在时先报 404，而不是让 UPDATE 静默命中 0 行。
+        self.get_user_profile(user_id).await?;
         
-        // 获取现有档案
-        let existing_profile = self.get_user_profile(user_id).await?;
-        
-        let mut updates = Vec::new();
-        if let Some(first_name) = &request.first_name {
-            updates.push(format!("first_name = '{}'", first_name));
-        }
-        if let Some(last_name) = &request.last_name {
-            updates.push(format!("last_name = '{}'", last_name));
-        }
-        if let Some(display_name) = &request.display_name {
-            updates.push(format!("display_name = '{}'", display_name));
-        }
-        if let Some(phone) = &request.phone {
-            updates.push(format!("phone = '{}'", phone));
-        }
-        if let Some(timezone) = &request.timezone {
-            updates.push(format!("timezone = '{}'", timezone));
-        }
-        if let Some(locale) = &request.locale {
-            updates.push(format!("locale = '{}'", locale));
-        }
-        if let Some(bio) = &request.bio {
-            updates.push(format!("bio = '{}'", bio));
-        }
-        if let Some(website) = &request.website {
-            updates.push(format!("website = '{}'", website));
-        }
-        if let Some(location) = &request.location {
-            updates.push(format!("location = '{}'", location));
-        }
-        updates.push(format!("updated_at = {}", Utc::now().timestamp()));
+        // 全部走绑定参数。以前这里把 bio / website / display_name 等用户可控字段
+        // 直接内插进 SurrealQL，一个单引号就能改写整条语句。
+        // `$x ?? field` 表示"传了就更新，没传就保持原值"。
+        let query = r#"
+            UPDATE user_profile SET
+                first_name = $first_name ?? first_name,
+                last_name = $last_name ?? last_name,
+                display_name = $display_name ?? display_name,
+                phone = $phone ?? phone,
+                -- `date_of_birth` 是 datetime 列，不能用上面那种 `$x ?? field`：
+                -- JSON 绑定给过来的是 RFC3339 字符串，直接赋值会因类型不符被拒。
+                -- 这个字段以前**根本没写进 UPDATE**：请求结构体里有、响应里也返回，
+                -- 客户端原样回传能拿到 200，值却从来不变——静默丢数据。
+                date_of_birth = IF $date_of_birth = NONE OR $date_of_birth = NULL {
+                    date_of_birth
+                } ELSE {
+                    type::datetime($date_of_birth)
+                },
+                timezone = $timezone ?? timezone,
+                locale = $locale ?? locale,
+                bio = $bio ?? bio,
+                website = $website ?? website,
+                location = $location ?? location,
+                updated_at = $updated_at
+            WHERE user_id = type::record('user', $user_key)
+        "#;
 
-        if updates.is_empty() {
-            return Err(AuthError::ValidationError("No fields to update".to_string()));
-        }
+        let bindings = serde_json::json!({
+            "user_key": crate::utils::record_id::normalize_user_id(user_id),
+            "first_name": request.first_name,
+            "last_name": request.last_name,
+            "display_name": request.display_name,
+            "phone": request.phone,
+            "date_of_birth": request.date_of_birth,
+            "timezone": request.timezone,
+            "locale": request.locale,
+            "bio": request.bio,
+            "website": request.website,
+            "location": request.location,
+            "updated_at": Utc::now().timestamp(),
+        });
 
-        let query = format!(
-            "UPDATE user_profile SET {} WHERE user_id = $user_id",
-            updates.join(", ")
-        );
-        
-        let mut response = self.db.client
-            .query(&query)
-            .bind(("user_id", user_thing.clone()))
+        let mut response = self
+            .db
+            .raw_query("update_user_profile", query, bindings)
             .await
             .map_err(|e| {
                 error!("Failed to update user profile: {}", e);
@@ -205,9 +227,9 @@ impl UserManagementService {
             "profile_updated",
             ActivityCategory::Profile,
             ActivityStatus::Success,
-            "127.0.0.1",
-            "System",
-            serde_json::json!({"action": "profile_updated", "fields": updates}),
+            &ctx.ip_address,
+            &ctx.user_agent,
+            serde_json::json!({"action": "profile_updated"}),
         ).await?;
 
         info!("User profile updated for user '{}'", user_id);
@@ -215,7 +237,12 @@ impl UserManagementService {
     }
 
     // 用户偏好管理
-    pub async fn create_user_preferences(&self, user_id: &str, request: CreateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
+    pub async fn create_user_preferences(
+        &self,
+        user_id: &str,
+        request: CreateUserPreferencesRequest,
+        ctx: &RequestContext,
+    ) -> Result<UserPreferencesResponse, AuthError> {
         let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查偏好是否已存在
@@ -269,6 +296,7 @@ impl UserManagementService {
             .query(query)
             .bind(("preferences", preferences.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to create user preferences: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -289,8 +317,8 @@ impl UserManagementService {
             "preferences_created",
             ActivityCategory::Profile,
             ActivityStatus::Success,
-            "127.0.0.1",
-            "System",
+            &ctx.ip_address,
+            &ctx.user_agent,
             serde_json::json!({"action": "preferences_created"}),
         ).await?;
 
@@ -306,6 +334,7 @@ impl UserManagementService {
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to get user preferences: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -321,63 +350,54 @@ impl UserManagementService {
             .ok_or_else(|| AuthError::NotFound("User preferences not found".to_string()))
     }
 
-    pub async fn update_user_preferences(&self, user_id: &str, request: UpdateUserPreferencesRequest) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+    pub async fn update_user_preferences(
+        &self,
+        user_id: &str,
+        request: UpdateUserPreferencesRequest,
+        ctx: &RequestContext,
+    ) -> Result<UserPreferencesResponse, AuthError> {
+        // 偏好不存在时先报 404。
+        self.get_user_preferences(user_id).await?;
         
-        // 获取现有偏好
-        let _existing_prefs = self.get_user_preferences(user_id).await?;
-        
-        let mut updates = Vec::new();
-        if let Some(theme) = &request.theme {
-            updates.push(format!("theme = '{}'", theme));
-        }
-        if let Some(language) = &request.language {
-            updates.push(format!("language = '{}'", language));
-        }
-        if let Some(email_notifications) = request.email_notifications {
-            updates.push(format!("email_notifications = {}", email_notifications));
-        }
-        if let Some(sms_notifications) = request.sms_notifications {
-            updates.push(format!("sms_notifications = {}", sms_notifications));
-        }
-        if let Some(marketing_emails) = request.marketing_emails {
-            updates.push(format!("marketing_emails = {}", marketing_emails));
-        }
-        if let Some(security_emails) = request.security_emails {
-            updates.push(format!("security_emails = {}", security_emails));
-        }
-        if let Some(newsletter) = request.newsletter {
-            updates.push(format!("newsletter = {}", newsletter));
-        }
-        if let Some(two_factor_required) = request.two_factor_required {
-            updates.push(format!("two_factor_required = {}", two_factor_required));
-        }
-        if let Some(session_timeout) = request.session_timeout {
-            updates.push(format!("session_timeout = {}", session_timeout));
-        }
-        if let Some(timezone) = &request.timezone {
-            updates.push(format!("timezone = '{}'", timezone));
-        }
-        if let Some(date_format) = &request.date_format {
-            updates.push(format!("date_format = '{}'", date_format));
-        }
-        if let Some(time_format) = &request.time_format {
-            updates.push(format!("time_format = '{}'", time_format));
-        }
-        updates.push(format!("updated_at = {}", Utc::now().timestamp()));
+        // 同上：改为全绑定参数。
+        let query = r#"
+            UPDATE user_preferences SET
+                theme = $theme ?? theme,
+                language = $language ?? language,
+                email_notifications = $email_notifications ?? email_notifications,
+                sms_notifications = $sms_notifications ?? sms_notifications,
+                marketing_emails = $marketing_emails ?? marketing_emails,
+                security_emails = $security_emails ?? security_emails,
+                newsletter = $newsletter ?? newsletter,
+                two_factor_required = $two_factor_required ?? two_factor_required,
+                session_timeout = $session_timeout ?? session_timeout,
+                timezone = $timezone ?? timezone,
+                date_format = $date_format ?? date_format,
+                time_format = $time_format ?? time_format,
+                updated_at = $updated_at
+            WHERE user_id = type::record('user', $user_key)
+        "#;
 
-        if updates.is_empty() {
-            return Err(AuthError::ValidationError("No fields to update".to_string()));
-        }
+        let bindings = serde_json::json!({
+            "user_key": crate::utils::record_id::normalize_user_id(user_id),
+            "theme": request.theme,
+            "language": request.language,
+            "email_notifications": request.email_notifications,
+            "sms_notifications": request.sms_notifications,
+            "marketing_emails": request.marketing_emails,
+            "security_emails": request.security_emails,
+            "newsletter": request.newsletter,
+            "two_factor_required": request.two_factor_required,
+            "session_timeout": request.session_timeout,
+            "timezone": request.timezone,
+            "date_format": request.date_format,
+            "time_format": request.time_format,
+            "updated_at": Utc::now().timestamp(),
+        });
 
-        let query = format!(
-            "UPDATE user_preferences SET {} WHERE user_id = $user_id",
-            updates.join(", ")
-        );
-        
-        let mut response = self.db.client
-            .query(&query)
-            .bind(("user_id", user_thing.clone()))
+        let mut response = self
+            .db
+            .raw_query("update_user_preferences", query, bindings)
             .await
             .map_err(|e| {
                 error!("Failed to update user preferences: {}", e);
@@ -399,9 +419,9 @@ impl UserManagementService {
             "preferences_updated",
             ActivityCategory::Profile,
             ActivityStatus::Success,
-            "127.0.0.1",
-            "System",
-            serde_json::json!({"action": "preferences_updated", "fields": updates}),
+            &ctx.ip_address,
+            &ctx.user_agent,
+            serde_json::json!({"action": "preferences_updated"}),
         ).await?;
 
         info!("User preferences updated for user '{}'", user_id);
@@ -409,7 +429,13 @@ impl UserManagementService {
     }
 
     // 账户状态管理
-    pub async fn update_account_status(&self, user_id: &str, request: UpdateAccountStatusRequest, updated_by: &User) -> Result<AccountStatusResponse, AuthError> {
+    pub async fn update_account_status(
+        &self,
+        user_id: &str,
+        request: UpdateAccountStatusRequest,
+        updated_by: &User,
+        ctx: &RequestContext,
+    ) -> Result<AccountStatusResponse, AuthError> {
         let user_thing = crate::utils::record_id::user_record_id(user_id);
         
         // 检查用户是否存在
@@ -417,6 +443,7 @@ impl UserManagementService {
             .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to check user existence: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -439,6 +466,7 @@ impl UserManagementService {
             .bind(("updated_at", now.timestamp()))
             .bind(("user_id", user_thing.clone()))
             .await
+            .and_then(|response| response.check())
             .map_err(|e| {
                 error!("Failed to update account status: {}", e);
                 AuthError::DatabaseError(e.to_string())
@@ -450,8 +478,8 @@ impl UserManagementService {
             "account_status_changed",
             ActivityCategory::Security,
             ActivityStatus::Success,
-            "127.0.0.1",
-            "System",
+            &ctx.ip_address,
+            &ctx.user_agent,
             serde_json::json!({
                 "action": "account_status_changed",
                 "old_status": users[0].account_status,
@@ -472,131 +500,146 @@ impl UserManagementService {
     }
 
     // 用户活动日志
+    /// 记录一条用户活动。
+    ///
+    /// 直接复用 `AuditLogger` 的写入路径，**不再自己拼一套**。以前这里用
+    /// `.bind(("activity", ...))` 走 SurrealValue 编码，而 `audit_logger`
+    /// 走 serde（枚举存成纯字符串），同一张 `user_activity` 表上出现了两种
+    /// 互不兼容的编码：读取端只认其中一种，另一种写进去的行读不出来
+    /// —— 而且 SurrealValue 编码的枚举很可能根本过不了 `TYPE string` 的校验。
+    ///
+    /// 写入是 fire-and-forget，失败只记日志：不能因为写不进审计日志
+    /// 就让改档案 / 改状态这类业务操作整体失败。
     pub async fn log_user_activity(
         &self,
         user_id: &str,
-        action: &str,
+        action: &'static str,
         category: ActivityCategory,
         status: ActivityStatus,
         ip_address: &str,
         user_agent: &str,
         details: serde_json::Value,
     ) -> Result<(), AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
-        
-        let activity = UserActivity {
-            id: None,
-            user_id: user_thing,
-            action: action.to_string(),
-            category,
-            ip_address: ip_address.to_string(),
-            user_agent: user_agent.to_string(),
-            details,
-            status,
-            timestamp: Utc::now(),
-        };
-
-        let query = "CREATE user_activity CONTENT $activity";
-        self.db.client
-            .query(query)
-            .bind(("activity", activity.clone()))
-            .await
-            .map_err(|e| {
-                error!("Failed to log user activity: {}", e);
-                AuthError::DatabaseError(e.to_string())
-            })?;
+        AuditLogger::new(self.db.clone()).record(
+            AuditEvent::new(action, category, status, ip_address, user_agent)
+                .with_user(user_id)
+                .with_details(details),
+        );
 
         Ok(())
     }
 
-    pub async fn get_user_activity_log(&self, user_id: &str, request: ActivityLogRequest) -> Result<ActivityLogResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
-        let page = request.page.unwrap_or(1);
-        let limit = request.limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+    /// 查询某用户的活动日志。
+    ///
+    /// 读取走 serde（与 `AuditLogger` 的写入编码一致）。以前这里用
+    /// `take::<Vec<UserActivity>>` 走 SurrealValue 解码，而写入端存的是
+    /// 纯字符串枚举，两边对不上会直接解码失败。
+    ///
+    /// 过滤条件全部走绑定参数：`category` / `status` 虽然是枚举（不可注入），
+    /// 但没有理由再留一处字符串拼接。
+    pub async fn get_user_activity_log(
+        &self,
+        user_id: &str,
+        request: ActivityLogRequest,
+    ) -> Result<ActivityLogResponse, AuthError> {
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
-        let mut where_clauses = vec!["user_id = $user_id".to_string()];
-        
-        if let Some(category) = &request.category {
-            where_clauses.push(format!("category = '{:?}'", category));
+        let mut where_clauses = vec!["user_id = type::record('user', $user_key)".to_string()];
+        if request.category.is_some() {
+            where_clauses.push("category = $category".to_string());
         }
-        if let Some(status) = &request.status {
-            where_clauses.push(format!("status = '{:?}'", status));
+        if request.status.is_some() {
+            where_clauses.push("status = $status".to_string());
         }
-        if let Some(start_date) = request.start_date {
-            where_clauses.push(format!("timestamp >= {}", start_date.timestamp()));
+        if request.start_date.is_some() {
+            where_clauses.push("timestamp >= $start_ts".to_string());
         }
-        if let Some(end_date) = request.end_date {
-            where_clauses.push(format!("timestamp <= {}", end_date.timestamp()));
+        if request.end_date.is_some() {
+            where_clauses.push("timestamp <= $end_ts".to_string());
         }
+        let where_clause = where_clauses.join(" AND ");
 
+        let bindings = json!({
+            "user_key": crate::utils::record_id::normalize_user_id(user_id),
+            "category": request.category.as_ref().map(|c| format!("{c:?}")),
+            "status": request.status.as_ref().map(|s| format!("{s:?}")),
+            "start_ts": request.start_date.map(|d| d.timestamp()),
+            "end_ts": request.end_date.map(|d| d.timestamp()),
+            "limit": limit,
+            "offset": offset,
+        });
+
+        // id / user_id 是 record 链接，投影成字符串才能走 serde。
         let query = format!(
-            "SELECT * FROM user_activity WHERE {} ORDER BY timestamp DESC LIMIT {} START {}",
-            where_clauses.join(" AND "),
-            limit,
-            offset
+            "SELECT type::string(id) AS id, \
+                    IF user_id = NONE {{ NONE }} ELSE {{ type::string(user_id) }} AS user_id, \
+                    action, category, ip_address, user_agent, details, status, timestamp \
+             FROM user_activity WHERE {where_clause} \
+             ORDER BY timestamp DESC LIMIT $limit START $offset"
         );
 
-        let mut response = self.db.client
-            .query(&query)
-            .bind(("user_id", user_thing.clone()))
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec("user_activity_log", &query, bindings.clone())
             .await
             .map_err(|e| {
                 error!("Failed to get user activity log: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let activities: Vec<UserActivity> = response.take(0).map_err(|e| {
-            error!("Failed to parse activities: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
+        let activities = rows
+            .into_iter()
+            .map(serde_json::from_value::<UserActivityRow>)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| {
+                error!("Failed to parse activities: {}", e);
+                AuthError::DatabaseError(format!("Failed to parse activities: {e}"))
+            })?
+            .into_iter()
+            .map(UserActivityResponse::from)
+            .collect::<Vec<_>>();
 
-        // 获取总数
-        let count_query = format!(
-            "SELECT count() as total FROM user_activity WHERE {} GROUP ALL",
-            where_clauses.join(" AND ")
-        );
-
-        let mut count_response = self.db.client
-            .query(&count_query)
-            .bind(("user_id", user_thing.clone()))
+        let count_query =
+            format!("SELECT count() AS total FROM user_activity WHERE {where_clause} GROUP ALL");
+        let count_rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec("user_activity_log_count", &count_query, bindings)
             .await
             .map_err(|e| {
                 error!("Failed to count activities: {}", e);
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let count_result: Vec<serde_json::Value> = count_response.take(0).map_err(|e| {
-            error!("Failed to parse count: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
-
-        let total = count_result.first()
+        let total = count_rows
+            .first()
             .and_then(|c| c.get("total"))
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
 
-        let total_pages = (total as f64 / limit as f64).ceil() as u32;
-
         Ok(ActivityLogResponse {
-            activities: activities.into_iter().map(|a| a.into()).collect(),
+            activities,
             total,
             page,
             limit,
-            total_pages,
+            total_pages: (total as f64 / limit as f64).ceil() as u32,
         })
     }
 
     // 用户列表管理
     pub async fn get_user_by_id(&self, user_id: &str) -> Result<UserResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        // 这里走 `query_take0_vec`，绑定值是 JSON。RecordId 经 serde_json 会退化成
+        // 字符串，`id = "user:xxx"` 永远匹配不到记录 ID，必须在 SQL 里用
+        // type::record() 重新构造。
+        let user_key = crate::utils::record_id::normalize_user_id(user_id);
 
         let users: Vec<User> = self
             .db
             .query_take0_vec(
                 "user_management_get_user_by_id",
-                "SELECT * FROM user WHERE id = $user_id LIMIT 1",
-                json!({ "user_id": user_thing }),
+                "SELECT * FROM user WHERE id = type::record('user', $user_key) LIMIT 1",
+                json!({ "user_key": user_key }),
             )
             .await
             .map_err(|e| {
@@ -618,17 +661,21 @@ impl UserManagementService {
     }
 
     pub async fn list_users(&self, request: UserListRequest) -> Result<UserListResponse, AuthError> {
-        let page = request.page.unwrap_or(1);
-        let limit = request.limit.unwrap_or(50);
-        let offset = (page - 1) * limit;
+        // `page` / `limit` 是 u32 且直接来自查询串：`page=0` 会让 `page - 1` 下溢
+        // （debug 直接 panic，release 绕回 u32::MAX），`limit` 不设上限则
+        // `?limit=4294967295` 等于一次性把整张 user 表拉进内存。
+        let page = request.page.unwrap_or(1).max(1);
+        let limit = request.limit.unwrap_or(50).clamp(1, 200);
+        let offset = (page - 1).saturating_mul(limit);
 
+        // 过滤条件全部走绑定参数：`search` 是用户可控的自由文本，以前直接拼进
+        // `email CONTAINS '...'`，单引号即可改写语句。
         let mut where_clauses = Vec::new();
-        
-        if let Some(status) = &request.status {
-            where_clauses.push(format!("account_status = '{:?}'", status));
+        if request.status.is_some() {
+            where_clauses.push("account_status = $status");
         }
-        if let Some(search) = &request.search {
-            where_clauses.push(format!("email CONTAINS '{}'", search));
+        if request.search.is_some() {
+            where_clauses.push("string::contains(email, $search)");
         }
 
         let where_clause = if where_clauses.is_empty() {
@@ -637,21 +684,33 @@ impl UserManagementService {
             format!("WHERE {}", where_clauses.join(" AND "))
         };
 
-        let sort_by = request.sort_by.unwrap_or("created_at".to_string());
-        let sort_order = request.sort_order.unwrap_or("DESC".to_string());
+        // 排序字段无法参数化，因此只接受白名单内的取值。
+        let sort_by = match request.sort_by.as_deref() {
+            Some("email") => "email",
+            Some("username") => "username",
+            Some("updated_at") => "updated_at",
+            Some("last_login_at") => "last_login_at",
+            _ => "created_at",
+        };
+        let sort_order = match request.sort_order.as_deref() {
+            Some(order) if order.eq_ignore_ascii_case("asc") => "ASC",
+            _ => "DESC",
+        };
+
+        let bindings = json!({
+            "status": request.status.as_ref().map(|status| format!("{status:?}")),
+            "search": request.search,
+            "limit": limit,
+            "offset": offset,
+        });
 
         let query = format!(
-            "SELECT * FROM user {} ORDER BY {} {} LIMIT {} START {}",
-            where_clause,
-            sort_by,
-            sort_order,
-            limit,
-            offset
+            "SELECT * FROM user {where_clause} ORDER BY {sort_by} {sort_order} LIMIT $limit START $offset"
         );
 
         let users: Vec<User> = self
             .db
-            .query_take0_vec("user_management_list_users", &query, json!({}))
+            .query_take0_vec("user_management_list_users", &query, bindings.clone())
             .await
             .map_err(|e| {
                 error!("Failed to list users: {}", e);
@@ -659,11 +718,11 @@ impl UserManagementService {
             })?;
 
         // 获取总数
-        let count_query = format!("SELECT count() as total FROM user {} GROUP ALL", where_clause);
-        
+        let count_query = format!("SELECT count() as total FROM user {where_clause} GROUP ALL");
+
         let count_result: Vec<serde_json::Value> = self
             .db
-            .query_take0_vec("user_management_count_users", &count_query, json!({}))
+            .query_take0_vec("user_management_count_users", &count_query, bindings)
             .await
             .map_err(|e| {
                 error!("Failed to count users: {}", e);

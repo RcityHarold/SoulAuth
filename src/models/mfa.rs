@@ -34,9 +34,10 @@ pub struct UserMfa {
     pub status: MfaStatus,
     /// MFA方法
     pub method: MfaMethod,
-    /// TOTP密钥（加密存储）
+    /// TOTP 密钥，以 `enc.v1.<base64>` 形式加密存储
+    /// （见 `utils::crypto::SecretCipher`）。
     pub totp_secret: Option<String>,
-    /// 备用恢复代码
+    /// 备用恢复码的 **Argon2 哈希**，明文只在生成时返回给用户一次。
     pub backup_codes: Vec<String>,
     /// 创建时间
     pub created_at: DateTime<Utc>,
@@ -44,24 +45,17 @@ pub struct UserMfa {
     pub updated_at: DateTime<Utc>,
     /// 最后使用时间
     pub last_used_at: Option<DateTime<Utc>>,
+    /// 最近一次被接受的 TOTP 时间步（Unix 秒 / 30）。
+    ///
+    /// RFC 6238 §5.2 要求同一个码只能用一次：`check_current` 只判断码是否落在
+    /// 当前窗口（含 ±1 步偏移），同一个 6 位码在 30~90 秒内可以反复提交。
+    /// 记下已接受的步长后，验证时拒绝 `step <= last_totp_step`，钓鱼中转或
+    /// 肩窥拿到的码就无法在窗口内复用。
+    #[serde(default)]
+    pub last_totp_step: Option<i64>,
 }
 
 impl UserMfa {
-    /// 创建新的MFA配置
-    pub fn new(user_id: String, method: MfaMethod) -> Self {
-        let now = Utc::now();
-        Self {
-            user_id,
-            status: MfaStatus::Disabled,
-            method,
-            totp_secret: None,
-            backup_codes: Vec::new(),
-            created_at: now,
-            updated_at: now,
-            last_used_at: None,
-        }
-    }
-
     /// 生成备用恢复代码
     pub fn generate_backup_codes() -> Vec<String> {
         use rand::{distributions::Uniform, Rng};
@@ -139,32 +133,9 @@ pub struct MfaStatusResponse {
     pub last_used_at: Option<DateTime<Utc>>,
 }
 
-/// 登录时的MFA要求响应
-#[derive(Debug, Serialize)]
-pub struct MfaRequiredResponse {
-    /// 临时令牌（用于后续MFA验证）
-    pub temp_token: String,
-    /// 需要的MFA方法
-    pub required_method: MfaMethod,
-    /// 提示消息
-    pub message: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_user_mfa_creation() {
-        let user_id = "test_user".to_string();
-        let mfa = UserMfa::new(user_id.clone(), MfaMethod::Totp);
-
-        assert_eq!(mfa.user_id, user_id);
-        assert_eq!(mfa.status, MfaStatus::Disabled);
-        assert_eq!(mfa.method, MfaMethod::Totp);
-        assert!(mfa.totp_secret.is_none());
-        assert!(mfa.backup_codes.is_empty());
-    }
 
     #[test]
     fn test_backup_codes_generation() {

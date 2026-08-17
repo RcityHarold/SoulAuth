@@ -10,21 +10,19 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 use crate::{
-    config::Config,
     error::AuthError,
     models::{
-        user::User,
         role::{CreateRoleRequest, UpdateRoleRequest, RoleResponse},
         permission::{CreatePermissionRequest, PermissionResponse},
         user_role::{
-            AssignRoleRequest, RemoveRoleRequest, 
+            AssignRoleRequest, RemoveRoleRequest,
             AssignPermissionToRoleRequest, RemovePermissionFromRoleRequest,
             UserRoleResponse,
         },
     },
-    services::{auth::AuthService, database::Database, rbac::RBACService},
+    services::{database::Database, rbac::RBACService},
     require_permission_status,
-    utils::jwt::Claims,
+    utils::jwt::AuthedUser,
 };
 
 #[derive(Debug, Deserialize)]
@@ -57,20 +55,16 @@ impl<T> ApiResponse<T> {
         }
     }
 
-    pub fn error(message: &str) -> ApiResponse<()> {
-        ApiResponse {
-            success: false,
-            data: None,
-            message: message.to_string(),
-        }
-    }
 }
 
 pub fn router() -> Router {
     Router::new()
         // 角色管理路由
         .route("/roles", get(list_roles).post(create_role))
-        .route("/roles/:role_name", get(get_role).post(update_role))
+        .route(
+            "/roles/:role_name",
+            get(get_role).post(update_role).delete(delete_role),
+        )
         .route("/roles/:role_name/permissions", get(get_role_permissions))
         .route("/roles/:role_name/permissions/assign", post(assign_permission_to_role))
         .route("/roles/:role_name/permissions/remove", post(remove_permission_from_role))
@@ -94,29 +88,27 @@ fn normalize_user_id(id: &str) -> String {
     crate::utils::record_id::normalize_user_id(id)
 }
 
-fn current_user_id(current_user: &User) -> Result<String, StatusCode> {
-    let rid = current_user
-        .id
-        .as_ref()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(crate::utils::record_id::record_id_key_to_string(rid))
+fn current_user_id(current_user: &AuthedUser) -> Result<String, StatusCode> {
+    current_user
+        .id()
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 // ===== 角色管理 =====
 
 async fn create_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Json(request): Json<CreateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.create_role(request, &current_user).await {
+    match rbac_service.create_role(request, current_user.user()).await {
         Ok(role) => {
-            info!("Role created successfully by user '{}'", current_user.email);
+            info!("Role created successfully by user '{}'", current_user.user().email);
             Ok(Json(ApiResponse::success(role, "Role created successfully")))
         }
         Err(AuthError::ValidationError(msg)) => {
@@ -132,11 +124,11 @@ async fn create_role(
 
 async fn list_roles(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<RoleResponse>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -151,11 +143,11 @@ async fn list_roles(
 
 async fn get_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -178,18 +170,18 @@ async fn get_role(
 
 async fn update_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<UpdateRoleRequest>,
 ) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.update_role(&role_name, request, &current_user).await {
+    match rbac_service.update_role(&role_name, request, current_user.user()).await {
         Ok(role) => {
-            info!("Role '{}' updated successfully by user '{}'", role_name, current_user.email);
+            info!("Role '{}' updated successfully by user '{}'", role_name, current_user.user().email);
             Ok(Json(ApiResponse::success(role, "Role updated successfully")))
         }
         Err(AuthError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
@@ -204,22 +196,53 @@ async fn update_role(
     }
 }
 
+async fn delete_role(
+    Extension(db): Extension<Arc<Database>>,
+    current_user: AuthedUser,
+    Path(role_name): Path<String>,
+) -> Result<Json<ApiResponse<()>>, StatusCode> {
+    let user_id = current_user_id(&current_user)?;
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_DELETE);
+
+    let rbac_service = RBACService::new(db);
+
+    match rbac_service.delete_role(&role_name, current_user.user()).await {
+        Ok(_) => {
+            info!(
+                "Role '{}' deleted by user '{}'",
+                role_name,
+                current_user.user().email
+            );
+            Ok(Json(ApiResponse::<()>::success_message("Role deleted successfully")))
+        }
+        Err(AuthError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
+        // 系统角色不可删、仍被用户占用时都归为 400。
+        Err(AuthError::ValidationError(msg)) => {
+            error!("Role deletion rejected: {}", msg);
+            Err(StatusCode::BAD_REQUEST)
+        }
+        Err(e) => {
+            error!("Failed to delete role: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
 
 // ===== 权限管理 =====
 
 async fn create_permission(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Json(request): Json<CreatePermissionRequest>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.create_permission(request, &current_user).await {
+    match rbac_service.create_permission(request, current_user.user()).await {
         Ok(permission) => {
-            info!("Permission created successfully by user '{}'", current_user.email);
+            info!("Permission created successfully by user '{}'", current_user.user().email);
             Ok(Json(ApiResponse::success(permission, "Permission created successfully")))
         }
         Err(AuthError::ValidationError(msg)) => {
@@ -235,11 +258,11 @@ async fn create_permission(
 
 async fn list_permissions(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Query(pagination): Query<PaginationQuery>,
 ) -> Result<Json<ApiResponse<Vec<PermissionResponse>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -254,11 +277,11 @@ async fn list_permissions(
 
 async fn get_permission(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(permission_name): Path<String>,
 ) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -276,11 +299,11 @@ async fn get_permission(
 
 async fn get_role_permissions(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "roles.read");
+    require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
@@ -296,19 +319,19 @@ async fn get_role_permissions(
 
 async fn assign_permission_to_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<AssignPermissionToRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.assign_permission_to_role(&role_name, &request.permission_name, &current_user).await {
+    match rbac_service.assign_permission_to_role(&role_name, &request.permission_name, current_user.user()).await {
         Ok(_) => {
             info!("Permission '{}' assigned to role '{}' by user '{}'", 
-                  request.permission_name, role_name, current_user.email);
+                  request.permission_name, role_name, current_user.user().email);
             Ok(Json(ApiResponse::<()>::success_message("Permission assigned to role successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -328,19 +351,19 @@ async fn assign_permission_to_role(
 
 async fn remove_permission_from_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<RemovePermissionFromRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
-    require_permission_status!(db, &user_id, "permissions.write");
+    require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
     let rbac_service = RBACService::new(db);
     
-    match rbac_service.remove_permission_from_role(&role_name, &request.permission_name, &current_user).await {
+    match rbac_service.remove_permission_from_role(&role_name, &request.permission_name, current_user.user()).await {
         Ok(_) => {
             info!("Permission '{}' removed from role '{}' by user '{}'", 
-                  request.permission_name, role_name, current_user.email);
+                  request.permission_name, role_name, current_user.user().email);
             Ok(Json(ApiResponse::<()>::success_message("Permission removed from role successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -358,28 +381,17 @@ async fn remove_permission_from_role(
 
 async fn get_user_roles(
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    current_user: AuthedUser,
     Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<UserRoleResponse>>, StatusCode> {
-    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
-        error!("Failed to create auth service for user roles lookup: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let requester_id = auth_service
-        .resolve_authenticated_user_id(&claims)
-        .await
-        .map(|id| normalize_user_id(&id))
-        .map_err(|e| {
-            error!("Failed to resolve requester user id for user roles lookup: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    let requester_id = current_user_id(&current_user)?;
     let target_user_id = normalize_user_id(&target_user_id);
 
+    // 查自己的角色不需要额外权限，查别人的需要 users.read。
     if requester_id != target_user_id {
         let rbac_service = RBACService::new(db.clone());
         let allowed = rbac_service
-            .check_user_permission(&requester_id, "users.read")
+            .check_user_permission(&requester_id, crate::models::permission::names::USERS_READ)
             .await
             .unwrap_or(false);
         if !allowed {
@@ -400,44 +412,23 @@ async fn get_user_roles(
 
 async fn assign_role_to_user(
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    current_user: AuthedUser,
     Path(user_id): Path<String>,
     Json(request): Json<AssignRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
-        error!("Failed to create auth service for role assignment: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let requester_id = auth_service
-        .resolve_authenticated_user_id(&claims)
-        .await
-        .map(|id| normalize_user_id(&id))
-        .map_err(|e| {
-            error!("Failed to resolve requester user id for role assignment: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
-    require_permission_status!(db, &requester_id, "roles.write");
-
-    let current_user = auth_service
-        .resolve_authenticated_user(&claims)
-        .await
-        .map_err(|e| {
-            error!("Failed to resolve requester user for role assignment: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    let requester_id = current_user_id(&current_user)?;
+    require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
     let target_user_id = normalize_user_id(&user_id);
-
     let rbac_service = RBACService::new(db);
-    
+
     match rbac_service
-        .assign_role_to_user(&target_user_id, &request.role_name, &current_user)
+        .assign_role_to_user(&target_user_id, &request.role_name, current_user.user())
         .await
     {
         Ok(_) => {
-            info!("Role '{}' assigned to user '{}' by user '{}'", 
-                  request.role_name, target_user_id, current_user.email);
+            info!("Role '{}' assigned to user '{}' by user '{}'",
+                  request.role_name, target_user_id, current_user.user().email);
             Ok(Json(ApiResponse::<()>::success_message("Role assigned to user successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -457,44 +448,23 @@ async fn assign_role_to_user(
 
 async fn remove_role_from_user(
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    current_user: AuthedUser,
     Path(user_id): Path<String>,
     Json(request): Json<RemoveRoleRequest>,
 ) -> Result<Json<ApiResponse<()>>, StatusCode> {
-    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
-        error!("Failed to create auth service for role removal: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let requester_id = auth_service
-        .resolve_authenticated_user_id(&claims)
-        .await
-        .map(|id| normalize_user_id(&id))
-        .map_err(|e| {
-            error!("Failed to resolve requester user id for role removal: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
-    require_permission_status!(db, &requester_id, "roles.write");
-
-    let current_user = auth_service
-        .resolve_authenticated_user(&claims)
-        .await
-        .map_err(|e| {
-            error!("Failed to resolve requester user for role removal: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    let requester_id = current_user_id(&current_user)?;
+    require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
     let target_user_id = normalize_user_id(&user_id);
-
     let rbac_service = RBACService::new(db);
-    
+
     match rbac_service
-        .remove_role_from_user(&target_user_id, &request.role_name, &current_user)
+        .remove_role_from_user(&target_user_id, &request.role_name, current_user.user())
         .await
     {
         Ok(_) => {
-            info!("Role '{}' removed from user '{}' by user '{}'", 
-                  request.role_name, target_user_id, current_user.email);
+            info!("Role '{}' removed from user '{}' by user '{}'",
+                  request.role_name, target_user_id, current_user.user().email);
             Ok(Json(ApiResponse::<()>::success_message("Role removed from user successfully")))
         }
         Err(AuthError::NotFound(msg)) => {
@@ -510,28 +480,16 @@ async fn remove_role_from_user(
 
 async fn get_user_permissions(
     Extension(db): Extension<Arc<Database>>,
-    Extension(config): Extension<Config>,
-    claims: Claims,
+    current_user: AuthedUser,
     Path(target_user_id): Path<String>,
 ) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
-    let auth_service = AuthService::new(db.clone(), config).map_err(|e| {
-        error!("Failed to create auth service for user permissions lookup: {}", e);
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
-    let requester_id = auth_service
-        .resolve_authenticated_user_id(&claims)
-        .await
-        .map(|id| normalize_user_id(&id))
-        .map_err(|e| {
-            error!("Failed to resolve requester user id for user permissions lookup: {}", e);
-            StatusCode::UNAUTHORIZED
-        })?;
+    let requester_id = current_user_id(&current_user)?;
     let target_user_id = normalize_user_id(&target_user_id);
 
     if requester_id != target_user_id {
         let rbac_service = RBACService::new(db.clone());
         let allowed = rbac_service
-            .check_user_permission(&requester_id, "users.read")
+            .check_user_permission(&requester_id, crate::models::permission::names::USERS_READ)
             .await
             .unwrap_or(false);
         if !allowed {
@@ -568,7 +526,7 @@ struct RoleCheckResponse {
 
 async fn check_permission(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(permission_name): Path<String>,
 ) -> Result<Json<ApiResponse<PermissionCheckResponse>>, StatusCode> {
     let rbac_service = RBACService::new(db);
@@ -592,7 +550,7 @@ async fn check_permission(
 
 async fn check_role(
     Extension(db): Extension<Arc<Database>>,
-    Extension(current_user): Extension<User>,
+    current_user: AuthedUser,
     Path(role_name): Path<String>,
 ) -> Result<Json<ApiResponse<RoleCheckResponse>>, StatusCode> {
     let rbac_service = RBACService::new(db);
