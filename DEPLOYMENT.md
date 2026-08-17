@@ -40,9 +40,7 @@ surreal import --conn http://localhost:8000 --user root --pass root --ns product
 - 系统用户账户（用于权限分配的内部账户）
 - 角色权限关联（为系统角色分配适当的权限）
 
-### 3. 安装文档系统权限（可选）
-
-### 清理 Rainbow-Docs 遗留权限（仅存量实例需要）
+### 3. 清理 Rainbow-Docs 遗留权限（仅存量实例需要）
 
 `docs_permissions.sql` 已删除。它曾往 SoulAuth 的权限表里塞入另一个项目
 （Rainbow-Docs）的 10 个权限、3 个角色和 31 条授权关联，而 SoulAuth 自身代码
@@ -181,6 +179,34 @@ chmod 600 /etc/soulauth/oidc-signing.pem
       —— 这个口径本来就是活跃率而非留存率。同一接口的
       `geographic_distribution` 现在恒为空数组（没有接入 GeoIP 数据源）。
 
+19. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
+    `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` /
+    `GITHUB_CLIENT_SECRET` / `OAUTH_REDIRECT_URL` 五项此前是硬必填，只用邮箱
+    密码登录的部署被迫填假值。现在不配即不启用，登录入口返回 501。
+    **已填假值的实例建议清掉**——配置里的假数据一旦哪天被当真就是事故。
+
+20. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
+    `OIDC_RSA_PRIVATE_KEY_PEM`/`_PATH` 或 `MFA_SECRET_ENCRYPTION_KEY` 会让进程
+    起不来（此前只打 WARN）。升级前请确认这两项已配，否则重启后服务不可用。
+    理由见「生产环境额外必填」一节。
+
+21. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
+    （或单独执行该表的 `DEFINE`）。登录 / 注册 / 改密 / 验邮箱等敏感端点的
+    计数经数据库共享，多副本不再各算各的。
+    ⚠ 副作用：**重启副本不再清空配额**。这是它该有的性质，但排查时容易误判。
+
+22. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
+    只解析表单——用标准 OIDC 客户端库接入的机密客户端会失败，且错误信息
+    指向「未提供 secret」。升级后两种方式都可用。
+
+23. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
+    处理（此前是「没被显式列为坏的就算好的」）。若你的数据库里有非标准的
+    `account_status` 值，那些账号升级后将无法登录——升级前先查：
+    ```sql
+    SELECT VALUE account_status FROM user
+    WHERE account_status NOT IN ['Active','Inactive','Suspended','PendingDeletion','Deleted'];
+    ```
+
 ## 权限系统说明
 
 ### 系统角色
@@ -195,80 +221,233 @@ chmod 600 /etc/soulauth/oidc-signing.pem
 
 ### 系统权限
 
-| 权限名 | 资源 | 操作 | 描述 |
-|--------|------|------|------|
-| `users.read` | users | read | 查看用户信息 |
-| `users.write` | users | write | 编辑用户信息 |
-| `users.delete` | users | delete | 删除用户账户 |
-| `roles.read` | roles | read | 查看角色信息 |
-| `roles.write` | roles | write | 管理角色 |
-| `roles.delete` | roles | delete | 删除角色 |
-| `permissions.read` | permissions | read | 查看权限信息 |
-| `permissions.write` | permissions | write | 管理权限 |
-| `permissions.delete` | permissions | delete | 删除权限 |
-| `security.read` | security | read | 查看安全状态 |
-| `security.write` | security | write | 管理安全操作 |
-| `audit.read` | audit | read | 查看审计日志 |
+权限名带 `soulauth:` 命名空间前缀（P0-DECISION-10 DEC-10-05）。前缀的意义是
+划清边界：这些权限只管 SoulAuth 自己的管理后台，**不是 SoulSeedOS 的
+Canonical Permission Source** —— OS 侧也有 `users.read` 这类名字，两者同名不同物。
 
-### 文档系统权限（可选）
+代码中真正被检查的是下面 11 个（单一真相在 `src/models/permission.rs`
+的 `names` 模块，有单元测试守着它与 `initial_data.sql` 的一致性）：
 
-如果安装了文档系统权限扩展，还包含以下权限：
+| 权限名 | 用于 |
+|---|---|
+| `soulauth:users.read` | 读用户、他人资料/偏好、他人 SSO 会话 |
+| `soulauth:users.write` | 改账号状态、改会员等级 |
+| `soulauth:roles.read` | 读角色与角色权限 |
+| `soulauth:roles.write` | 给用户授/撤角色 |
+| `soulauth:roles.delete` | 删除角色 |
+| `soulauth:permissions.read` | 读权限详情 |
+| `soulauth:permissions.write` | 给角色授/撤权限 |
+| `soulauth:security.read` | 安全指标、系统健康、全局会话统计、会话清理 |
+| `soulauth:audit.read` | 审计看板、活动摘要、安全报告、他人活动日志 |
+| `soulauth:oidc_clients.read` | 读 OIDC 客户端 |
+| `soulauth:oidc_clients.write` | **注册 / 改 / 停用 OIDC 客户端** |
 
-| 权限名 | 资源 | 操作 | 描述 |
-|--------|------|------|------|
-| `docs.read` | documents | read | 查看和阅读文档内容 |
-| `docs.write` | documents | write | 创建、编辑和发布文档 |
-| `docs.delete` | documents | delete | 删除文档和章节 |
-| `docs.admin` | documents | admin | 管理文档空间、权限和设置 |
-| `spaces.read` | spaces | read | 查看和访问文档空间 |
-| `spaces.write` | spaces | write | 创建、编辑文档空间和设置 |
-| `spaces.delete` | spaces | delete | 删除文档空间 |
-| `comments.read` | comments | read | 查看文档评论和讨论 |
-| `comments.write` | comments | write | 添加、编辑和回复评论 |
-| `comments.delete` | comments | delete | 删除评论和讨论 |
+最后一条是接入 SoulSeedOS 时要用的——注册 OS 客户端需要一个持有它的账号。
 
-### 文档系统角色（可选）
-
-| 角色名 | 显示名称 | 描述 | 权限范围 |
-|--------|----------|------|----------|
-| `docs_admin` | 文档管理员 | 拥有完整文档管理权限 | 所有文档权限 |
-| `docs_editor` | 文档编辑员 | 可以创建和编辑文档 | docs.read, docs.write, comments |
-| `docs_reader` | 文档阅读者 | 只能查看文档 | docs.read, spaces.read, comments.read |
+`initial_data.sql` 另外还种了 7 个当前**没有任何代码引用**的权限
+（`users.delete` / `permissions.delete` / `security.write` /
+`profile.read` / `profile.write` / `preferences.read` / `preferences.write`）。
+它们授给了 admin 与 user_manager，但不影响任何接口的判定——留着是为将来，
+不要据此以为某个接口受它们保护。
 
 ## 应用程序部署
 
+### 0. 前提：本服务是纯 API，需要配套前端
+
+SoulAuth 不含任何页面，但**假定前端存在**。下列地址都指向 `APP_URL` 下的路径，
+没有对应页面时用户点开就是 404：
+
+| 场景 | 默认地址 | 可覆盖 |
+|---|---|---|
+| 邮箱验证信里的链接 | `{APP_URL}/verify-email?token=…` | `VERIFY_EMAIL_PAGE_URL` |
+| 密码重置信里的链接 | `{APP_URL}/reset-password/{token}` | — |
+| `/api/oidc/authorize` 未登录时跳转 | `{APP_URL}/login?return_to=…` | `LOGIN_PAGE_URL` |
+| OAuth 登录成功后跳转（已有密码） | `{APP_URL}/oauth/callback` | — |
+| OAuth 登录成功后跳转（无密码，需设首个密码） | `{APP_URL}/initialize-password` | — |
+
+后三个目前是写死的路径，只能通过让前端在 `APP_URL` 下提供这些路由来满足。
+
 ### 1. 环境变量配置
 
-确保设置所有必需的环境变量：
+**必填只有四项**（缺任一进程起不来）：
 
 ```env
-# 数据库配置
-DATABASE_URL=http://localhost:8000
-DATABASE_USER=your-db-user
-DATABASE_PASS=your-db-password
+JWT_SECRET=<至少 32 字符>
+APP_URL=https://auth.example.com
+SMTP_HOST=smtp.example.com
+SMTP_FROM=noreply@example.com
+```
+
+`APP_URL` 是对外地址，不是监听地址。它决定三件事，填错的后果在 §「作为 OIDC
+Provider」里展开：OIDC `issuer`、邮件里链接的前缀、cookie 是否带 `Secure`。
+
+#### 生产环境额外必填（非环回 `APP_URL` 时强制）
+
+`APP_URL` 的主机不是 `127.0.0.1` / `localhost` / `[::1]` 时，下面两项缺失
+**直接拒绝启动**：
+
+```env
+OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # 或 _PEM 直接给内容
+MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
+```
+
+为什么是拒绝启动而不是警告：**这两项的后果都不在启动时显现**。
+
+- 缺签名私钥 → 每次启动临时生成一把，**进程一重启，已签发的 ID Token 全部
+  无法验签**；多副本部署里各副本各签各的，从第一天起就互不认账，
+  表现为随机登录失败。
+- 缺 MFA 密钥 → 从 `JWT_SECRET` 派生，**哪天轮换 `JWT_SECRET`，所有已存的
+  TOTP 密钥变成无法解密**，全体 MFA 用户被锁在门外。
+
+等它自己暴露的时候已经是线上事故。本地开发仍然放行——否则这道闸门会被人用
+环境变量绕过去。
+
+#### 数据库
+
+```env
+DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000
+DATABASE_USER=root
+DATABASE_PASS=root
+DATABASE_NAMESPACE=auth            # 默认 auth
+DATABASE_NAME=main                 # 默认 main
 DATABASE_CONNECTION_TIMEOUT=30
 DATABASE_MAX_CONNECTIONS=10
+```
 
-# JWT配置 (必需)
-JWT_SECRET=your-super-secure-jwt-secret-key-here
-JWT_EXPIRATION=86400
+#### 网络与前端
 
-# OAuth配置 (可选)
-GOOGLE_CLIENT_ID=your-google-client-id
-GOOGLE_CLIENT_SECRET=your-google-client-secret
-GITHUB_CLIENT_ID=your-github-client-id
-GITHUB_CLIENT_SECRET=your-github-client-secret
-OAUTH_REDIRECT_URL=https://your-domain.com/api/auth/callback
+```env
+BIND_ADDR=0.0.0.0:8080             # 监听地址，默认 0.0.0.0:8080
+CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
+TRUST_PROXY_HEADERS=true           # 在反向代理后必须开，否则限流按代理 IP 计数
+LOGIN_PAGE_URL=                    # 默认 {APP_URL}/login
+VERIFY_EMAIL_PAGE_URL=             # 默认 {APP_URL}/verify-email
+```
 
-# SMTP配置
-SMTP_HOST=smtp.example.com
-SMTP_PORT=587
-SMTP_USERNAME=your-username
-SMTP_PASSWORD=your-password
-SMTP_FROM=noreply@your-domain.com
+`CORS_ALLOWED_ORIGINS` 留空时回落到 `APP_URL` 自身。**不要**指望它是 `*`——
+那等于任何站点都能带着用户的 `Authorization` 头调用本服务。
 
-# 应用配置
-APP_URL=https://your-domain.com
+`TRUST_PROXY_HEADERS` 在反向代理后**必须开**：不开的话所有请求的来源 IP 都是
+代理的 IP，限流与账号锁定会把全体用户算成同一个客户端——一个人被锁，所有人
+一起被锁。反过来，**没有代理时绝不能开**：那样客户端可以自己伪造
+`X-Forwarded-For` 绕过限流。
+
+#### 第三方登录（可选，不配就是不启用）
+
+```env
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+GITHUB_CLIENT_ID=
+GITHUB_CLIENT_SECRET=
+OAUTH_REDIRECT_URL=https://auth.example.com/api/auth/callback
+```
+
+只用邮箱密码登录的部署**不需要填任何一项**。未配置时
+`GET /api/auth/login/google` 返回 **501「本部署未启用」**，而不是拿假凭证去
+换令牌再吐一个看不懂的 OAuth 错误。
+
+两条判定规则：
+
+- **只配 id 不配 secret 算未配置**。只配一半比两个都不配更危险——它看起来是
+  开着的。
+- **配了任一 provider 就必须配 `OAUTH_REDIRECT_URL`**，否则拒绝启动。缺它时
+  重定向 URI 会被拼成残缺地址，登录走到第一步才失败。
+
+可选的端点覆盖（默认走官方端点）：
+
+```env
+GOOGLE_OAUTH_BASE_URL=
+GITHUB_OAUTH_BASE_URL=https://ghe.example.com    # 自托管 GitHub Enterprise
+```
+
+覆盖时沿用该 provider 真实的路径形状，只换根地址：Google 是
+`{base}/o/oauth2/v2/auth` · `/token` · `/oauth2/v2/userinfo`；GitHub 是
+`{base}/login/oauth/{authorize,access_token}` 与 `{base}/api/v3/user[/emails]`
+—— 后者正是 GitHub Enterprise 的约定。
+
+**明文 http 只允许指向环回地址**，且不得带尾斜杠，否则拒绝启动：远端端点走
+明文等于把 `client_secret` 与访问令牌交给链路上的任何人。
+
+#### 邮件
+
+```env
+SMTP_PORT=587                      # 默认 587
+SMTP_USERNAME=
+SMTP_PASSWORD=
+SMTP_INSECURE=false                # 仅本地测试用
+EMAIL_VERIFICATION_ENABLED=false   # 开启后注册需先验证邮箱
+```
+
+**发信失败只记日志，不阻断请求。** 也就是说 SMTP 配错时，注册会成功而验证信
+永远收不到，日志之外没有任何提示。上线后请实际走一遍注册确认收得到信。
+
+#### 其它
+
+```env
+JWT_EXPIRATION=86400               # 秒，默认 1 天
+PASSWORD_MIN_LENGTH=12
+AUTH_SESSION_CACHE_TTL_SECONDS=5   # 0 = 每请求都校验会话
+PROXY_ENABLED=false                # 出站 OAuth 请求走代理
+PROXY_URL=
+```
+
+`AUTH_SESSION_CACHE_TTL_SECONDS` 是**多副本下的吊销延迟上限**：本实例的登出 /
+改密 / 停用会立刻清缓存，其它副本最多滞后一个 TTL。设为 0 则吊销绝对即时，
+代价是每个请求多两次查询。
+
+### 1.1 反向代理与 TLS（生产必需）
+
+**SoulAuth 自身不终结 TLS**，只监听明文 HTTP。生产部署必须在前面放一个终结
+TLS 的反向代理（nginx / Caddy / ALB 均可）。
+
+这不是可选项，有两个硬约束逼着它：
+
+1. `APP_URL` 是 https 时，会话 cookie 才会带 `Secure`；
+2. **接入 SoulSeedOS 时，OS 硬拒非 https 的 JWKS 地址**——它的 `HttpJwksProvider`
+   直接检查 `https://` 前缀（明文取签名公钥 = 路径上任何人都能换掉信任根）。
+
+nginx 最小片段：
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name auth.example.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+配套把 `TRUST_PROXY_HEADERS=true` 打开，否则限流与锁定会把所有人算成同一个
+客户端。
+
+### 1.2 多副本部署
+
+| 事项 | 要求 |
+|---|---|
+| OIDC 签名私钥 | **必须所有副本共用同一份**。各生成各的话，A 签的令牌 B 验不了，而依赖方缓存了 JWKS，表现是间歇性 401 |
+| 限流 | 已跨副本合账（登录 / 注册 / 改密 / 验邮箱等敏感端点经数据库共享计数）。一般 API 仍按副本计数，不给热路径加数据库往返 |
+| 账号锁定 | 存在数据库里，天然跨副本 |
+| 会话吊销 | 最多滞后一个 `AUTH_SESSION_CACHE_TTL_SECONDS` |
+| 限流计数表 | `rate_limit`，由后台任务定期清理，无需人工维护 |
+
+⚠ **重启副本不会清空限流配额**——共享计数存在数据库里。这是它该有的性质
+（重启不能当解封手段），但排查时容易误以为「重启了怎么还被限」。要手工解封
+某个客户端，删对应的 `rate_limit` 行。
+
+### 1.3 代理环境的一个坑
+
+环境里设了 `HTTP_PROXY` / `HTTPS_PROXY` 时，**`NO_PROXY` 必须覆盖 SurrealDB
+的地址**。SoulAuth 连数据库走的也是 HTTP，代理会劫持到 `127.0.0.1` 的连接，
+而故障形态是「数据库连接超时」——病因与形态对不上，很难查。
+
+```bash
+export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 ```
 
 ### 2. 数据库权限
@@ -328,6 +507,147 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
    # 或者使用系统管理界面
    ```
 
+## 作为 OIDC Provider 接入（SoulSeedOS / 其它应用）
+
+SoulAuth 既能独立使用，也能给别的系统当 OIDC Provider——**是同一套东西，
+不需要模式开关**。接入方只是又一个注册的 OIDC 客户端。
+
+### 谁做什么
+
+以 SoulSeedOS 为例，三个角色的分工必须先说清，否则 `redirect_uris` 会填错：
+
+| 组件 | 做什么 | 需要 `client_secret` 吗 |
+|---|---|---|
+| **BFF**（前端的服务端伴随组件） | 走完授权码流程：跳转 → 收回调 → 用 code 换 ID Token → 持有 refresh token 续期 | **是** |
+| **SoulSeedOS** | 只用 JWKS 公钥验 ID Token 的签名与 `iss`/`aud`/`exp`/`sid` | 否，它从不出站换令牌 |
+| 浏览器 | 拿着 BFF 给的 ID Token 调用 OS | 否 |
+
+由此推出两条容易踩的：
+
+- **`redirect_uris` 填 BFF 的回调地址，不是 OS 的。** OS 从头到尾不参与授权码
+  交换。填错的表现是：登录跳转正常、用户认证成功、**回调那一步报
+  `redirect_uri` 不匹配**——症状出现在回调环节而不是配置环节。
+- **交给 OS 的必须是 ID Token，不是 access token。** SoulAuth 的 access token
+  是 32 位不透明随机串，没有签名也没有 claim，OS 拿到它只会验签失败返回 401
+  ——而这个 401 与「令牌过期」「issuer 配错」长得一模一样。
+
+### 纯 SPA 不能直接接
+
+浏览器里的代码无法安全持有 `client_secret`，也不适合长期保管 refresh token。
+且 ID Token 被硬夹在 300 秒（见下），意味着持有方必须能在 5 分钟内续期——
+这个上限本身就假定了有一个服务端会话持有者。
+
+所以纯前端场景需要补一个 BFF，而不是把客户端注册成 `public` 了事。
+
+### 注册客户端
+
+需要一个持有 `soulauth:oidc_clients.write` 的账号（`admin` 角色有）。
+
+```bash
+curl -X POST https://auth.example.com/api/oidc/clients \
+  -H "Authorization: Bearer <管理员令牌>" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "client_name": "SoulSeedOS BFF",
+    "client_type": "confidential",
+    "redirect_uris": ["https://bff.example.com/auth/callback"],
+    "require_pkce": true,
+    "allowed_grant_types": ["authorization_code", "refresh_token"],
+    "allowed_response_types": ["code"],
+    "allowed_scopes": ["openid"],
+    "id_token_lifetime": 300
+  }'
+```
+
+⚠ **`client_secret` 只在创建响应里返回这一次**，之后查询客户端得到的是 `***`
+掩码。丢了只能调 `POST /api/oidc/clients/:client_id/regenerate-secret` 重新
+生成，而重新生成会让正在用旧 secret 的组件**立刻失效**。这一步没有便宜的重来，
+注册前先把回调地址定下来。
+
+⚠ **`id_token_lifetime` 传大于 300 的值会被静默夹到 300，不报错。** 直接填 300，
+不要以为参数被忽略了。
+
+### 接入方需要的三项参数
+
+```text
+issuer    = APP_URL 去掉尾斜杠      # 照抄发现文档的 issuer 字段最稳妥
+jwks_uri  = {APP_URL}/api/oidc/jwks # 必须 https
+client_id = 注册响应里的 client_id
+```
+
+`issuer` 与接入方配置的值必须**逐字一致**——尾斜杠、`www` 前缀、端口号，
+差一个字符就全量 401。
+
+### 客户端认证的两种方式
+
+发现文档声明支持 `client_secret_post` 与 `client_secret_basic`，两种都可用：
+
+```bash
+# ① client_secret_post —— 凭证放表单
+curl -X POST https://auth.example.com/api/oidc/token \
+  -d grant_type=authorization_code -d code=... -d redirect_uri=... \
+  -d client_id=... -d client_secret=... -d code_verifier=...
+
+# ② client_secret_basic —— 凭证放 Authorization 头（多数 OIDC 客户端库的默认）
+curl -X POST https://auth.example.com/api/oidc/token \
+  -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+  -d grant_type=authorization_code -d code=... -d redirect_uri=... \
+  -d client_id=... -d code_verifier=...
+```
+
+**两处同时带凭证会被拒**（`invalid_request`），不会"挑一个用"——那会让
+「两处 secret 不一致」这种明显异常被静默接受。
+
+> **升级提示**：`client_secret_basic` 是 2026-08-17 才补上实现的。此前发现
+> 文档一直声明支持它，而令牌端点只解析表单。跑更早版本的实例上，用标准
+> OIDC 客户端库接入会报 `Client secret required for confidential clients`
+> ——接入方会反复检查自己的配置，而配置是对的。
+
+### 接入方必须知道的三条行为
+
+这三条不看源码不可能知道，而踩中任何一条，症状都出现在离病因很远的地方。
+
+**① 复用 refresh token 会打掉整个会话，不只是那一次失败**
+
+刷新令牌是**一次性**的，每次刷新返回新的。重复使用已轮换的旧令牌被视为令牌
+泄露信号，SoulAuth 会**吊销该用户在该客户端上的全部令牌**——用户被登出。
+
+对 BFF 的含义：**因超时重试而重放同一个 refresh token 的代价是用户掉线**。
+所以刷新必须按会话串行化，不能并发刷、不能盲目重试。网络超时时应先确认上一次
+是否已经成功，而不是直接重发。
+
+**② 客户端认证失败不消耗授权码**
+
+`client_secret` 配错时，改对后用同一个 code 仍能换成功。错误处理可以按
+「改配置后重试」写，不必让用户重新走一遍登录。
+
+**③ `/api/oidc/authorize` 认的是浏览器会话 cookie，不是 Bearer**
+
+BFF 把用户重定向到授权端点时，用户得先有 SoulAuth 的登录态；没有的话会被
+引导到 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带上 `return_to`。
+登录页需要：调 `POST /api/auth/login` 完成登录，然后跳回 `return_to`。
+
+### 接入后的验证顺序
+
+每一步都能独立证伪，不用等到最后：
+
+```bash
+# ① issuer 是你要的那个
+curl -s https://auth.example.com/.well-known/openid-configuration | jq -r .issuer
+
+# ② JWKS 走 https 能取到，且有 kid
+curl -s https://auth.example.com/api/oidc/jwks | jq -r '.keys[0].kid'
+
+# ③ 走一次完整登录，把 ID Token 拆开看三项
+echo "$ID_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sid, exp}'
+```
+
+第 ③ 步：`aud` 必须等于接入方配的 `client_id`，`iss` 必须逐字等于接入方配的
+`issuer`，`sid` 必须非空。三项对上，接入方那侧就不会有意外。
+
+⚠ SoulAuth 在取不到认证会话引用时**拒签**，不会签发缺 `sid` 的 ID Token。
+所以 `sid` 为空只可能是拿错了令牌（把 access token 当成 ID Token 用）。
+
 ## 安全考虑
 
 ### 1. 数据库安全
@@ -371,7 +691,24 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
 
 ## 故障排除
 
-### 常见问题
+### 常见问题：症状与病因对不上的几类
+
+下面几条的共同点是**故障形态指向了错误的方向**，按症状去查会白花时间。
+
+| 症状 | 实际原因 |
+|---|---|
+| 数据库连接超时 | 环境里有 HTTP 代理，劫持了到 `127.0.0.1` 的连接。`NO_PROXY` 加上数据库地址 |
+| 一个人被限流，所有人一起被限 | 在反向代理后没开 `TRUST_PROXY_HEADERS`，所有请求的来源 IP 都是代理的 |
+| 重启了服务，限流还在 | 敏感端点的限流计数存在数据库里，重启不清（设计如此）。删对应的 `rate_limit` 行 |
+| 注册成功但收不到验证信 | 发信失败只记日志、不阻断请求。查应用日志里的 SMTP 错误 |
+| 接入方报「未提供 client_secret」，但配置是对的 | 客户端库走的是 `client_secret_basic`，而实例版本早于 2026-08-17 |
+| 接入方间歇性 401 | 多副本各自生成了临时 OIDC 私钥。配 `OIDC_RSA_PRIVATE_KEY_PATH` 并让所有副本共用 |
+| 接入方稳定 401，且 `sid` 为空 | 拿的是 access token（32 位不透明串）不是 ID Token |
+| 登录跳转正常，回调报 `redirect_uri` 不匹配 | 注册客户端时 `redirect_uris` 填成了资源服务器的地址，应填执行授权码交换那一方的回调地址 |
+| 用户莫名被登出 | refresh token 被重放（如超时后重试）。刷新必须按会话串行化 |
+| 轮换 `JWT_SECRET` 后 MFA 全体失效 | 未单独配 `MFA_SECRET_ENCRYPTION_KEY`，密钥从 `JWT_SECRET` 派生 |
+
+### 其它常见问题
 
 1. **应用启动失败**：
    - 检查数据库连接配置

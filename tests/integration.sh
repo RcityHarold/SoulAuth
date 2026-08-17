@@ -1202,7 +1202,141 @@ has 'not enabled' "$(body)" "501 的说明是「本部署未启用」而非 OAut
 
 restart_app   # 交还给带 dummy 凭证的标准配置
 
-group "23. 运行期无 panic"
+group "23. BFF 要走的那条路：confidential 客户端"
+
+# 此前全部 OIDC 覆盖用的都是 public 客户端、换令牌不带 client_secret。
+# 而 SoulSeedOS 接入的实际形态是 BFF 持有 secret 的 confidential 客户端 ——
+# 那条路一次都没跑过。这组把它跑通，顺带把 BFF 作者会踩的坑先踩掉。
+restart_app
+
+ADMIN_TOKEN="$(login_token admin@test.local "CorrectHorse42!")"
+# authorize 端点认的是**浏览器会话 cookie**，不是 Bearer —— 单独取一份
+curl -sS --max-time 20 -c "$WORK/bff_ck" -o /dev/null \
+    -X POST "${APP}/api/auth/login" -H 'Content-Type: application/json' \
+    -d '{"email":"admin@test.local","password":"CorrectHorse42!"}' 2>/dev/null
+
+req POST /api/oidc/clients -H "Authorization: Bearer ${ADMIN_TOKEN}" \
+    -H 'Content-Type: application/json' \
+    -d '{"client_name":"bff","client_type":"confidential",
+         "redirect_uris":["http://localhost:9000/cb"],
+         "allowed_scopes":["openid"],
+         "allowed_grant_types":["authorization_code","refresh_token"],
+         "allowed_response_types":["code"],"require_pkce":true,
+         "id_token_lifetime":300}' > /dev/null
+C_ID="$(jget client_id)"; C_SECRET="$(jget client_secret)"
+[ -n "$C_ID" ] && [ -n "$C_SECRET" ] && ok "创建 confidential 客户端并拿到 secret" ||
+    bad "创建 confidential 客户端并拿到 secret" "$(body)"
+
+# secret 只在创建时返回这一次；之后查到的是掩码而不是真值
+req GET "/api/oidc/clients/${C_ID}" -H "Authorization: Bearer ${ADMIN_TOKEN}" > /dev/null
+MASKED="$(jget client_secret)"
+[ "$MASKED" != "$C_SECRET" ] && ok "之后再查客户端拿到的是掩码（${MASKED}）而非真 secret" ||
+    bad "之后再查客户端拿不到真 secret" "secret 被二次泄露"
+
+VERIFIER='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
+CHALLENGE="$(python3 -c "
+import hashlib,base64
+print(base64.urlsafe_b64encode(hashlib.sha256('$VERIFIER'.encode()).digest()).rstrip(b'=').decode())")"
+
+bff_code() {   # 每次取一个全新的授权码
+    local loc
+    loc="$(curl -sS --max-time 20 -b "$WORK/bff_ck" -o /dev/null -D - \
+        "${APP}/api/oidc/authorize?response_type=code&client_id=${C_ID}&redirect_uri=http%3A%2F%2Flocalhost%3A9000%2Fcb&scope=openid&state=st&code_challenge=${CHALLENGE}&code_challenge_method=S256" \
+        2>/dev/null | grep -i '^location:' | tr -d '\r')"
+    printf '%s' "$loc" | sed -n 's/.*code=\([^&]*\).*/\1/p'
+}
+
+exchange() {   # $1=code  $2..=额外 curl 参数
+    local code="$1"; shift
+    req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-urlencode 'grant_type=authorization_code' \
+        --data-urlencode "code=${code}" \
+        --data-urlencode 'redirect_uri=http://localhost:9000/cb' \
+        --data-urlencode "client_id=${C_ID}" \
+        --data-urlencode "code_verifier=${VERIFIER}" "$@"
+}
+
+CODE="$(bff_code)"
+[ -n "$CODE" ] && ok "拿到授权码" || bad "拿到授权码" "authorize 未下发 code"
+
+# —— 机密客户端不带 secret 必须被拒（fail-closed 的核心）——
+eq 400 "$(exchange "$(bff_code)")" "机密客户端不带 secret → 拒绝"
+eq 400 "$(exchange "$(bff_code)" --data-urlencode 'client_secret=wrong-secret')" "secret 错误 → 拒绝"
+
+# —— 客户端认证失败是否消耗授权码 ——
+# BFF 的错误处理要按这条写：若消耗，secret 配错一次就得让用户重新登录；
+# 若不消耗，改对 secret 即可重试。
+CODE_R="$(bff_code)"
+exchange "$CODE_R" --data-urlencode 'client_secret=wrong-secret' > /dev/null
+RETRY="$(exchange "$CODE_R" --data-urlencode "client_secret=${C_SECRET}")"
+if [ "$RETRY" = 200 ]; then
+    ok "客户端认证失败不消耗授权码（改对 secret 可重试）"
+else
+    ok "客户端认证失败会消耗授权码（${RETRY}）—— BFF 须重新发起授权"
+fi
+
+# —— client_secret_post：凭证放表单 ——
+eq 200 "$(exchange "$(bff_code)" --data-urlencode "client_secret=${C_SECRET}")" \
+    "client_secret_post 换令牌成功"
+REFRESH="$(jget refresh_token)"
+ID_TOKEN="$(jget id_token)"
+
+LIFE="$(python3 -c "
+import base64,json
+p='${ID_TOKEN}'.split('.')[1]; p += '='*(-len(p)%4)
+c = json.loads(base64.urlsafe_b64decode(p))
+print(c['exp'] - c['iat'])" 2>/dev/null)"
+eq 300 "$LIFE" "ID Token 寿命为 300 秒（BFF 的续期周期）"
+
+# —— client_secret_basic：凭证放 Authorization 头 ——
+# 发现文档一直声明支持它，而令牌端点原来只解析表单。大多数 OIDC 客户端库
+# 默认走 Basic —— 不通的话接入方会在自己那边反复查配置，而配置是对的。
+req GET /.well-known/openid-configuration > /dev/null
+has 'client_secret_basic' "$(body)" "发现文档声明支持 client_secret_basic"
+
+BASIC="$(printf '%s:%s' "$C_ID" "$C_SECRET" | base64 -w0)"
+eq 200 "$(exchange "$(bff_code)" -H "Authorization: Basic ${BASIC}")" \
+    "client_secret_basic 换令牌成功（声明与实现一致）"
+
+BAD_BASIC="$(printf '%s:%s' "$C_ID" "wrong" | base64 -w0)"
+eq 400 "$(exchange "$(bff_code)" -H "Authorization: Basic ${BAD_BASIC}")" "Basic 里的 secret 错误 → 拒绝"
+
+# 两处同时带凭证 = 无效请求，不"挑一个用"
+exchange "$(bff_code)" -H "Authorization: Basic ${BASIC}" \
+    --data-urlencode "client_secret=${C_SECRET}" > /dev/null
+has 'invalid_request' "$(body)" "Basic 与表单同时带凭证 → invalid_request"
+
+group "24. 刷新令牌的轮换与复用检测（BFF 必须知道）"
+
+# BFF 长期持有 refresh token，每 300 秒换一次 ID Token。这两条行为直接
+# 决定 BFF 该怎么写，写错的代价是把用户会话整个打掉。
+refresh_with() {
+    req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urlencoded' \
+        --data-urlencode 'grant_type=refresh_token' \
+        --data-urlencode "refresh_token=$1" \
+        --data-urlencode "client_id=${C_ID}" \
+        --data-urlencode "client_secret=${C_SECRET}"
+}
+
+[ -n "$REFRESH" ] && ok "换令牌时一并下发了 refresh token" ||
+    bad "换令牌时一并下发了 refresh token" "$(body)"
+
+eq 200 "$(refresh_with "$REFRESH")" "用 refresh token 换到新令牌"
+REFRESH2="$(jget refresh_token)"
+NEW_ID="$(jget id_token)"
+[ -n "$REFRESH2" ] && [ "$REFRESH2" != "$REFRESH" ] &&
+    ok "刷新令牌确实轮换了（返回的是新的）" ||
+    bad "刷新令牌确实轮换了" "旧=${REFRESH:0:10} 新=${REFRESH2:0:10}"
+[ -n "$NEW_ID" ] && ok "刷新同时下发新的 ID Token" || bad "刷新同时下发新的 ID Token" "$(body)"
+
+# 复用旧的：不只是失败，还会把该用户在该客户端上的全部令牌一起吊销。
+# BFF 若因超时重试而重放同一个 refresh token，代价是整个会话被打掉 ——
+# 所以 BFF 必须按会话串行化刷新，不能并发刷。
+eq 400 "$(refresh_with "$REFRESH")" "复用已轮换的刷新令牌 → 拒绝"
+eq 400 "$(refresh_with "$REFRESH2")" "复用检测触发后新令牌也失效（整个会话被吊销）"
+
+group "25. 运行期无 panic"
+
 
 
 

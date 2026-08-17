@@ -658,11 +658,94 @@ async fn create_authorize_response(
     }
 }
 
+/// 客户端认证阶段的错误响应。按 RFC 6749 §5.2 返回标准错误体。
+fn client_auth_error(code: &'static str, description: &str) -> Response {
+    (
+        axum::http::StatusCode::BAD_REQUEST,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(json!({ "error": code, "error_description": description })),
+    )
+        .into_response()
+}
+
+/// 从 `Authorization: Basic base64(client_id:client_secret)` 取客户端凭证。
+///
+/// RFC 6749 §2.3.1 把这条列为授权服务器**必须**支持，大多数 OIDC 客户端库
+/// 也默认走它。发现文档一直声明支持 `client_secret_basic`，但令牌端点原来
+/// 只解析表单 —— 声明与实现对不上。
+///
+/// 后果不是"少一种可选方式"：BFF 一类的机密客户端用标准库接入时，库按 Basic
+/// 发凭证，这边在表单里找不到 `client_secret`，报的是
+/// 「Client secret required for confidential clients」。接入方于是反复检查
+/// 自己的配置 —— 而配置是对的。**病因与故障形态对不上，是最难查的一类。**
+///
+/// 按 RFC 6749 §2.3.1，两处都出现凭证时视为无效请求，不做"挑一个用"。
+fn basic_client_credentials(headers: &HeaderMap) -> Option<(String, String)> {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    let raw = headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    let (scheme, encoded) = raw.split_once(' ')?;
+    if !scheme.eq_ignore_ascii_case("Basic") {
+        return None;
+    }
+    let decoded = STANDARD.decode(encoded.trim()).ok()?;
+    let text = String::from_utf8(decoded).ok()?;
+    let (id, secret) = text.split_once(':')?;
+
+    Some((percent_decode(id), percent_decode(secret)))
+}
+
+/// 解 `%XX` 转义。RFC 6749 §2.3.1 要求 Basic 里的两段先做 form-urlencoded 编码。
+///
+/// 为这一处引入 `percent-encoding` 依赖不划算：这里只需要处理 `%XX`，
+/// 而多一个依赖是长期成本。解不开的转义原样保留 —— 凭证里出现孤立的 `%`
+/// 时，宁可让它去和存储的密钥比对失败（结果是拒绝），也不要在这里报错，
+/// 那会把"密钥不对"和"编码不对"混成同一个故障。
+fn percent_decode(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| raw.to_string())
+}
+
 // 令牌端点
 async fn token(
     Extension(oidc_service): Extension<Arc<OidcService>>,
+    headers: HeaderMap,
     Form(request): Form<TokenRequest>,
 ) -> Response {
+    let mut request = request;
+
+    if let Some((basic_id, basic_secret)) = basic_client_credentials(&headers) {
+        // 两处都带凭证 = 无效请求。这里不"挑一个用"：那会让
+        // 「表单里的 secret 和头里的 secret 不一致」这种明显异常被静默接受。
+        if request.client_secret.is_some() {
+            return client_auth_error(
+                "invalid_request",
+                "client credentials must not be sent in both the Authorization header                  and the request body",
+            );
+        }
+        if request.client_id != basic_id {
+            return client_auth_error(
+                "invalid_client",
+                "client_id in the Authorization header does not match the request body",
+            );
+        }
+        request.client_secret = Some(basic_secret);
+    }
+
     match oidc_service.exchange_code_for_tokens(&request).await {
         Ok(token_response) => (
             [(header::CACHE_CONTROL, "no-store")],
@@ -1003,5 +1086,71 @@ mod tests {
 
         assert!(url.starts_with("https://app.example/cb?tenant=1&error=login_required"));
         assert!(url.contains("&state=xyz"));
+    }
+}
+
+#[cfg(test)]
+mod client_auth_tests {
+    use super::{basic_client_credentials, percent_decode};
+    use axum::http::{header, HeaderMap, HeaderValue};
+    use base64::{engine::general_purpose::STANDARD, Engine};
+
+    fn headers_with(value: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        h
+    }
+
+    fn basic(raw: &str) -> HeaderMap {
+        headers_with(&format!("Basic {}", STANDARD.encode(raw)))
+    }
+
+    #[test]
+    fn reads_credentials_from_the_basic_header() {
+        // 发现文档一直声明支持 client_secret_basic，而令牌端点原来只解析表单。
+        // 大多数 OIDC 客户端库默认走 Basic —— 这条不通，接入方会在自己那边
+        // 反复查配置，而配置是对的。
+        let got = basic_client_credentials(&basic("os-client:s3cret")).expect("credentials");
+        assert_eq!(got, ("os-client".to_string(), "s3cret".to_string()));
+    }
+
+    #[test]
+    fn scheme_is_case_insensitive() {
+        // RFC 7235：认证方案名不区分大小写。
+        let raw = STANDARD.encode("a:b");
+        for scheme in ["Basic", "basic", "BASIC", "BaSiC"] {
+            assert!(
+                basic_client_credentials(&headers_with(&format!("{scheme} {raw}"))).is_some(),
+                "{scheme} should be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn other_schemes_and_malformed_values_are_ignored() {
+        // 忽略而不是报错：Bearer 头是别的用途，不该在这里把请求打回。
+        assert!(basic_client_credentials(&headers_with("Bearer abc")).is_none());
+        assert!(basic_client_credentials(&headers_with("Basic !!!not-base64")).is_none());
+        assert!(basic_client_credentials(&basic("no-colon-here")).is_none());
+        assert!(basic_client_credentials(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn percent_escapes_are_decoded() {
+        // RFC 6749 §2.3.1 要求两段先做 form-urlencoded 编码；
+        // 含 `:` 或空格的密钥不解码就永远比对不上。
+        assert_eq!(percent_decode("a%3Ab"), "a:b");
+        assert_eq!(percent_decode("s%20p"), "s p");
+        assert_eq!(percent_decode("plain"), "plain");
+        // 孤立的 % 原样保留，不报错 —— 见函数文档
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn a_colon_inside_the_secret_is_preserved() {
+        // 只在第一个 `:` 处切分：密钥里可以合法地含冒号。
+        let got = basic_client_credentials(&basic("id:pa:ss:word")).expect("credentials");
+        assert_eq!(got, ("id".to_string(), "pa:ss:word".to_string()));
     }
 }
