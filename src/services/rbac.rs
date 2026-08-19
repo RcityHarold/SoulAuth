@@ -16,6 +16,37 @@ use crate::{
     services::database::Database,
 };
 
+/// 角色名 / 权限名的校验。
+///
+/// 以前完全不校验：`{"name": ""}` 能建出一个空名字的角色，而所有按名字寻址的
+/// 接口（`/roles/{role_name}`、`check_user_role`）都拿它没办法 —— 建得出来、
+/// 找不回去。名字同时也是 RBAC 判定的键，混入空白或控制字符会让
+/// "看起来一样的两个角色"实际是两个。
+fn validate_rbac_name(kind: &str, name: &str) -> Result<String, AuthError> {
+    let trimmed = name.trim();
+
+    if trimmed.is_empty() {
+        return Err(AuthError::ValidationError(format!("{kind} name is required")));
+    }
+    if trimmed.chars().count() > 64 {
+        return Err(AuthError::ValidationError(format!(
+            "{kind} name must be at most 64 characters"
+        )));
+    }
+    // 权限名带 `soulauth:` 命名空间前缀，所以冒号要放行；
+    // 其余只收字母数字与 `_ - . :`，把空白和控制字符挡在外面。
+    if !trimmed
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':'))
+    {
+        return Err(AuthError::ValidationError(format!(
+            "{kind} name may only contain letters, digits and '_' '-' '.' ':'"
+        )));
+    }
+
+    Ok(trimmed.to_string())
+}
+
 pub struct RBACService {
     db: Arc<Database>,
 }
@@ -26,7 +57,9 @@ impl RBACService {
     }
 
     // 角色管理
-    pub async fn create_role(&self, request: CreateRoleRequest, created_by: &User) -> Result<RoleResponse, AuthError> {
+    pub async fn create_role(&self, mut request: CreateRoleRequest, created_by: &User) -> Result<RoleResponse, AuthError> {
+        request.name = validate_rbac_name("Role", &request.name)?;
+
         // 检查角色名是否已存在
         if self.get_role_by_name(&request.name).await?.is_some() {
             return Err(AuthError::ValidationError("Role name already exists".to_string()));
@@ -332,7 +365,9 @@ impl RBACService {
         Ok(())
     }
 
-    pub async fn create_permission(&self, request: CreatePermissionRequest, created_by: &User) -> Result<PermissionResponse, AuthError> {
+    pub async fn create_permission(&self, mut request: CreatePermissionRequest, created_by: &User) -> Result<PermissionResponse, AuthError> {
+        request.name = validate_rbac_name("Permission", &request.name)?;
+
         // 检查权限名是否已存在
         if self.get_permission_by_name(&request.name).await?.is_some() {
             return Err(AuthError::ValidationError("Permission name already exists".to_string()));
@@ -883,5 +918,28 @@ impl RBACService {
         permissions.dedup();
 
         Ok(permissions)
+    }
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::validate_rbac_name;
+
+    #[test]
+    fn rejects_names_that_cannot_be_addressed_later() {
+        // 建得出来、按名字找不回去 —— 所有 /roles/{name} 形式的接口都拿它没办法。
+        for bad in ["", "   ", "has space", "tab\there", "换行\n"] {
+            assert!(validate_rbac_name("Role", bad).is_err(), "should reject {bad:?}");
+        }
+        assert!(validate_rbac_name("Role", &"x".repeat(65)).is_err(), "过长应拒绝");
+    }
+
+    #[test]
+    fn accepts_seeded_shapes_including_the_namespace_prefix() {
+        // 种子数据里的真实形状必须能通过，否则 initial_data.sql 与代码就对不上了。
+        for ok in ["admin", "user_manager", "soulauth:users.read", "soulauth:oidc_clients.write"] {
+            assert!(validate_rbac_name("Permission", ok).is_ok(), "should accept {ok}");
+        }
+        assert_eq!(validate_rbac_name("Role", "  admin  ").unwrap(), "admin");
     }
 }

@@ -1662,6 +1662,58 @@ CC="$(req POST /api/oidc/clients -H "Authorization: Bearer ${TOK_AUDIT}" \
          "allowed_response_types":["code"]}')"
 eq 400 "$CC" "注册时拒收 client_credentials（令牌端点实现不了它）"
 
+# ───────── 25.8 审计口径与 RBAC 名称校验 ─────────
+#
+# 空系统不得报高风险：窗口内一次登录都没有时 success_rate 是 0.0 而非"无数据"，
+# 不加判断就会让一个刚装好的部署在执行摘要里显示 risk_level=High，
+# 外加一条"认证成功率 0.0%"的高优先级告警。第一天就喊狼来了。
+restart_app
+sql "DELETE user_activity" > /dev/null
+TOK_R="$(login_token admin@test.local "CorrectHorse42!")"
+
+# 上面这次登录本身会写一条 login_success，先清掉，制造真正的"零数据"窗口
+sql "DELETE user_activity" > /dev/null
+req GET "/api/audit/security-report?days=1" -H "Authorization: Bearer ${TOK_R}" > /dev/null
+RISK="$(python3 -c "
+import json
+try: print(json.load(open('$WORK/body')).get('executive_summary',{}).get('risk_level',''))
+except Exception: print('')" 2>/dev/null)"
+eq Low "$RISK" "零登录数据的窗口不报高风险"
+
+HIGH_RECS="$(python3 -c "
+import json
+try:
+    r=json.load(open('$WORK/body')).get('recommendations',[])
+    print(sum(1 for x in r if x.get('priority')=='High'))
+except Exception: print(-1)" 2>/dev/null)"
+eq 0 "$HIGH_RECS" "零数据时不发高优先级告警"
+
+# 限流违规改为数真实的审计事件，而不是估算"失败登录超过 10 次的 IP 个数"
+sql "DELETE user_activity" > /dev/null
+sql "CREATE user_activity CONTENT { user_id: NONE, action: 'rate_limit_violation',
+     category: 'Security', ip_address: '203.0.113.9', user_agent: 'itest',
+     details: {}, status: 'Warning', timestamp: time::now().unix() }" > /dev/null
+req GET "/api/audit/security-metrics?hours=1" -H "Authorization: Bearer ${TOK_R}" > /dev/null
+RLV="$(python3 -c "
+import json
+try: print(json.load(open('$WORK/body')).get('rate_limit_violations',-1))
+except Exception: print(-1)" 2>/dev/null)"
+eq 1 "$RLV" "限流违规数来自真实的 rate_limit_violation 事件"
+
+# RBAC 名称校验：空名字建出来就再也按名字找不回去
+eq 400 "$(req POST /api/rbac/roles -H "Authorization: Bearer ${TOK_R}" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"","display_name":"空名字","description":null}')" \
+    "拒绝空角色名"
+eq 400 "$(req POST /api/rbac/roles -H "Authorization: Bearer ${TOK_R}" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"has space","display_name":"带空格","description":null}')" \
+    "拒绝含空白的角色名"
+eq 200 "$(req POST /api/rbac/roles -H "Authorization: Bearer ${TOK_R}" \
+    -H 'Content-Type: application/json' \
+    -d '{"name":"itest_role","display_name":"正常","description":null}')" \
+    "正常角色名可创建"
+
 group "26. 运行期无 panic"
 
 
