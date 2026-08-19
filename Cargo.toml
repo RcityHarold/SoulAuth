@@ -1,7 +1,12 @@
 [package]
-name = "rust-auth"
+name = "soulauth"
 version = "0.1.0"
 edition = "2021"
+description = "An authentication service in Rust: accounts, credentials, sessions, and an OpenID Connect provider."
+repository = "https://github.com/RcityHarold/SoulAuth"
+readme = "README.md"
+keywords = ["authentication", "oidc", "oauth2", "mfa", "rbac"]
+categories = ["authentication", "web-programming"]
 
 [dependencies]
 # Web 框架

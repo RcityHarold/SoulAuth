@@ -31,6 +31,35 @@ pub struct AuditQuery {
     pub hours: Option<i64>,
 }
 
+/// 报表窗口的上限。
+///
+/// 上限不是为了"合理"，是因为 `chrono::Duration::days()` **越界会 panic**：
+/// `?days=99999999`（约 27 万年）就足以让 `Utc::now() - Duration::days(days)`
+/// 溢出，handler 当场 panic、连接被丢弃、客户端收到的是网络错误而不是 HTTP 错误。
+/// 实测 `?days=99999999` / `?days=<i64::MAX>` / `?hours=<i64::MAX>` 各打出一次 panic。
+/// 这不是攻击性输入，是手滑就能打出来的值。
+const MAX_REPORT_DAYS: i64 = 366;
+const MAX_REPORT_HOURS: i64 = MAX_REPORT_DAYS * 24;
+
+/// 天数窗口：非正值回落到默认，超出上限则夹住。
+///
+/// 负数同样要挡：`?days=-1` 会让 start_time 落在**未来**，
+/// 查询恒空，于是报表安静地返回"这段时间什么都没发生"——
+/// 比报错更难发现。
+fn clamp_days(requested: Option<i64>, default_days: i64) -> i64 {
+    match requested {
+        Some(d) if d > 0 => d.min(MAX_REPORT_DAYS),
+        _ => default_days,
+    }
+}
+
+fn clamp_hours(requested: Option<i64>, default_hours: i64) -> i64 {
+    match requested {
+        Some(h) if h > 0 => h.min(MAX_REPORT_HOURS),
+        _ => default_hours,
+    }
+}
+
 #[derive(Serialize)]
 pub struct AuditDashboard {
     pub period: String,
@@ -267,7 +296,7 @@ pub async fn get_audit_dashboard(
     let user_id = authed_user.id()?;
     require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
-    let days = query.days.unwrap_or(7);
+    let days = clamp_days(query.days, 7);
     let start_time = Utc::now() - Duration::days(days);
     
     tracing::info!("Generating audit dashboard for {} days", days);
@@ -319,7 +348,7 @@ pub async fn get_security_metrics(
     let user_id = authed_user.id()?;
     require_permission!(&db, &user_id, crate::models::permission::names::SECURITY_READ);
 
-    let hours = query.hours.unwrap_or(24);
+    let hours = clamp_hours(query.hours, 24);
     let start_time = Utc::now() - Duration::hours(hours);
     
     tracing::info!("Generating security metrics for {} hours", hours);
@@ -354,7 +383,7 @@ pub async fn get_activity_summary(
     let user_id = authed_user.id()?;
     require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
-    let days = query.days.unwrap_or(7);
+    let days = clamp_days(query.days, 7);
     let start_time = Utc::now() - Duration::days(days);
     
     tracing::info!("Generating activity summary for {} days", days);
@@ -414,7 +443,7 @@ pub async fn generate_security_report(
     let user_id = authed_user.id()?;
     require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
 
-    let days = query.days.unwrap_or(30);
+    let days = clamp_days(query.days, 30);
     let start_time = Utc::now() - Duration::days(days);
     
     tracing::info!("Generating comprehensive security report for {} days", days);

@@ -11,8 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    models::user::User, require_permission_status, services::database::Database,
-    utils::jwt::AuthedUser,
+    require_permission_status, services::database::Database, utils::jwt::AuthedUser,
 };
 
 #[derive(Debug, Serialize)]
@@ -43,10 +42,17 @@ async fn get_membership_overview(
     let user_id = user.id().map_err(|_| StatusCode::UNAUTHORIZED)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::USERS_READ);
 
-    let users: Vec<User> = db
+    // 在库里聚合，只取回几行。
+    //
+    // 以前这里是 `SELECT * FROM user`：无 LIMIT、无聚合，把每一行反序列化成
+    // `User`（**连密码哈希一起**）装进 Vec 再在应用侧遍历计数。用户量上来之后
+    // 这是一次可预期的 OOM，而且把全量口令哈希拉进了进程内存 —— 一个只需要
+    // 几个计数的看板接口没有任何理由碰到它们。
+    let rows: Vec<serde_json::Value> = db
         .query_take0_vec_no_bind(
             "membership_overview",
-            "SELECT * FROM user WHERE account_status != 'Deleted'",
+            "SELECT membership_level, count() AS total FROM user \
+             WHERE account_status != 'Deleted' GROUP BY membership_level",
         )
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -55,22 +61,29 @@ async fn get_membership_overview(
     for level in ["FREE", "PRO", "PREMIUM", "ULTIMATE", "TEAM"] {
         distribution.insert(level.to_string(), json!(0));
     }
-    for user in &users {
-        let level = if user.membership_level.trim().is_empty() {
-            "FREE".to_string()
-        } else {
-            user.membership_level.trim().to_ascii_uppercase()
-        };
-        let current = distribution
-            .get(&level)
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0);
-        distribution.insert(level, json!(current + 1));
+
+    let mut total_users: u64 = 0;
+    for row in &rows {
+        let count = row.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+        total_users += count;
+
+        let level = row
+            .get("membership_level")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_ascii_uppercase())
+            .unwrap_or_else(|| "FREE".to_string());
+
+        // 库里出现了预设档位之外的值时，仍然计入总数并单列一档，
+        // 而不是悄悄丢掉 —— 看板的总数对不上账比多出一档更难查。
+        let current = distribution.get(&level).and_then(|v| v.as_u64()).unwrap_or(0);
+        distribution.insert(level, json!(current + count));
     }
 
     Ok(Json(ApiResponse::success(
         json!({
-            "total_users": users.len(),
+            "total_users": total_users,
             "distribution": distribution,
             "limits": {
                 "FREE": { "ai_limit": 1, "daily_messages": 10, "price": 0.0 },

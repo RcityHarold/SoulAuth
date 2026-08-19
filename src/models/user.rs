@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
+use crate::error::AuthError;
+
 fn default_membership_level() -> String {
     "FREE".to_string()
 }
@@ -197,6 +199,30 @@ impl User {
     pub fn account_status_parsed(&self) -> AccountStatus {
         AccountStatus::parse(&self.account_status)
     }
+
+    /// 账号当前是否允许执行任何需要"这个人还在"的操作。
+    ///
+    /// **这是全库唯一的一处状态闸门判定**，所有入口共用：
+    /// 令牌校验（`utils::jwt`）、登录（`services::auth`）、密码重置、
+    /// 以及 OIDC 的三个关口（userinfo / 签发令牌 / authorize 复用会话）。
+    ///
+    /// 收成一处的原因是它此前不是：判定逐处抄写，于是"哪些路径要看状态"
+    /// 变成了每加一条路径就要重新想一次的事。实际结果是原生 API 那侧看了、
+    /// OIDC 那侧一处都没看 —— 停用一个账号，它在接入方那里照旧能用刷新令牌
+    /// 无限续期。判定只有一份，新路径就只会忘记调用（编译期能靠 review 抓到），
+    /// 而不会出现"抄了但抄漏一个分支"这种不报错的偏差。
+    ///
+    /// 放行集合是闭的：只有 `Active` 通过，其余一律拒。
+    pub fn ensure_usable(&self) -> Result<(), AuthError> {
+        match self.account_status_parsed() {
+            AccountStatus::Active => Ok(()),
+            AccountStatus::Suspended => Err(AuthError::AccountSuspended),
+            AccountStatus::Inactive => Err(AuthError::AccountInactive),
+            AccountStatus::PendingDeletion | AccountStatus::Deleted => {
+                Err(AuthError::AccountDeleted)
+            }
+        }
+    }
 }
 
 impl From<User> for UserResponse {
@@ -261,6 +287,53 @@ mod account_status_tests {
         for raw in ["Inactive", "Suspended", "PendingDeletion", "Deleted"] {
             assert_ne!(AccountStatus::parse(raw), AccountStatus::Active, "{raw}");
         }
+    }
+
+    #[test]
+    fn ensure_usable_admits_only_active() {
+        use crate::error::AuthError;
+        use crate::models::user::User;
+
+        fn user_with(status: &str) -> User {
+            User {
+                id: None,
+                subject_id: None,
+                email: "a@example.com".to_string(),
+                username: "a".to_string(),
+                username_normalized: "a".to_string(),
+                password_hash: None,
+                created_at: 0,
+                updated_at: 0,
+                is_email_verified: true,
+                verification_token: None,
+                verification_token_expires_at: None,
+                account_status: status.to_string(),
+                membership_level: "FREE".to_string(),
+                membership_expiry: None,
+                last_login_at: None,
+                last_login_ip: None,
+            }
+        }
+
+        assert!(user_with("Active").ensure_usable().is_ok());
+        assert!(matches!(
+            user_with("Suspended").ensure_usable(),
+            Err(AuthError::AccountSuspended)
+        ));
+        assert!(matches!(
+            user_with("Inactive").ensure_usable(),
+            Err(AuthError::AccountInactive)
+        ));
+        assert!(matches!(
+            user_with("Deleted").ensure_usable(),
+            Err(AuthError::AccountDeleted)
+        ));
+        assert!(matches!(
+            user_with("PendingDeletion").ensure_usable(),
+            Err(AuthError::AccountDeleted)
+        ));
+        // 未知值同样不可用 —— 与 AccountStatus::parse 的 fail-closed 一致。
+        assert!(user_with("whatever").ensure_usable().is_err());
     }
 
     #[test]

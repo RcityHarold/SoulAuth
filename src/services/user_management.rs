@@ -275,12 +275,6 @@ impl UserManagementService {
         if let Some(newsletter) = request.newsletter {
             preferences.newsletter = newsletter;
         }
-        if let Some(two_factor_required) = request.two_factor_required {
-            preferences.two_factor_required = two_factor_required;
-        }
-        if let Some(session_timeout) = request.session_timeout {
-            preferences.session_timeout = session_timeout;
-        }
         if let Some(timezone) = request.timezone {
             preferences.timezone = timezone;
         }
@@ -369,8 +363,6 @@ impl UserManagementService {
                 marketing_emails = $marketing_emails ?? marketing_emails,
                 security_emails = $security_emails ?? security_emails,
                 newsletter = $newsletter ?? newsletter,
-                two_factor_required = $two_factor_required ?? two_factor_required,
-                session_timeout = $session_timeout ?? session_timeout,
                 timezone = $timezone ?? timezone,
                 date_format = $date_format ?? date_format,
                 time_format = $time_format ?? time_format,
@@ -387,8 +379,6 @@ impl UserManagementService {
             "marketing_emails": request.marketing_emails,
             "security_emails": request.security_emails,
             "newsletter": request.newsletter,
-            "two_factor_required": request.two_factor_required,
-            "session_timeout": request.session_timeout,
             "timezone": request.timezone,
             "date_format": request.date_format,
             "time_format": request.time_format,

@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+# 注意：不要把 `-D warnings` 放进全局 RUSTFLAGS —— 那会连同依赖一起 deny，
+# 上游 crate 的任意一条警告都能让构建红掉。只对本 crate 生效即可（见 clippy 步骤）。
+
+jobs:
+  check:
+    name: check · clippy · test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: cargo check
+        run: cargo check --all-targets
+
+      # `-D warnings` 只作用于本 crate。这一步比看上去重要：
+      # 本 crate 的 dead_code 不会自动报警（实测：往源文件里加一个显然无人调用的
+      # 私有 fn，rustc 一声不吭），所以"编译零警告"本身不构成整洁的证据，
+      # 需要 clippy 这道闸门顶上。
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo test
+        run: cargo test
+
+  integration:
+    name: integration suite
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install SurrealDB
+        run: |
+          curl -sSf https://install.surrealdb.com | sh
+          echo "$HOME/.surrealdb" >> "$GITHUB_PATH"
+
+      - name: Verify SurrealDB is on PATH
+        run: surreal version
+
+      - name: Build
+        run: cargo build
+
+      # 端到端：真实 SurrealDB + 真实服务进程 + 零依赖的 SMTP / OAuth 替身。
+      # 覆盖的是单测够不到的契约级行为 —— 授权码流程、限流跨副本合账、
+      # 以及停用账号之后各条凭证是否真的一起失效。
+      - name: Integration suite
+        run: ./tests/integration.sh
+
+      - name: Dump service log on failure
+        if: failure()
+        run: |
+          echo "集成脚本默认在退出时清理现场；失败时用 KEEP_WORK=1 本地复跑可保留日志。"

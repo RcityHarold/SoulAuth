@@ -305,14 +305,21 @@ MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
 #### 数据库
 
 ```env
-DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000
+DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000；写 https:// 即走 TLS
 DATABASE_USER=root
 DATABASE_PASS=root
 DATABASE_NAMESPACE=auth            # 默认 auth
 DATABASE_NAME=main                 # 默认 main
 DATABASE_CONNECTION_TIMEOUT=30
-DATABASE_MAX_CONNECTIONS=10
 ```
+
+**关于数据库链路加密**：`DATABASE_URL` 带 `https://` 前缀即用 TLS 连接器，
+否则走明文。指向非环回地址却用明文时，启动日志会给出一条 WARN —— 那条链路上
+跑的是数据库口令、密码哈希与会话令牌。放在受信私有网段里可以接受，
+跨网段务必用 https。
+
+> 早期版本无论写不写 `https://` 都只用明文连接器（scheme 会被剥掉后丢弃），
+> 且没有任何提示。若你此前配的是 `https://`，请确认数据库侧确实启用了 TLS。
 
 #### 网络与前端
 
@@ -384,7 +391,7 @@ EMAIL_VERIFICATION_ENABLED=false   # 开启后注册需先验证邮箱
 #### 其它
 
 ```env
-JWT_EXPIRATION=86400               # 秒，默认 1 天
+JWT_EXPIRATION=86400               # 会话与访问令牌有效期，秒，默认 1 天
 PASSWORD_MIN_LENGTH=12
 AUTH_SESSION_CACHE_TTL_SECONDS=5   # 0 = 每请求都校验会话
 PROXY_ENABLED=false                # 出站 OAuth 请求走代理
@@ -482,29 +489,44 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
 
 3. **启动应用程序**：
    ```bash
-   ./target/release/rust-auth
+   ./target/release/soulauth
    ```
 
 4. **验证部署**：
    ```bash
-   # 检查健康状态
    curl http://localhost:8080/health
-   
-   # 创建第一个管理员用户
-   curl -X POST http://localhost:8080/api/auth/register \
-     -H "Content-Type: application/json" \
-     -d '{"email":"admin@your-domain.com","password":"secure-password"}'
+   # → {"status":"ok","uptime_seconds":12}
    ```
 
-5. **分配管理员权限**：
+5. **建立第一个管理员**：
+
+   注册接口本身不发管理员权限——第一个 admin 必须在库里手工授予，
+   这是刻意的：否则"谁是第一个注册的人"就成了拿到全部权限的条件。
+
    ```bash
-   # 登录获取JWT token
+   # ① 注册。username 是必填项，密码需满足策略：
+   #    至少 12 个字符，且含大写 / 小写 / 数字 / 符号四类中的三类
+   curl -X POST http://localhost:8080/api/auth/register \
+     -H "Content-Type: application/json" \
+     -d '{"email":"admin@your-domain.com","username":"admin","password":"CorrectHorse42!"}'
+
+   # ② 在数据库里把 admin 角色授予该账号
+   curl -u root:root -H 'surreal-ns: auth' -H 'surreal-db: main' \
+     --data "LET \$u = (SELECT VALUE id FROM user WHERE email = 'admin@your-domain.com')[0];
+             CREATE user_role CONTENT {
+               user_id: \$u, role_id: role:admin,
+               assigned_at: 0, assigned_by: user:system
+             };" \
+     http://127.0.0.1:8000/sql
+
+   # ③ 重新登录拿令牌（角色变更后需要重新登录，令牌本身不带角色）
    curl -X POST http://localhost:8080/api/auth/login \
      -H "Content-Type: application/json" \
-     -d '{"email":"admin@your-domain.com","password":"secure-password"}'
-   
-   # 手动为第一个用户分配admin角色（通过数据库）
-   # 或者使用系统管理界面
+     -d '{"email":"admin@your-domain.com","password":"CorrectHorse42!"}'
+
+   # ④ 确认权限已生效
+   curl http://localhost:8080/api/auth/me -H "Authorization: Bearer <token>"
+   # → "is_admin": true
    ```
 
 ## 作为 OIDC Provider 接入（SoulSeedOS / 其它应用）

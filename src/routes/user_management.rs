@@ -18,7 +18,8 @@ use crate::{
         user_activity::ActivityLogRequest,
     },
     services::{
-        auth_cache::AuthCache, database::Database, user_management::UserManagementService,
+        auth_cache::AuthCache, database::Database, oidc::OidcService,
+        user_management::UserManagementService,
     },
     utils::jwt::AuthedUser,
     require_permission,
@@ -166,6 +167,7 @@ async fn update_user_account_status(
     authed_user: AuthedUser,
     Extension(db): Extension<Arc<Database>>,
     Extension(auth_cache): Extension<Arc<AuthCache>>,
+    Extension(oidc_service): Extension<Arc<OidcService>>,
     Extension(config): Extension<Config>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
@@ -175,7 +177,8 @@ async fn update_user_account_status(
     require_permission!(db, &current_user_id, crate::models::permission::names::USERS_WRITE);
     let current_user = authed_user.user().clone();
 
-    let service = UserManagementService::new(db);
+    let new_status = request.status.clone();
+    let service = UserManagementService::new(db.clone());
     let response = service
         .update_account_status(
             &user_id,
@@ -185,10 +188,25 @@ async fn update_user_account_status(
         )
         .await?;
 
+    let normalized_id = crate::utils::record_id::normalize_user_id(&user_id);
+
     // 停用 / 删除必须立刻生效，不能等鉴权缓存自然过期。
-    auth_cache
-        .invalidate_user(&crate::utils::record_id::normalize_user_id(&user_id))
-        .await;
+    auth_cache.invalidate_user(&normalized_id).await;
+
+    // 改状态到非 Active 时，还要把已经发出去的凭证一并作废 —— 与改密路径同一套动作。
+    //
+    // 只改字段是不够的：字段只在"下次有人来问"时才起作用，而 OIDC 那侧的接入方
+    // 手里已经握着 access / refresh token，refresh 每次还会轮换出新的一张。
+    // 此前这里只清了鉴权缓存，session 行与 OIDC 令牌原样留着，
+    // 于是停用在接入方那一侧根本不会到达。
+    if new_status != crate::models::user::AccountStatus::Active {
+        if let Err(e) = db.delete_sessions_by_user_id(&normalized_id).await {
+            tracing::error!("Failed to revoke sessions after status change: {e}");
+        }
+        if let Err(e) = oidc_service.revoke_all_tokens_for_user(&normalized_id).await {
+            tracing::error!("Failed to revoke OIDC tokens after status change: {e}");
+        }
+    }
 
     Ok(Json(ApiResponse::success(response, "Account status updated successfully")))
 }

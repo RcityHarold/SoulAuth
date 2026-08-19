@@ -379,14 +379,13 @@ function OIDCLogin() {
 ### 会话监控
 
 ```bash
-# 获取全局会话统计
-curl http://localhost:8080/api/sso/sessions/stats \
-  -H "Authorization: Bearer admin-token"
-
-# 获取用户会话
-curl http://localhost:8080/api/sso/users/user123/sessions \
-  -H "Authorization: Bearer admin-token"
+# 查看本人的活跃会话（每条含 IP / User-Agent / 是否当前会话）
+curl http://localhost:8080/api/auth/sessions \
+  -H "Authorization: Bearer user-token"
 ```
+
+会话吊销是自动的：登出、全端登出、改密、以及管理员停用账号，
+都会删掉服务端 `session` 行并吊销该用户已签发的 OIDC 访问 / 刷新令牌。
 
 ### 客户端管理
 
@@ -402,11 +401,8 @@ curl -X POST http://localhost:8080/api/oidc/clients/client123/regenerate-secret 
 
 ### 清理过期数据
 
-```bash
-# 清理过期会话
-curl -X POST http://localhost:8080/api/sso/sessions/cleanup \
-  -H "Authorization: Bearer admin-token"
-```
+服务内置后台任务，每小时清理一次过期的会话、授权码、OIDC 令牌、
+限流计数与账号锁定记录，无需手工触发。
 
 ## 生产部署注意事项
 

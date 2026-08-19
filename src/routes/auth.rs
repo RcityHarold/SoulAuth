@@ -177,6 +177,7 @@ pub fn router() -> Router {
         .route("/login", post(login))
         .route("/admin/login", post(admin_login))
         .route("/verify-email/:token", get(verify_email))
+        .route("/resend-verification", post(resend_verification))
         .route("/me", get(get_current_user))
         .route("/initialize-password", post(initialize_password))
         .route("/request-password-reset", post(request_password_reset))
@@ -511,6 +512,22 @@ async fn verify_email(
     let ctx = request_context(&addr, &headers, &config);
     let issued = auth_service.verify_email(token, &ctx).await?;
     Ok(Json(issued.response))
+}
+
+/// 重新发送邮箱验证信。
+///
+/// 无条件返回 200：邮箱是否存在、是否已验证、账号是否可用都不通过状态码透露，
+/// 与 `request_password_reset` 同一套防枚举语义。
+async fn resend_verification(
+    Extension(auth_service): Extension<Arc<AuthService>>,
+    Json(request): Json<RequestPasswordResetRequest>,
+) -> Result<Json<serde_json::Value>> {
+    auth_service
+        .resend_verification_email(request.email)
+        .await?;
+    Ok(Json(json!({
+        "message": "Verification email sent if the address is registered and still unverified"
+    })))
 }
 
 async fn get_current_user(

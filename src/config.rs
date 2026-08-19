@@ -21,7 +21,6 @@ pub struct Config {
     pub database_namespace: String,
     pub database_name: String,
     pub database_connection_timeout: u64,
-    pub database_max_connections: u32,
     pub jwt_secret: String,
     pub jwt_expiration: i64,
     // 第三方登录的凭证是**可选**的：只用邮箱密码登录的部署不该被迫在配置里
@@ -213,7 +212,6 @@ impl Config {
                 .unwrap_or_else(|| "auth".to_string()),
             database_name: optional("DATABASE_NAME").unwrap_or_else(|| "main".to_string()),
             database_connection_timeout: parse_with_default("DATABASE_CONNECTION_TIMEOUT", 30)?,
-            database_max_connections: parse_with_default("DATABASE_MAX_CONNECTIONS", 10)?,
             jwt_secret: required("JWT_SECRET")?,
             jwt_expiration: parse_with_default("JWT_EXPIRATION", 86_400)?,
             google_client_id: optional("GOOGLE_CLIENT_ID"),
@@ -372,7 +370,6 @@ impl Config {
             database_namespace: "auth".to_string(),
             database_name: "main".to_string(),
             database_connection_timeout: 30,
-            database_max_connections: 10,
             jwt_secret: "0123456789abcdef0123456789abcdef".to_string(),
             jwt_expiration: 3600,
             google_client_id: Some("g".to_string()),

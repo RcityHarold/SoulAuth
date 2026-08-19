@@ -7,7 +7,7 @@ without ever touching its database.
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
-axum 0.6 · SurrealDB 3.0 · 77 HTTP endpoints · ~18k lines
+axum 0.6 · SurrealDB 3.0 · 66 HTTP endpoints · ~17k lines
 122 unit tests (5s, no external dependencies) · 25 integration groups / 242 assertions
 ```
 
@@ -39,7 +39,7 @@ about the account, never an authorization decision inside the consumer. See
 | **Credentials** | Argon2 password hashing, password policy (length + character-class rules), first-password initialisation for accounts created via OAuth |
 | **Third-party sign-in** | Google and GitHub. Both optional — an instance that only wants email/password configures neither |
 | **MFA** | TOTP (RFC 6238) with QR provisioning, single-use backup codes, replay rejection via a step watermark |
-| **Sessions** | Server-side session records, single logout, global logout (also revokes issued OIDC tokens), SSO session tracking per client |
+| **Sessions** | Server-side session records, single logout, global logout (also revokes issued OIDC tokens and every browser session), suspension revokes both |
 | **OIDC provider** | Discovery, JWKS, authorization code + PKCE (S256 only), refresh with rotation, userinfo, RP-initiated logout, client management API |
 | **RBAC** | Roles, permissions, user/role and role/permission assignment — scoped to SoulAuth's own admin surface |
 | **Protection** | Per-endpoint rate limiting shared across replicas, account lockout on both user and IP dimensions, CORS allow-list |
@@ -80,7 +80,7 @@ see [Production posture](#production-posture) and
 
 ## API surface
 
-77 endpoints across eight modules. The route tables in `src/routes/` are the
+66 endpoints across seven modules. The route tables in `src/routes/` are the
 authoritative list; this is the shape of it.
 
 | Module | Endpoints | Covers |
@@ -88,7 +88,6 @@ authoritative list; this is the shape of it.
 | `auth` | 20 | register, login, logout, logout-all, sessions, email verification, password reset, MFA (5), OAuth entry and callback for two providers |
 | `user_management` | 14 | own profile / preferences / activity log, plus admin reads and account-status / membership writes |
 | `rbac` | 13 | role and permission CRUD, assignment in both directions, self permission checks |
-| `sso_session` | 11 | SSO session create / read / extend / logout, per-client session attach and detach, stats, cleanup |
 | `oidc` | 7 | discovery, JWKS, authorize, token, userinfo, logout |
 | `oidc_client` | 6 | client registration, listing, update, disable, secret rotation |
 | `audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
