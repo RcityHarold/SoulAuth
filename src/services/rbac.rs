@@ -140,7 +140,11 @@ impl RBACService {
         }
 
         info!("Role '{}' updated by user '{}'", role_name, updated_by.email);
-        Ok(updated_role[0].clone().into())
+        // 同 list_roles：不补的话，改一次角色名就会拿到一个"权限为空"的响应，
+        // 而权限其实一条没少。
+        let mut responses: Vec<RoleResponse> = vec![updated_role[0].clone().into()];
+        self.attach_permissions(&mut responses).await?;
+        Ok(responses.remove(0))
     }
 
     pub async fn delete_role(&self, role_name: &str, deleted_by: &User) -> Result<(), AuthError> {
@@ -232,10 +236,102 @@ impl RBACService {
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        Ok(roles.into_iter().map(|role| role.into()).collect())
+        // 填上真实权限。
+        //
+        // `From<Role>` 只能把 permissions 置空（它拿不到数据库），此前列表接口
+        // 就这么原样返回了 —— 于是 GET /api/rbac/roles 里每个角色都显示 0 条权限，
+        // 而 GET /api/rbac/roles/{name} 对同一个角色能返回 18 条。管理后台的角色
+        // 列表据此渲染，看到的是"所有角色都没有任何权限"。
+        //
+        // 用两次批量查询补齐，而不是逐角色查一次：角色数虽然不多，
+        // 但 list_users 的 N+1 已经是本轮点过名的问题，不该在这里再造一个。
+        let mut responses: Vec<RoleResponse> = roles.into_iter().map(Into::into).collect();
+        self.attach_permissions(&mut responses).await?;
+        Ok(responses)
     }
 
-    // 权限管理
+    /// 给一批 `RoleResponse` 批量填充权限名，固定两次查询。
+    ///
+    /// 两处都用**字符串形式**比较 record id，而不是把 `RecordId` 当绑定值传进去：
+    /// `query_take0_vec` 走的是 JSON 绑定，`RecordId` 经 serde_json 会退化成
+    /// 普通字符串，于是 `role_id IN ["role:admin"]` 变成 record 与 string 相比，
+    /// 永远匹配不到 —— 这个坑本文件别处的注释已经记过一次。
+    async fn attach_permissions(&self, roles: &mut [RoleResponse]) -> Result<(), AuthError> {
+        if roles.is_empty() {
+            return Ok(());
+        }
+
+        let role_keys: Vec<String> = roles.iter().map(|r| format!("role:{}", r.id)).collect();
+
+        #[derive(Debug, serde::Deserialize, SurrealValue)]
+        struct Link {
+            role_id: String,
+            permission_id: String,
+        }
+
+        let links: Vec<Link> = self
+            .db
+            .query_take0_vec(
+                "rbac_list_role_permission_links",
+                "SELECT type::string(role_id) AS role_id, \
+                        type::string(permission_id) AS permission_id \
+                 FROM role_permission WHERE type::string(role_id) IN $role_keys",
+                json!({ "role_keys": role_keys }),
+            )
+            .await?;
+
+        if links.is_empty() {
+            return Ok(());
+        }
+
+        #[derive(Debug, serde::Deserialize, SurrealValue)]
+        struct NamedPermission {
+            id: String,
+            name: String,
+        }
+
+        let mut permission_keys: Vec<String> =
+            links.iter().map(|l| l.permission_id.clone()).collect();
+        permission_keys.sort();
+        permission_keys.dedup();
+
+        let named: Vec<NamedPermission> = self
+            .db
+            .query_take0_vec(
+                "rbac_list_permission_names",
+                "SELECT type::string(id) AS id, name FROM permission \
+                 WHERE type::string(id) IN $permission_keys",
+                json!({ "permission_keys": permission_keys }),
+            )
+            .await?;
+
+        let name_by_id: std::collections::HashMap<&str, &str> = named
+            .iter()
+            .map(|p| (p.id.as_str(), p.name.as_str()))
+            .collect();
+
+        let mut by_role: std::collections::HashMap<&str, Vec<String>> =
+            std::collections::HashMap::new();
+        for link in &links {
+            if let Some(name) = name_by_id.get(link.permission_id.as_str()) {
+                by_role
+                    .entry(link.role_id.as_str())
+                    .or_default()
+                    .push((*name).to_string());
+            }
+        }
+
+        for role in roles.iter_mut() {
+            let key = format!("role:{}", role.id);
+            if let Some(mut names) = by_role.remove(key.as_str()) {
+                names.sort();
+                role.permissions = names;
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn create_permission(&self, request: CreatePermissionRequest, created_by: &User) -> Result<PermissionResponse, AuthError> {
         // 检查权限名是否已存在
         if self.get_permission_by_name(&request.name).await?.is_some() {

@@ -1630,6 +1630,38 @@ eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorizatio
 req GET "/api/users/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 has 'PRO' "$(body)" "已过期的会员等级不被本服务自动降级（解释权在消费方）"
 
+# ───────── 25.7 角色列表返回真实权限 / 拒绝实现不了的 grant ─────────
+#
+# 曾经：GET /api/rbac/roles 里每个角色都显示 0 条权限，而 GET /roles/{name}
+# 对同一个角色能返回 18 条 —— From<Role> 拿不到数据库只能置空，列表接口原样返回。
+# 管理后台的角色列表据此渲染，看到的是"所有角色都没有任何权限"。
+req GET "/api/rbac/roles/admin" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+ONE_PERMS="$(python3 -c "
+import json
+try: print(len(json.load(open('$WORK/body')).get('data',{}).get('permissions',[])))
+except Exception: print(-1)" 2>/dev/null)"
+[ "$ONE_PERMS" -gt 0 ] && ok "单角色查询返回 ${ONE_PERMS} 条权限" ||
+    bad "单角色查询返回权限" "拿到 ${ONE_PERMS}"
+
+req GET "/api/rbac/roles" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+LIST_PERMS="$(python3 -c "
+import json
+try:
+    d=json.load(open('$WORK/body')).get('data',[])
+    print(next((len(r.get('permissions',[])) for r in d if r.get('name')=='admin'), -1))
+except Exception: print(-1)" 2>/dev/null)"
+eq "$ONE_PERMS" "$LIST_PERMS" "角色列表里 admin 的权限数与单角色查询一致（不再恒空）"
+
+# client_credentials 在令牌端点没有实现分支、发现文档也不宣告。
+# 以前注册时照收，之后每次换令牌都失败 —— 故障点与病因隔了一步。
+CC="$(req POST /api/oidc/clients -H "Authorization: Bearer ${TOK_AUDIT}" \
+    -H 'Content-Type: application/json' \
+    -d '{"client_name":"m2m","client_type":"confidential",
+         "redirect_uris":["https://app.example/cb"],"allowed_scopes":["openid"],
+         "allowed_grant_types":["client_credentials"],
+         "allowed_response_types":["code"]}')"
+eq 400 "$CC" "注册时拒收 client_credentials（令牌端点实现不了它）"
+
 group "26. 运行期无 panic"
 
 

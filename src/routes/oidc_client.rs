@@ -12,7 +12,7 @@ use validator::Validate;
 
 use crate::{
     error::AuthError,
-    models::oidc_client::{CreateOidcClientRequest, OidcClientResponse},
+    models::oidc_client::{CreateOidcClientRequest, GrantType, OidcClientResponse},
     require_permission,
     services::{database::Database, oidc_client_management::OidcClientService},
     utils::jwt::AuthedUser,
@@ -72,6 +72,7 @@ async fn create_client(
         .validate()
         .map_err(|e| AuthError::BadRequest(format!("Validation error: {}", e)))?;
     validate_redirect_uris(&request)?;
+    reject_unsupported_grant_types(&request)?;
 
     // created_by 记录真实操作人，不再是硬编码的 "system"。
     match client_service.create_client(request, &user_id).await {
@@ -173,6 +174,7 @@ async fn update_client(
         .validate()
         .map_err(|e| AuthError::BadRequest(format!("Validation error: {}", e)))?;
     validate_redirect_uris(&request)?;
+    reject_unsupported_grant_types(&request)?;
 
     match client_service.update_client(&client_id, request).await {
         Ok(client) => Ok(Json(client)),
@@ -213,6 +215,32 @@ async fn regenerate_secret(
         })),
         Err(e) => Err(client_error("regenerate client secret", e)),
     }
+}
+
+/// 拒绝令牌端点实现不了的 grant type。
+///
+/// `GrantType::ClientCredentials` 能被注册进 `allowed_grant_types`（枚举里有它、
+/// 序列化成 "client_credentials"、注册返回 200），但 `/api/oidc/token` 只有
+/// `authorization_code` 与 `refresh_token` 两个分支，发现文档也只宣告这两个。
+/// 结果是：想接一个机器对机器客户端的人，注册那一步一切正常，
+/// 之后**每一次**换令牌都拿到 "Unsupported grant type" —— 故障点与病因隔了一步，
+/// 而配置看起来完全正确。
+///
+/// 与 `resolve_require_pkce` 同一个原则：不接受一个永远不会生效的配置。
+fn reject_unsupported_grant_types(request: &CreateOidcClientRequest) -> Result<(), AuthError> {
+    let Some(grants) = request.allowed_grant_types.as_ref() else {
+        return Ok(());
+    };
+
+    if grants.contains(&GrantType::ClientCredentials) {
+        return Err(AuthError::BadRequest(
+            "client_credentials is not supported by this token endpoint; \
+             only authorization_code and refresh_token are implemented"
+                .to_string(),
+        ));
+    }
+
+    Ok(())
 }
 
 /// 回跳地址必须是绝对 https URL（localhost 放行以便本地开发），且不带 fragment。
