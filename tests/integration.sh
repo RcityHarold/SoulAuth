@@ -1577,6 +1577,59 @@ sql "DELETE password_reset_token WHERE used = true OR expires_at < type::datetim
 eq 0 "$(sql_count "SELECT count() FROM password_reset_token WHERE used = true GROUP ALL")" \
     "已使用的重置令牌被回收"
 
+# ───────── 25.6 契约收缩：PendingDeletion 与 membership_expiry ─────────
+#
+# 两条都是对外契约的收紧，容易在后续改动里被无意放开，所以钉住。
+
+# PendingDeletion 已从 AccountStatus 移除：管理员不能再设置它。
+# 它此前的行为与 Deleted 完全同义，却对外宣告了一条不存在的删除流水线。
+CONTRACT_UID="$(user_id_of sesslist@test.local)"
+STATUS_CODE="$(req PUT "/api/users/users/${CONTRACT_UID}/status" -H "Authorization: Bearer ${TOK_AUDIT}" \
+    -H 'Content-Type: application/json' -d '{"status":"PendingDeletion","reason":"x"}')"
+case "$STATUS_CODE" in
+    400|422) ok "PendingDeletion 已不被接受（${STATUS_CODE}）" ;;
+    *)       bad "PendingDeletion 已不被接受" "竟然返回 ${STATUS_CODE}" ;;
+esac
+
+# 库里遗留的 PendingDeletion 行必须 fail-closed（解析成 Inactive，不可用），
+# 而不是因为不认识就放行。
+LEGACY_TOKEN="$(signup legacy-status@test.local legacystatus)"
+LEGACY_UID="$(user_id_of legacy-status@test.local)"
+eq 200 "$(req GET /api/auth/me -H "Authorization: Bearer ${LEGACY_TOKEN}")" "存量用例账号可用"
+sql "UPDATE user SET account_status = 'PendingDeletion' \
+     WHERE id = type::record('user','${LEGACY_UID}')" > /dev/null
+# 这里是直接改库，绕过了应用，所以鉴权缓存里还留着旧的 Active。
+# 走 API 改状态的路径会主动清缓存（第 17 组验的就是那条），
+# 这一组模拟的是"升级前就存在于库里的遗留行"，只能等缓存自然过期。
+sleep 6
+LEGACY_CODE="$(req GET /api/auth/me -H "Authorization: Bearer ${LEGACY_TOKEN}")"
+case "$LEGACY_CODE" in
+    401|403) ok "库中遗留的 PendingDeletion 行被判为不可用（${LEGACY_CODE}）" ;;
+    *)       bad "库中遗留的 PendingDeletion 行被判为不可用" "竟然放行：${LEGACY_CODE}" ;;
+esac
+
+# membership_expiry 现在是时间点：非法字符串在反序列化阶段就被拒。
+BAD_EXPIRY="$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+    -H 'Content-Type: application/json' -d '{"membership_level":"PRO","membership_expiry":"下个月"}')"
+case "$BAD_EXPIRY" in
+    400|422) ok "非法的 membership_expiry 被拒（${BAD_EXPIRY}）" ;;
+    *)       bad "非法的 membership_expiry 被拒" "竟然收下了：${BAD_EXPIRY}" ;;
+esac
+
+eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+    -H 'Content-Type: application/json' \
+    -d '{"membership_level":"PRO","membership_expiry":"2030-01-01T00:00:00Z"}')" \
+    "合法的 RFC3339 时间点被接受"
+
+# SoulAuth 不解释这个字段：即使已经"过期"，等级也不会被自动降级
+# （P0-DECISION-09 §4.7：membership 归 Entitlement 侧，不由本服务判断）。
+eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+    -H 'Content-Type: application/json' \
+    -d '{"membership_level":"PRO","membership_expiry":"2020-01-01T00:00:00Z"}')" \
+    "过去的时间点同样被接受（形状合法即可）"
+req GET "/api/users/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+has 'PRO' "$(body)" "已过期的会员等级不被本服务自动降级（解释权在消费方）"
+
 group "26. 运行期无 panic"
 
 

@@ -757,12 +757,9 @@ impl UserManagementService {
             .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
 
         user.membership_level = Self::normalize_membership_level(&request.membership_level)?;
-        user.membership_expiry = request
-            .membership_expiry
-            .and_then(|value| {
-                let trimmed = value.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
-            });
+        // 格式校验已经由 `Option<DateTime<Utc>>` 的反序列化完成：非法输入根本
+        // 到不了这里。以前这里只做 trim + 空串过滤，任意字符串都能落库。
+        user.membership_expiry = request.membership_expiry;
         user.updated_at = chrono::Utc::now().timestamp();
 
         let user_thing = user

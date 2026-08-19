@@ -94,12 +94,42 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    `oidc_clients.write` 两个权限并授予 admin 角色。已有部署单独执行该段即可，
    否则管理员将无法访问 `/api/oidc/clients`。
 
-3. **补充 user 表字段：**
+3. **`membership_expiry` 由 `string` 改为 `datetime`。**
+
+   该字段以前是自由字符串且写入不校验，`"下个月"` 这类值也能落库。
+   现在由类型保证形状（语义仍不由 SoulAuth 解释，见
+   P0-DECISION-09 §4.7）。**必须先清洗数据再改字段定义**，
+   否则改完之后读取旧行会失败：
+
+   ```sql
+   -- ① 把无法解析的值清空（能解析的按 RFC3339 转换）
+   UPDATE user SET membership_expiry = NONE
+     WHERE membership_expiry != NONE
+       AND type::is::datetime(<datetime> membership_expiry) = false;
+
+   -- ② 再改字段定义
+   DEFINE FIELD membership_expiry ON user TYPE option<datetime>;
+   ```
+
+4. **`AccountStatus` 移除了 `PendingDeletion` 变体。**
+
+   它此前的行为与 `Deleted` 完全同义（没有宽限期、没有到期推进、
+   没有级联清除、也没有撤销入口），却对外宣告了一条不存在的删除流水线。
+   存量的 `"PendingDeletion"` 行会被解析成 `Inactive`（不可用），
+   方向是 fail-closed、不会误放行；但建议显式归位：
+
+   ```sql
+   UPDATE user SET account_status = 'Deleted' WHERE account_status = 'PendingDeletion';
+   ```
+
+   `PUT /api/users/users/{id}/status` 从此拒收 `"PendingDeletion"`（400）。
+
+5. **补充 user 表字段：**
    ```sql
    DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
    ```
 
-4. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
+6. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
    存量行里存的是 record 链接，必须**先转换数据、再改字段定义**，否则改完之后
    读取旧行会直接失败：
    ```sql
@@ -110,22 +140,22 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    DEFINE FIELD created_by ON oidc_client TYPE string;
    ```
 
-5. **社交相关表已不再使用**，可在确认无其他消费方后删除：
+7. **社交相关表已不再使用**，可在确认无其他消费方后删除：
    `friend_request`、`friendship`、`direct_conversation`、`direct_message`、
    `social_group`、`social_group_member`、`group_thread`、`group_thread_message`、
    `group_collab_run`。
 
-6. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
+8. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
    `OIDC_RSA_PRIVATE_KEY_PATH`。`JWT_SECRET` 现在要求至少 32 字符。
 
-7. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
+9. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
    手动执行——这与本文档开头"应用程序不应具有 DDL 权限"的原则一致。
 
-8. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
+10. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
    但建议逐个调用 `POST /api/oidc/clients/:client_id/regenerate-secret`
    迁移到 Argon2 存储。
 
-9. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
+11. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
    ```bash
    openssl rand -base64 32   # 填入 MFA_SECRET_ENCRYPTION_KEY
    ```
@@ -133,26 +163,26 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    会导致所有已存的 TOTP 密钥无法解密，生产环境务必单独配置。
    存量的明文密钥可继续使用，并在下一次写入时自动就地加密。
 
-10. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
+12. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
     但建议让已启用 MFA 的用户重新生成一次（`POST /api/auth/mfa/setup`）。
 
-11. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
+13. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
     `UPSERT`），可以安全地重复执行。权限名前缀化后，重跑它即可就地改名 ——
     `role_permission` 按 record ID 关联，角色授权关系不受影响。
 
-12. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
+14. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
     现在跳 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带 `return_to`。
     登录页需要做两件事：调用 `POST /api/auth/login` 完成登录，
     然后跳回 `return_to` 指向的地址；如果仍需要 Google 登录入口，
     在页面上链到 `GET /api/auth/login/google` 即可。
 
-13. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
+15. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
     决定，`http://localhost:8080` 下会自动省略。
 
-14. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
+16. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
     每个请求都校验会话（吊销绝对即时，代价是每请求两次查询）。
 
-15. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
+17. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
     下旧定义会拒绝新写入）：
     ```sql
     -- 审计事件未必对应已存在的用户（登录失败、限流触发等）
@@ -162,14 +192,14 @@ chmod 600 /etc/soulauth/oidc-signing.pem
     由于此前的写入本就会被 SCHEMAFULL 拒绝，这些表大概率是空的；若确有数据，
     需要把 datetime 值转成 Unix 秒后再启用新版本。
 
-16. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
+18. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
     并对应一条有效的 `session` 记录，升级前签发的 cookie 会被拒绝。
 
-17. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
+19. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
     验证邮件的链接现在是 `{VERIFY_EMAIL_PAGE_URL}?token=xxx`，页面拿到 token 后
     再调 `GET /api/auth/verify-email/{token}`。
 
-18. **审计接口的响应结构有两处变化：**
+20. **审计接口的响应结构有两处变化：**
     - `GET /api/audit/system-health` 删除了 `connection_pool_used` /
       `connection_pool_size` 两个字段（SurrealDB HTTP 客户端不暴露连接池指标，
       之前一直是写死的 1/10）；内存与运行时长改为真实值。
@@ -179,32 +209,32 @@ chmod 600 /etc/soulauth/oidc-signing.pem
       —— 这个口径本来就是活跃率而非留存率。同一接口的
       `geographic_distribution` 现在恒为空数组（没有接入 GeoIP 数据源）。
 
-19. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
+21. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
     `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` /
     `GITHUB_CLIENT_SECRET` / `OAUTH_REDIRECT_URL` 五项此前是硬必填，只用邮箱
     密码登录的部署被迫填假值。现在不配即不启用，登录入口返回 501。
     **已填假值的实例建议清掉**——配置里的假数据一旦哪天被当真就是事故。
 
-20. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
+22. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
     `OIDC_RSA_PRIVATE_KEY_PEM`/`_PATH` 或 `MFA_SECRET_ENCRYPTION_KEY` 会让进程
     起不来（此前只打 WARN）。升级前请确认这两项已配，否则重启后服务不可用。
     理由见「生产环境额外必填」一节。
 
-21. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
+23. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
     （或单独执行该表的 `DEFINE`）。登录 / 注册 / 改密 / 验邮箱等敏感端点的
     计数经数据库共享，多副本不再各算各的。
     ⚠ 副作用：**重启副本不再清空配额**。这是它该有的性质，但排查时容易误判。
 
-22. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
+24. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
     只解析表单——用标准 OIDC 客户端库接入的机密客户端会失败，且错误信息
     指向「未提供 secret」。升级后两种方式都可用。
 
-23. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
+25. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
     处理（此前是「没被显式列为坏的就算好的」）。若你的数据库里有非标准的
     `account_status` 值，那些账号升级后将无法登录——升级前先查：
     ```sql
     SELECT VALUE account_status FROM user
-    WHERE account_status NOT IN ['Active','Inactive','Suspended','PendingDeletion','Deleted'];
+    WHERE account_status NOT IN ['Active','Inactive','Suspended','Deleted'];
     ```
 
 ## 权限系统说明
@@ -410,7 +440,7 @@ TLS 的反向代理（nginx / Caddy / ALB 均可）。
 这不是可选项，有两个硬约束逼着它：
 
 1. `APP_URL` 是 https 时，会话 cookie 才会带 `Secure`；
-2. **接入 SoulSeedOS 时，OS 硬拒非 https 的 JWKS 地址**——它的 `HttpJwksProvider`
+4. **接入 SoulSeedOS 时，OS 硬拒非 https 的 JWKS 地址**——它的 `HttpJwksProvider`
    直接检查 `https://` 前缀（明文取签名公钥 = 路径上任何人都能换掉信任根）。
 
 nginx 最小片段：
@@ -473,7 +503,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
 
 ### 3. 部署步骤
 
-1. **准备数据库**：
+3. **准备数据库**：
    ```bash
    # 1. 执行schema.sql创建表结构
    surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE schema.sql
@@ -482,23 +512,23 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
    surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE initial_data.sql
    ```
 
-2. **构建应用程序**：
+4. **构建应用程序**：
    ```bash
    cargo build --release
    ```
 
-3. **启动应用程序**：
+5. **启动应用程序**：
    ```bash
    ./target/release/soulauth
    ```
 
-4. **验证部署**：
+6. **验证部署**：
    ```bash
    curl http://localhost:8080/health
    # → {"status":"ok","uptime_seconds":12}
    ```
 
-5. **建立第一个管理员**：
+7. **建立第一个管理员**：
 
    注册接口本身不发管理员权限——第一个 admin 必须在库里手工授予，
    这是刻意的：否则"谁是第一个注册的人"就成了拿到全部权限的条件。
@@ -732,17 +762,17 @@ echo "$ID_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sid, exp
 
 ### 其它常见问题
 
-1. **应用启动失败**：
+3. **应用启动失败**：
    - 检查数据库连接配置
    - 确认数据库表已创建
    - 检查环境变量设置
 
-2. **权限检查失败**：
+4. **权限检查失败**：
    - 确认用户已分配正确角色
    - 检查角色权限配置
    - 验证系统权限是否正确初始化
 
-3. **数据库连接问题**：
+5. **数据库连接问题**：
    - 检查数据库服务状态
    - 验证连接字符串
    - 确认网络连通性

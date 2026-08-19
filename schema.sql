@@ -19,7 +19,8 @@ DEFINE FIELD verification_token ON user TYPE option<string>;
 DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
 DEFINE FIELD membership_level ON user TYPE string DEFAULT "FREE";
-DEFINE FIELD membership_expiry ON user TYPE option<string>;
+-- 时间点而非自由字符串：形状由 SoulAuth 保证，语义（过期与否）由消费方解释。
+DEFINE FIELD membership_expiry ON user TYPE option<datetime>;
 DEFINE FIELD last_login_at ON user TYPE option<number>;
 DEFINE FIELD last_login_ip ON user TYPE option<string>;
 DEFINE FIELD created_at ON user TYPE number;
