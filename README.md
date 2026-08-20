@@ -7,7 +7,7 @@ without ever touching its database.
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
-axum 0.6 · SurrealDB 3.0 · 66 HTTP endpoints · ~17k lines
+axum 0.6 · SurrealDB 3.0 · 68 HTTP endpoints · ~17k lines
 122 unit tests (5s, no external dependencies) · 25 integration groups / 242 assertions
 ```
 
@@ -53,10 +53,10 @@ Requires a running SurrealDB and a Rust toolchain (edition 2021).
 
 ```bash
 # 1. Schema and seed data — the application performs no DDL of its own
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main schema.sql
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main initial_data.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 
 # 2. Minimal configuration — four variables, nothing else is required
 export JWT_SECRET=$(openssl rand -hex 32)   # at least 32 characters
@@ -80,18 +80,19 @@ see [Production posture](#production-posture) and
 
 ## API surface
 
-66 endpoints across seven modules. The route tables in `src/routes/` are the
+68 endpoints across seven modules. The route tables in `src/routes/` are the
 authoritative list; this is the shape of it.
 
 | Module | Endpoints | Covers |
 |---|---:|---|
-| `auth` | 20 | register, login, logout, logout-all, sessions, email verification, password reset, MFA (5), OAuth entry and callback for two providers |
+| `auth` | 21 | register, login, logout, logout-all, sessions, email verification and resend, password reset, MFA (5), OAuth entry and callback for two providers |
 | `user_management` | 14 | own profile / preferences / activity log, plus admin reads and account-status / membership writes |
 | `rbac` | 13 | role and permission CRUD, assignment in both directions, self permission checks |
 | `oidc` | 7 | discovery, JWKS, authorize, token, userinfo, logout |
 | `oidc_client` | 6 | client registration, listing, update, disable, secret rotation |
 | `audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
 | `ops` | 1 | membership overview |
+| _root_ | 1 | `/health` liveness probe (outside the rate limiter) |
 
 Every endpoint is exercised by the integration suite. Representative flows:
 

@@ -6,7 +6,7 @@
 > English version: [README.md](README.md)（主版本）
 
 ```
-axum 0.6 · SurrealDB 3.0 · 66 个 HTTP 端点 · 约 1.7 万行
+axum 0.6 · SurrealDB 3.0 · 68 个 HTTP 端点 · 约 1.7 万行
 单元测试 122 项（5 秒，零外部依赖）· 集成测试 25 组 242 项断言
 ```
 
@@ -49,10 +49,10 @@ RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulau
 
 ```bash
 # 1. 表结构与初始数据 —— 应用自身不执行任何 DDL
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main schema.sql
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main initial_data.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 
 # 2. 最小配置 —— 只有四项是必填的
 export JWT_SECRET=$(openssl rand -hex 32)   # 至少 32 字符
@@ -75,17 +75,18 @@ cargo run
 
 ## 接口面
 
-66 个端点，分七个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
+68 个端点，分七个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
 
 | 模块 | 端点数 | 覆盖 |
 |---|---:|---|
-| `auth` | 20 | 注册、登录、登出、全端登出、会话列表、邮箱验证、密码重置、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
+| `auth` | 21 | 注册、登录、登出、全端登出、会话列表、邮箱验证与重发、密码重置、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
 | `user_management` | 14 | 本人资料 / 偏好 / 活动日志，以及管理员的读取与账号状态、会员等级写入 |
 | `rbac` | 13 | 角色与权限的增删查、双向授予、自身权限自查 |
 | `oidc` | 7 | 发现文档、JWKS、authorize、token、userinfo、logout |
 | `oidc_client` | 6 | 客户端注册、列表、更新、停用、密钥轮换 |
 | `audit` | 5 | 看板、活动摘要、安全指标、安全报告、系统健康 |
 | `ops` | 1 | 会员总览 |
+| _根路径_ | 1 | `/health` 存活探针（不受限流约束） |
 
 每一个端点都被集成测试跑到。典型流程：
 
