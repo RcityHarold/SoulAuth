@@ -32,6 +32,9 @@ pub mod actions {
     pub const PERMISSION_DENIED: &str = "permission_denied";
     pub const RATE_LIMIT_VIOLATION: &str = "rate_limit_violation";
     pub const ACCOUNT_LOCKED: &str = "account_locked";
+    /// 管理员手工解除锁定。与 ACCOUNT_LOCKED 成对 —— 只记上锁不记解锁的话，
+    /// 审计里会留下一串永远没有下文的锁定事件。
+    pub const LOCKOUT_CLEARED: &str = "lockout_cleared";
 }
 
 #[derive(Clone)]

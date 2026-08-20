@@ -7,7 +7,7 @@ without ever touching its database.
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
-axum 0.6 · SurrealDB 3.0 · 68 HTTP endpoints · ~17k lines
+axum 0.6 · SurrealDB 3.0 · 70 HTTP endpoints · ~17k lines
 122 unit tests (5s, no external dependencies) · 25 integration groups / 242 assertions
 ```
 
@@ -98,7 +98,7 @@ OIDC client library.
 
 ## API surface
 
-68 endpoints across seven modules. The route tables in `src/routes/` are the
+70 endpoints across eight modules. The route tables in `src/routes/` are the
 authoritative list; this is the shape of it.
 
 | Module | Endpoints | Covers |
@@ -110,6 +110,7 @@ authoritative list; this is the shape of it.
 | `oidc_client` | 6 | client registration, listing, update, disable, secret rotation |
 | `audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
 | `ops` | 1 | membership overview |
+| `security` | 2 | lockout status query, manual unlock (user or IP) |
 | _root_ | 1 | `/health` liveness probe (outside the rate limiter) |
 
 Every endpoint is exercised by the integration suite. Representative flows:

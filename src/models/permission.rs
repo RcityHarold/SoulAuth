@@ -43,6 +43,10 @@ pub mod names {
     pub const PERMISSIONS_READ: &str = auth_local!("permissions.read");
     pub const PERMISSIONS_WRITE: &str = auth_local!("permissions.write");
     pub const SECURITY_READ: &str = auth_local!("security.read");
+    /// 解锁账户 / IP 等安全写操作。种子里一直有这条权限（授予 admin 与
+    /// security_manager），但代码侧此前没有对应常量 —— 因为没有任何端点用它：
+    /// `AccountLockoutService` 的 unlock_user / unlock_ip 实现好了却没有路由暴露。
+    pub const SECURITY_WRITE: &str = auth_local!("security.write");
     pub const AUDIT_READ: &str = auth_local!("audit.read");
     pub const OIDC_CLIENTS_READ: &str = auth_local!("oidc_clients.read");
     pub const OIDC_CLIENTS_WRITE: &str = auth_local!("oidc_clients.write");
@@ -61,7 +65,7 @@ pub mod names {
 
     /// 代码实际会校验的全部权限名，仅供一致性测试使用。
     #[cfg(test)]
-    pub const ALL_CHECKED: [&str; 11] = [
+    pub const ALL_CHECKED: [&str; 12] = [
         USERS_READ,
         USERS_WRITE,
         ROLES_READ,
@@ -70,6 +74,7 @@ pub mod names {
         PERMISSIONS_READ,
         PERMISSIONS_WRITE,
         SECURITY_READ,
+        SECURITY_WRITE,
         AUDIT_READ,
         OIDC_CLIENTS_READ,
         OIDC_CLIENTS_WRITE,

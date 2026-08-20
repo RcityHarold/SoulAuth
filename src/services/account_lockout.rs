@@ -43,10 +43,21 @@ pub struct AccountLockoutService {
 
 impl AccountLockoutService {
     /// 创建新的账户锁定服务实例
-    pub fn new(db: Arc<Database>, _config: Config, audit: Arc<AuditLogger>) -> Result<Self> {
+    /// 从应用配置构造。
+    ///
+    /// 此前这里的第二个参数叫 `_config` —— 收下之后直接丢掉，用的是
+    /// `LockoutConfig::default()`。于是 5 次 / 15 分钟这组阈值无论怎么配都不变。
+    /// 那个下划线本身就是接缝留过的证据。
+    pub fn new(db: Arc<Database>, config: Config, audit: Arc<AuditLogger>) -> Result<Self> {
         Ok(Self {
             db,
-            config: LockoutConfig::default(),
+            config: LockoutConfig {
+                max_attempts: config.lockout_max_attempts,
+                lockout_duration_minutes: config.lockout_duration_minutes,
+                reset_window_minutes: config.lockout_reset_window_minutes,
+                enable_ip_lockout: config.lockout_ip_enabled,
+                enable_user_lockout: config.lockout_user_enabled,
+            },
             audit,
         })
     }

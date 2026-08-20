@@ -1771,6 +1771,86 @@ d=json.load(open('$WORK/body'))
 sys.exit(0 if ('issuer' in d and 'data' not in d) else 1)" \
   && ok "OIDC 发现文档保持规范形状" || bad "OIDC 发现文档形状"
 
+# ───────── 25.10 管理员解锁 / 锁定阈值可配 ─────────
+#
+# 这两项此前是真实的运维缺口：AccountLockoutService 的 unlock_user / unlock_ip
+# 实现好了却没有任何路由暴露（四个方法全是死代码），账号被锁只能等 15 分钟
+# 或者改库；而阈值硬编码在 LockoutConfig::default()，构造函数收了 Config 却丢掉。
+restart_app
+sql "DELETE account_lockout" > /dev/null
+TOK_SEC="$(login_token admin@test.local "CorrectHorse42!")"
+
+# 造一个锁定中的记录（走登录会先被限流挡住，触发不到阈值）
+# 记录 ID 必须与生产一致：AccountLockoutService::lockout_record_id 生成
+# `<类型小写>:<标识>`，而 (identifier, lockout_type) 上有唯一索引 ——
+# 用随机 ID 造夹具的话，服务写回时会撞索引，测的就不是真实路径了。
+sql "CREATE type::record('account_lockout', 'user:locked-user@test.local') CONTENT {
+       identifier: 'locked-user@test.local', lockout_type: 'User', failed_attempts: 9,
+       status: 'Locked', locked_at: time::now(), locked_until: time::now() + 1h,
+       last_attempt_at: time::now(), created_at: time::now(), updated_at: time::now() }" > /dev/null
+
+# 查询：管理员能看到锁定状态，且与登录链路看到的是同一份判定
+eq 200 "$(req GET "/api/security/lockout?scope=user&identifier=locked-user%40test.local" \
+    -H "Authorization: Bearer ${TOK_SEC}")" "可查询锁定状态"
+has '"is_locked":true' "$(body)" "状态显示为锁定中"
+
+# 越权：普通用户既查不了也解不了
+TOK_NOSEC="$(signup nosec@test.local nosecuser)"
+eq 403 "$(req GET "/api/security/lockout?scope=user&identifier=locked-user%40test.local" \
+    -H "Authorization: Bearer ${TOK_NOSEC}")" "无 security.read 查不了锁定状态"
+eq 403 "$(req POST /api/security/unlock -H "Authorization: Bearer ${TOK_NOSEC}" \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":"user","identifier":"locked-user@test.local"}')" "无 security.write 解不了锁"
+
+# 解锁
+eq 200 "$(req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":"user","identifier":"locked-user@test.local"}')" "管理员可解锁"
+has '"unlocked":true' "$(body)" "报告确实解除了一个锁定中的记录"
+
+# 幂等：再解一次返回 false 而不是报错
+req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
+    -H 'Content-Type: application/json' \
+    -d '{"scope":"user","identifier":"locked-user@test.local"}' > /dev/null
+has '"unlocked":false' "$(body)" "重复解锁是幂等的（返回 false 而非报错）"
+
+req GET "/api/security/lockout?scope=user&identifier=locked-user%40test.local" \
+    -H "Authorization: Bearer ${TOK_SEC}" > /dev/null
+has '"is_locked":false' "$(body)" "解锁后状态归位"
+
+# 解锁必须留审计 —— 只记上锁不记解锁的话，审计里会留下一串没有下文的锁定事件
+sleep 1
+# 上面调了两次解锁（第二次验幂等），两次都该留痕 —— 审计要记的是
+# "谁在什么时候试图解锁了什么"，第二次是空操作这件事本身也值得记下来。
+eq 2 "$(sql_count "SELECT count() FROM user_activity WHERE action = 'lockout_cleared' GROUP ALL")" \
+    "两次解锁各写了一条 lockout_cleared 审计（含空操作那次）"
+
+# IP 维度同样可解
+sql "CREATE type::record('account_lockout', 'ipaddress:203.0.113.44') CONTENT {
+       identifier: '203.0.113.44', lockout_type: 'IpAddress', failed_attempts: 9,
+       status: 'Locked', locked_at: time::now(), locked_until: time::now() + 1h,
+       last_attempt_at: time::now(), created_at: time::now(), updated_at: time::now() }" > /dev/null
+req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
+    -H 'Content-Type: application/json' -d '{"scope":"ip","identifier":"203.0.113.44"}' > /dev/null
+has '"unlocked":true' "$(body)" "IP 维度同样可解锁"
+
+# 输入校验：空标识与控制字符都要挡（后者会进审计详情与日志）
+eq 400 "$(req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
+    -H 'Content-Type: application/json' -d '{"scope":"user","identifier":"  "}')" "空标识被拒"
+
+# 解锁之后必须真的能重新登录 —— 这才是这组端点存在的意义
+LOCKED_TOKEN="$(signup relock@test.local relockuser)"
+sql "CREATE type::record('account_lockout', 'user:relock@test.local') CONTENT {
+       identifier: 'relock@test.local', lockout_type: 'User', failed_attempts: 9,
+       status: 'Locked', locked_at: time::now(), locked_until: time::now() + 1h,
+       last_attempt_at: time::now(), created_at: time::now(), updated_at: time::now() }" > /dev/null
+eq 429 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d '{"email":"relock@test.local","password":"CorrectHorse42!"}')" "被锁账号登录返回 429"
+req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
+    -H 'Content-Type: application/json' -d '{"scope":"user","identifier":"relock@test.local"}' > /dev/null
+eq 200 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d '{"email":"relock@test.local","password":"CorrectHorse42!"}')" "解锁后可以重新登录"
+
 group "26. 运行期无 panic"
 
 

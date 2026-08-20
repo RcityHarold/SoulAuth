@@ -6,7 +6,7 @@
 > English version: [README.md](README.md)（主版本）
 
 ```
-axum 0.6 · SurrealDB 3.0 · 68 个 HTTP 端点 · 约 1.7 万行
+axum 0.6 · SurrealDB 3.0 · 70 个 HTTP 端点 · 约 1.7 万行
 单元测试 122 项（5 秒，零外部依赖）· 集成测试 25 组 242 项断言
 ```
 
@@ -92,7 +92,7 @@ OIDC 那几个端点（`/.well-known/openid-configuration`、`/jwks`、`/token`�
 
 ## 接口面
 
-68 个端点，分七个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
+70 个端点，分八个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
 
 | 模块 | 端点数 | 覆盖 |
 |---|---:|---|
@@ -103,6 +103,7 @@ OIDC 那几个端点（`/.well-known/openid-configuration`、`/jwks`、`/token`�
 | `oidc_client` | 6 | 客户端注册、列表、更新、停用、密钥轮换 |
 | `audit` | 5 | 看板、活动摘要、安全指标、安全报告、系统健康 |
 | `ops` | 1 | 会员总览 |
+| `security` | 2 | 查询锁定状态、手工解锁（账号或 IP）|
 | _根路径_ | 1 | `/health` 存活探针（不受限流约束） |
 
 每一个端点都被集成测试跑到。典型流程：

@@ -410,6 +410,40 @@ GITHUB_OAUTH_BASE_URL=https://ghe.example.com    # 自托管 GitHub Enterprise
 **明文 http 只允许指向环回地址**，且不得带尾斜杠，否则拒绝启动：远端端点走
 明文等于把 `client_secret` 与访问令牌交给链路上的任何人。
 
+#### 账号锁定
+
+```env
+LOCKOUT_MAX_ATTEMPTS=5             # 连续失败多少次后锁定，必须 ≥1
+LOCKOUT_DURATION_MINUTES=15        # 锁定多少分钟，必须 ≥1
+LOCKOUT_RESET_WINDOW_MINUTES=60    # 多久没有新失败就清零计数
+LOCKOUT_USER_ENABLED=true          # 账号维度
+LOCKOUT_IP_ENABLED=true            # IP 维度
+```
+
+前两项为 0 会在启动时被拒绝：0 次尝试即锁定等于任何人一登录就被锁死，
+0 分钟锁定等于没锁 —— 这两种都不是「更严格」，是把服务配坏。
+
+**手工解锁**（需 `soulauth:security.write`，种子里授予 admin 与 security_manager）：
+
+```bash
+# 查状态
+curl "$APP_URL/api/security/lockout?scope=user&identifier=user%40example.com" \
+  -H "Authorization: Bearer $TOKEN"
+# → {"is_locked":true,"remaining_lockout_seconds":812,…}
+
+# 解锁（scope 取 user 或 ip；解锁是幂等的，本来没锁会返回 unlocked:false）
+curl -X POST "$APP_URL/api/security/unlock" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"user","identifier":"user@example.com"}'
+# → {"unlocked":true}
+```
+
+用户维度的标识是**邮箱**：锁定计数在登录失败时按邮箱累加，那时还没有用户记录
+可言 —— 不存在的邮箱同样会被计数，否则「有没有留下锁定记录」本身就成了
+账号枚举信道。
+
+每一次解锁都会写一条 `lockout_cleared` 审计（包括本来就没锁的空操作）。
+
 #### 邮件
 
 ```env
