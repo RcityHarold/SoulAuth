@@ -20,6 +20,21 @@ pub fn validate_email(email: &str) -> Result<String> {
             "Email must not contain whitespace".to_string(),
         ));
     }
+    // 控制字符必须单独挡：它们**不是**空白字符，上面那条拦不住。
+    //
+    // 实测后果：`evil\x1b[31mred\x1b[0m@example.com` 能通过全部校验并注册成功
+    // （返回 200），随后原始 ESC 字节原样进入日志 —— 发信失败那条 error! 会把
+    // 邮箱打出来。攻击者据此可以在运维的终端里伪造日志行、清屏、隐藏自己的痕迹，
+    // 而日志正是这个服务的审计凭证。
+    //
+    // 这一条也是 RUSTSEC-2025-0055（tracing-subscriber 的 ANSI 注入）在本项目里
+    // 唯一可达的入口。堵在输入侧比依赖升级更根本：不论日志库是哪个版本，
+    // 控制字符本来就不该出现在邮箱地址里（RFC 5321 也不允许）。
+    if email.chars().any(|ch| ch.is_control()) {
+        return Err(AuthError::ValidationError(
+            "Email must not contain control characters".to_string(),
+        ));
+    }
 
     let (local, domain) = email
         .split_once('@')
@@ -112,6 +127,24 @@ mod tests {
     #[test]
     fn accepts_normal_email_and_lowercases_it() {
         assert_eq!(validate_email(" User@Example.COM ").unwrap(), "user@example.com");
+    }
+
+    #[test]
+    fn rejects_control_characters_in_email() {
+        // 控制字符不是空白字符，必须单独挡。放过去的后果是原始 ESC 字节
+        // 随邮箱进入日志，攻击者可借此伪造 / 掩盖审计记录。
+        for bad in [
+            "evil\u{1b}[31mred\u{1b}[0m@example.com",
+            "a\u{0}b@example.com",
+            "a\u{7}b@example.com",
+        ] {
+            assert!(
+                validate_email(bad).is_err(),
+                "should reject control chars in {bad:?}"
+            );
+        }
+        // 正常地址不受影响
+        assert!(validate_email("normal.user+tag@example.com").is_ok());
     }
 
     #[test]

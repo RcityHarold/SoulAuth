@@ -113,7 +113,7 @@ async fn main() -> anyhow::Result<()> {
     let _ = PROCESS_START.set(Instant::now());
     info!("Starting auth service...");
 
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     let config = Config::from_env()?;
 
     // 数据库 schema 由 schema.sql / initial_data.sql 负责，应用本身不做 DDL。

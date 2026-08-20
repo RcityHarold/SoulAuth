@@ -4,18 +4,17 @@ use crate::{
     models::identity_provider::OAuthUserInfo,
 };
 use oauth2::{
-    basic::BasicClient,
-    AuthUrl,
-    HttpRequest,
-    HttpResponse,
-    ClientId,
-    ClientSecret,
-    RedirectUrl,
-    TokenUrl,
-    Scope,
-    CsrfToken,
-    TokenResponse,
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, EndpointNotSet, EndpointSet,
+    HttpRequest, HttpResponse, RedirectUrl, Scope, TokenResponse, TokenUrl,
 };
+
+/// 配置完成的 OAuth 客户端类型。
+///
+/// oauth2 5.x 用 typestate 表达"哪些端点已设置"：设了 auth_uri 与 token_uri
+/// 才有 `exchange_code`。代价是类型名要写全，收益是配漏端点在编译期就报错，
+/// 而不是等到换令牌时才失败。
+type ConfiguredClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 use serde::Deserialize;
 use tracing::{error, info};
 use reqwest::{Client, Proxy};
@@ -46,32 +45,37 @@ struct GitHubEmail {
 }
 
 
-/// 用指定的 `reqwest::Client` 执行 oauth2 的 HTTP 往返。
+/// 用**我们自己配置的** `reqwest::Client` 执行 oauth2 的 HTTP 往返。
 ///
-/// `oauth2::reqwest::async_http_client` 内部自己 new 一个 Client，拿不到我们的代理
-/// 配置 —— 原来的代码虽然在 `proxy_enabled` 分支里建了带代理的 client，
-/// 却仍然把 `async_http_client` 传给 `request_async`，那个 client 建完就被丢掉，
-/// 于是 `PROXY_ENABLED=true` 完全不起作用（编译器一直用 unused variable 警告标着）。
-async fn http_client_request(
+/// 为什么不直接把 client 交给 oauth2：它自带的 reqwest 集成绑的是它依赖的那个
+/// reqwest 版本，与本项目直接依赖的不是同一个 crate 实例，`AsyncHttpClient`
+/// 的 impl 对不上。走闭包这条通路（oauth2 对 `Fn(HttpRequest) -> Future` 有
+/// blanket impl）则完全绕开版本耦合，并且保住了代理与超时配置 ——
+/// 那正是这个函数最初存在的理由：`oauth2::reqwest::async_http_client` 内部
+/// 自己 new 一个默认 client，**没有超时也不认代理**，PROXY_ENABLED 会静默失效。
+async fn send_via_reqwest(
     client: Client,
     request: HttpRequest,
-) -> std::result::Result<HttpResponse, reqwest::Error> {
-    let mut builder = client.request(request.method, request.url.as_str());
-    for (name, value) in request.headers.iter() {
-        builder = builder.header(name.as_str(), value.as_bytes());
+) -> std::result::Result<HttpResponse, AuthError> {
+    let (parts, body) = request.into_parts();
+
+    let mut builder = client.request(parts.method, parts.uri.to_string());
+    for (name, value) in parts.headers.iter() {
+        builder = builder.header(name, value);
     }
 
-    let response = builder.body(request.body).send().await?;
+    let response = builder.body(body).send().await?;
 
-    let status_code = response.status();
+    let status = response.status();
     let headers = response.headers().clone();
-    let body = response.bytes().await?.to_vec();
+    let bytes = response.bytes().await?.to_vec();
 
-    Ok(HttpResponse {
-        status_code,
-        headers,
-        body,
-    })
+    let mut out = oauth2::http::Response::builder().status(status);
+    if let Some(slot) = out.headers_mut() {
+        *slot = headers;
+    }
+    out.body(bytes)
+        .map_err(|e| AuthError::OAuthError(format!("Failed to assemble OAuth response: {e}")))
 }
 
 /// 出站 OAuth 请求的整体超时（含 TLS 握手、发送、读完响应体）。
@@ -84,8 +88,8 @@ pub struct OAuthService {
     // 未配置凭证的 provider **没有 client**，而不是拿空串硬造一个。
     // 造出来的话，登录会一路走到「拿假 client_id 去 Google 换令牌」才失败，
     // 报错还指向 OAuth 库 —— 运维看不出这是「没配」而不是「配错」。
-    google_client: Option<BasicClient>,
-    github_client: Option<BasicClient>,
+    google_client: Option<ConfiguredClient>,
+    github_client: Option<ConfiguredClient>,
     // 授权 / 换令牌两个端点已经进了 BasicClient，不必重复保存；
     // 这三个是「换到令牌之后」才用的，得自己拿着。
     google_userinfo_url: String,
@@ -256,16 +260,17 @@ impl OAuthService {
 
         let google_client = if config.google_configured() {
             Some(
-                BasicClient::new(
-                    ClientId::new(config.google_client_id.clone().unwrap_or_default()),
-                    Some(ClientSecret::new(
-                        config.google_client_secret.clone().unwrap_or_default(),
-                    )),
+                BasicClient::new(ClientId::new(
+                    config.google_client_id.clone().unwrap_or_default(),
+                ))
+                .set_client_secret(ClientSecret::new(
+                    config.google_client_secret.clone().unwrap_or_default(),
+                ))
+                .set_auth_uri(
                     AuthUrl::new(google_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
-                    Some(
-                        TokenUrl::new(google_token)
-                            .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-                    ),
+                )
+                .set_token_uri(
+                    TokenUrl::new(google_token).map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_redirect_uri(
                     RedirectUrl::new(format!(
@@ -281,16 +286,17 @@ impl OAuthService {
 
         let github_client = if config.github_configured() {
             Some(
-                BasicClient::new(
-                    ClientId::new(config.github_client_id.clone().unwrap_or_default()),
-                    Some(ClientSecret::new(
-                        config.github_client_secret.clone().unwrap_or_default(),
-                    )),
+                BasicClient::new(ClientId::new(
+                    config.github_client_id.clone().unwrap_or_default(),
+                ))
+                .set_client_secret(ClientSecret::new(
+                    config.github_client_secret.clone().unwrap_or_default(),
+                ))
+                .set_auth_uri(
                     AuthUrl::new(github_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
-                    Some(
-                        TokenUrl::new(github_token)
-                            .map_err(|e| AuthError::OAuthError(e.to_string()))?,
-                    ),
+                )
+                .set_token_uri(
+                    TokenUrl::new(github_token).map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_redirect_uri(
                     RedirectUrl::new(format!(
@@ -348,9 +354,9 @@ impl OAuthService {
     /// 四个使用点共用这一处，错误文案只有一份 —— 分头写的话迟早出现
     /// 「入口说没配、回调说 OAuth 错误」这种自相矛盾的提示。
     fn client<'a>(
-        client: &'a Option<BasicClient>,
+        client: &'a Option<ConfiguredClient>,
         provider: &str,
-    ) -> Result<&'a BasicClient> {
+    ) -> Result<&'a ConfiguredClient> {
         client.as_ref().ok_or_else(|| {
             AuthError::NotConfigured(format!(
                 "{provider} sign-in is not enabled on this deployment"
@@ -387,12 +393,13 @@ impl OAuthService {
         // client —— 默认**没有超时**，等于把上面那份超时配置绕开了。
         let client = self.create_http_client()?;
 
+        let exchange = {
+            let client = client.clone();
+            move |req| send_via_reqwest(client.clone(), req)
+        };
         let token = Self::client(&self.google_client, "Google")?
             .exchange_code(oauth2::AuthorizationCode::new(code))
-            .request_async({
-                let client = client.clone();
-                move |req| http_client_request(client.clone(), req)
-            })
+            .request_async(&exchange)
             .await
             .map_err(|e| AuthError::OAuthError(e.to_string()))?;
 
@@ -453,12 +460,13 @@ impl OAuthService {
         // 交换授权码获取访问令牌（同 Google：统一走带超时的 client）
         let client = self.create_http_client()?;
 
+        let exchange = {
+            let client = client.clone();
+            move |req| send_via_reqwest(client.clone(), req)
+        };
         let token = Self::client(&self.github_client, "GitHub")?
             .exchange_code(oauth2::AuthorizationCode::new(code))
-            .request_async({
-                let client = client.clone();
-                move |req| http_client_request(client.clone(), req)
-            })
+            .request_async(&exchange)
             .await
             .map_err(|e| AuthError::OAuthError(e.to_string()))?;
 

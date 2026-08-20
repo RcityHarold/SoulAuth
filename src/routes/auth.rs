@@ -94,10 +94,20 @@ pub(crate) fn request_context(
     config: &Config,
 ) -> RequestContext {
     let ip = client_ip(addr, headers, config.trust_proxy_headers);
+    // 截断之外还要滤掉控制字符：User-Agent 会进会话记录、审计日志和 tracing
+    // 输出。HTTP 头值本身不允许原始控制字符（协议层已挡住 ESC 这类），
+    // 但这里不依赖上游的严格程度 —— 净化的成本是一次 filter。
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().take(256).collect::<String>())
+        .map(|value| {
+            value
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(256)
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Unknown".to_string());
 
     RequestContext::new(ip, user_agent)
