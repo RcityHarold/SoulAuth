@@ -791,6 +791,56 @@ impl Database {
             .map_err(|e| AuthError::DatabaseError(format!("Failed to parse sessions: {}", e)))
     }
 
+    /// 启动自检：确认 schema 与种子数据确实落在**本进程连接的这个 ns/db** 上。
+    ///
+    /// `verify_connection` 只跑 `INFO FOR DB`，一个完全空的库照样通过。于是配错
+    /// 命名空间的部署会「看起来一切正常」：进程起来、`/health` 返回 ok，
+    /// 直到第一个用户请求才 500。实测过一次 —— 部署文档让你把 schema 导进
+    /// `ns=production/db=auth`，而应用默认连 `ns=auth/db=main`，
+    /// 注册接口直接 500 "Database error"，错误信息里没有任何线索指向 ns/db。
+    ///
+    /// 这里把那个运行期 500 提前成启动期的一句话，并且**把实际用的 ns/db 打出来**
+    /// —— 那正是排查时唯一需要的信息。
+    ///
+    /// 判据用种子数据里的 `role:admin`：它同时覆盖两种失败（schema 没导 →
+    /// 表不存在，查询报错；schema 导了但 initial_data 没导 → 查得到表、没有行）。
+    /// 两种情况下运维要做的事是一样的，所以不必区分。
+    pub async fn ensure_schema_initialised(&self) -> Result<()> {
+        let rows: Vec<JsonValue> = self
+            .query_take0_vec(
+                "ensure_schema_initialised",
+                "SELECT count() AS count FROM role WHERE name = 'admin' GROUP ALL",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_default();
+
+        let seeded = rows
+            .first()
+            .and_then(|row| row.get("count"))
+            .and_then(|count| count.as_u64())
+            .unwrap_or(0)
+            > 0;
+
+        if seeded {
+            return Ok(());
+        }
+
+        Err(AuthError::ServerError(format!(
+            "Database `{ns}` / `{db}` is not initialised: the seeded `admin` role is missing. \
+             Apply schema.sql and initial_data.sql to **this** namespace and database, e.g.\n  \
+             surreal import --endpoint {endpoint} --user <u> --pass <p> \
+             --namespace {ns} --database {db} schema.sql\n  \
+             surreal import --endpoint {endpoint} --user <u> --pass <p> \
+             --namespace {ns} --database {db} initial_data.sql\n\
+             (namespace/database come from DATABASE_NAMESPACE / DATABASE_NAME; \
+             importing into a different one is the most common cause of this.)",
+            ns = self.database_namespace,
+            db = self.database_name,
+            endpoint = Self::endpoint_with_scheme(&self.database_url),
+        )))
+    }
+
     /// 回收过期会话与失效的密码重置令牌。由每小时的后台任务调用。
     ///
     /// 这两张表此前**没有任何清理路径**：`session` 只在登出（按 token）与停用

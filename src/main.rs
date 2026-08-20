@@ -119,8 +119,13 @@ async fn main() -> anyhow::Result<()> {
     // 数据库 schema 由 schema.sql / initial_data.sql 负责，应用本身不做 DDL。
     let db = Database::new(&config).await?;
     db.verify_connection().await?;
+    // 连得上不等于能用：空库同样通过 `INFO FOR DB`。这一步确认 schema 与种子数据
+    // 确实在本进程连接的那个 ns/db 上，否则带着 ns/db 一起拒绝启动。
+    db.ensure_schema_initialised().await?;
     info!(
-        "Database connection established. Ensure schema.sql and initial_data.sql have been applied."
+        namespace = %config.database_namespace,
+        database = %config.database_name,
+        "Database connection established and schema verified"
     );
 
     let shared_db = Arc::new(db.clone());

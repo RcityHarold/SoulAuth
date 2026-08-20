@@ -1,6 +1,13 @@
-# Rust Auth System 部署指南
+# SoulAuth 部署指南
 
-本文档说明如何正确部署 Rust Auth System 到生产环境。
+本文档说明如何把 SoulAuth 部署到生产环境。
+
+> **命名空间与数据库必须自始至终一致。** 全文统一用 `auth` / `main`
+> （即 `DATABASE_NAMESPACE` / `DATABASE_NAME` 的默认值）。若你改用别的名字，
+> **导入 SQL 时用的和应用启动时读到的必须是同一对** —— 这是最常见的部署失败原因：
+> schema 建在一处、应用连另一处，进程照常启动、`/health` 照常返回 ok，
+> 直到第一个真实请求才 500。应用现在会在启动时自检并拒绝启动，
+> 但前提仍然是你把这两处对齐。
 
 ## 数据库部署
 
@@ -9,14 +16,13 @@
 在启动应用程序之前，必须先运行以下SQL文件来创建数据库表结构：
 
 ```bash
-# 连接到 SurrealDB
-surreal sql --conn http://localhost:8000 --user root --pass root --ns production --db auth
-
-# 导入表结构
-surreal import --conn http://localhost:8000 --user root --pass root --ns production --db auth schema.sql
-
-# 或者手动执行SQL文件内容
+# 导入表结构（注意参数是 --endpoint，不是 --conn）
+surreal import --endpoint http://localhost:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
 ```
+
+> `--namespace` / `--database` 的取值必须与应用的 `DATABASE_NAMESPACE` /
+> `DATABASE_NAME` 完全一致（默认 `auth` / `main`）。
 
 **重要说明**：
 - `schema.sql` 包含所有必需的数据库表定义
@@ -28,15 +34,14 @@ surreal import --conn http://localhost:8000 --user root --pass root --ns product
 创建完表结构后，运行初始数据文件来创建系统角色和权限：
 
 ```bash
-# 导入初始数据
-surreal import --conn http://localhost:8000 --user root --pass root --ns production --db auth initial_data.sql
-
-# 或者手动执行SQL文件内容
+# 导入初始数据（ns/db 必须与上一步、以及应用配置三者一致）
+surreal import --endpoint http://localhost:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 ```
 
 **`initial_data.sql` 包含的内容**：
-- 系统权限（12个基础权限）
-- 系统角色（5个预定义角色）
+- 系统权限（18 个，全部带 `soulauth:` 命名空间前缀）
+- 系统角色（5 个预定义角色）
 - 系统用户账户（用于权限分配的内部账户）
 - 角色权限关联（为系统角色分配适当的权限）
 
@@ -487,29 +492,61 @@ server {
 export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 ```
 
-### 2. 数据库权限
+### 2. 数据库账号
 
-为应用程序创建专用的数据库用户，只授予必要的权限：
+**现状：应用只支持以 root 身份连接数据库。** 代码里走的是
+`surrealdb::opt::auth::Root`，没有 namespace / database 级登录的分支。
+所以下面这件事**目前做不到**，写在这里是为了说清限制，不是操作指引：
 
-```sql
--- 创建应用程序专用用户
-CREATE USER app_user ON DATABASE auth PASSWORD 'secure-password';
+> 为应用创建一个最小权限的库级用户，只给数据读写、不给 DDL。
 
--- 授予必要的数据权限（不包括DDL权限）
-GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
+这是一项已知的待办。在它落地之前，务实的做法是把风险挡在数据库之外：
 
--- 不要授予CREATE, DROP, ALTER等DDL权限
-```
+- SurrealDB **只监听内网或 loopback**，不要暴露到公网；
+- root 口令用强随机值，与其它服务不复用；
+- `DATABASE_URL` 跨网段时写 `https://`（应用会按 scheme 选择 TLS 连接器；
+  写明文指向非环回地址时启动日志会告警 —— 那条链路上跑的是数据库口令、
+  密码哈希与会话令牌）。
+
+顺带纠正一处历史错误：本节此前给的是
+`CREATE USER ... PASSWORD` / `GRANT SELECT,... ON auth.* TO ...`，
+那是 MySQL / PostgreSQL 语法，SurrealDB 不认。SurrealDB 的写法是
+`DEFINE USER ... ON DATABASE ... PASSWORD ... ROLES OWNER|EDITOR|VIEWER`，
+但如上所述，当前的应用代码还用不了这种账号。
 
 ### 3. 部署步骤
 
-3. **准备数据库**：
+1. **启动 SurrealDB** 并确认可达：
    ```bash
-   # 1. 执行schema.sql创建表结构
-   surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE schema.sql
-   
-   # 2. 执行initial_data.sql创建初始数据
-   surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE initial_data.sql
+   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" file:/var/lib/surrealdb
+   curl -f http://127.0.0.1:8000/health && echo " SurrealDB OK"
+   ```
+
+2. **准备环境变量**。四项必填，生产环境再加两项（见 §1）：
+   ```bash
+   export DATABASE_URL=127.0.0.1:8000
+   export DATABASE_NAMESPACE=auth      # 下一步导入时必须用同一个值
+   export DATABASE_NAME=main           # 同上
+   export DATABASE_USER=root
+   export DATABASE_PASS="$DB_PASS"
+   export JWT_SECRET=$(openssl rand -hex 32)
+   export APP_URL=https://auth.example.com
+   export SMTP_HOST=smtp.example.com
+   export SMTP_FROM=noreply@example.com
+   export OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem
+   export MFA_SECRET_ENCRYPTION_KEY=$(openssl rand -base64 32)
+   ```
+
+3. **准备数据库**。注意这里直接复用上一步导出的变量，
+   保证导入目标与应用启动后连接的是同一个 ns/db：
+   ```bash
+   surreal import --endpoint "http://$DATABASE_URL" \
+       --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
+       --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" schema.sql
+
+   surreal import --endpoint "http://$DATABASE_URL" \
+       --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
+       --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" initial_data.sql
    ```
 
 4. **构建应用程序**：
@@ -541,13 +578,14 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
      -d '{"email":"admin@your-domain.com","username":"admin","password":"CorrectHorse42!"}'
 
    # ② 在数据库里把 admin 角色授予该账号
-   curl -u root:root -H 'surreal-ns: auth' -H 'surreal-db: main' \
+   curl -u "$DATABASE_USER:$DATABASE_PASS" \
+     -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
      --data "LET \$u = (SELECT VALUE id FROM user WHERE email = 'admin@your-domain.com')[0];
              CREATE user_role CONTENT {
                user_id: \$u, role_id: role:admin,
                assigned_at: 0, assigned_by: user:system
              };" \
-     http://127.0.0.1:8000/sql
+     "http://$DATABASE_URL/sql"
 
    # ③ 重新登录拿令牌（角色变更后需要重新登录，令牌本身不带角色）
    curl -X POST http://localhost:8080/api/auth/login \
@@ -558,6 +596,18 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
    curl http://localhost:8080/api/auth/me -H "Authorization: Bearer <token>"
    # → "is_admin": true
    ```
+
+### 4. 验证这份文档本身
+
+`tests/deployment_walkthrough.sh` 会照上面 §3 的步骤 1-7 从零跑一遍，
+最后断言拿到一个 `is_admin: true` 的管理员：
+
+```bash
+cargo build && ./tests/deployment_walkthrough.sh
+```
+
+改动本文档的部署步骤后请一并跑它。这份文档曾经通不过自己 —— 参数名写错、
+ns/db 三处不一致，而这些只有真正执行才会暴露。
 
 ## 作为 OIDC Provider 接入（SoulSeedOS / 其它应用）
 
