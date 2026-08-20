@@ -263,3 +263,12 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
   刻意做了防枚举。两者口径不一致，是可用性取舍而非疏漏。
 - ID Token 寿命对**所有**客户端一律夹到 300 秒，不只是对提出该要求的接入方。
 - 没有 RFC 7662 令牌自省。接入方感知吊销要等到令牌自然过期。
+
+---
+
+## 许可
+
+Apache-2.0，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
+已知的依赖公告、以及它们为什么在本项目里不可达，写在
+[SECURITY.md](SECURITY.md)。就 `cargo audit` 的输出提 issue 之前请先看那里。

@@ -293,3 +293,13 @@ DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshoo
   consumers that asked for it.
 - No RFC 7662 token introspection. Consumers learn about revocation at token
   expiry, not immediately.
+
+---
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Known dependency advisories and why they are not reachable in this codebase are
+documented in [SECURITY.md](SECURITY.md) — worth reading before you file an
+issue about `cargo audit` output.
