@@ -124,24 +124,18 @@ impl AuditService {
         })
     }
 
-    // Rate Limit Violations (estimated from failed login attempts with high frequency)
+    /// 窗口内的限流违规次数。
+    ///
+    /// 这里以前是**估算**：数"失败登录超过 10 次的 IP 有几个"，
+    /// 注释写着「Since we don't store rate limit violations directly」。
+    /// 那句话已经不成立 —— 限流中间件在触发阻塞的那一刻就会写一条
+    /// `rate_limit_violation` 审计事件（见 `utils::rate_limit_middleware`）。
+    /// 也就是说真值一直躺在同一张表里，而这个接口报的是另一个量纲
+    /// （IP 个数，不是违规次数），且与限流是否真的触发过毫无关系。
     pub async fn get_rate_limit_violations(&self, start_time: DateTime<Utc>) -> ApiResult<i64> {
-        // Since we don't store rate limit violations directly, we estimate from pattern analysis
-        let query = "SELECT ip_address, count() as count FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address";
-        let mut result = self.db.client.query(query)
-            .bind(("start_time", start_time.timestamp()))
-            .await
-            .and_then(|response| response.check())
-            .map_err(|e| {
-                error!("Failed to get rate limit violations: {}", e);
-                AuthError::DatabaseError("Query execution failed".to_string())
-            })?;
-
-        let rows: Vec<Value> = result.take(0).unwrap_or_default();
-        Ok(rows
-            .iter()
-            .filter(|r| row::i64_field(r, "count") > 10)
-            .count() as i64)
+        let query = "SELECT count() as count FROM user_activity \
+                     WHERE action = 'rate_limit_violation' AND timestamp >= $start_time GROUP ALL";
+        self.execute_count_query(query, start_time).await
     }
 
     // Permission Denials
@@ -165,35 +159,44 @@ impl AuditService {
 
         let ip_rows: Vec<Value> = result.take(0).unwrap_or_default();
 
+        // 先把窗口内所有仍在锁定中的 IP 一次取回来。
+        //
+        // 以前是在下面的循环里逐个 IP 查一次 —— 最多 20 个 IP 就是 21 次往返，
+        // 与 `list_users` 的 N+1 是同一类问题。
+        let locked_ips: Vec<Value> = {
+            let mut r = self
+                .db
+                .client
+                .query(
+                    "SELECT identifier FROM account_lockout \
+                     WHERE lockout_type = 'IpAddress' AND locked_until > $now",
+                )
+                .bind(("now", Utc::now()))
+                .await
+                .and_then(|response| response.check())
+                .map_err(|e| {
+                    error!("Failed to load locked IPs: {}", e);
+                    AuthError::DatabaseError("Query execution failed".to_string())
+                })?;
+            r.take(0).unwrap_or_default()
+        };
+        let locked: std::collections::HashSet<String> = locked_ips
+            .iter()
+            .map(|r| row::str_field(r, "identifier"))
+            .collect();
+
         let mut metrics = Vec::new();
         for r in &ip_rows {
             let ip_address = row::str_field(r, "ip_address");
             let failed_attempts = row::i64_field(r, "failed_attempts");
             let last_attempt_timestamp = row::i64_field(r, "last_attempt");
-            // Check if IP is currently locked
-            // `now` 以前绑的是 `Utc::now().to_string()` —— 一个字符串。datetime 跟
-            // 字符串比同样走类型序，`locked_until > <字符串>` 恒为真，于是**任何
-            // 曾经被锁过的 IP 都会被报成"当前锁定中"**，哪怕锁早就到期了。
-            // 这里绑原生 `DateTime`，和上面 active_lockouts 的写法保持一致。
-            let lockout_query = "SELECT status FROM account_lockout WHERE identifier = $ip AND lockout_type = 'IpAddress' AND locked_until > $now";
-            let mut lockout_result = self.db.client.query(lockout_query)
-                .bind(("ip", ip_address.clone()))
-                .bind(("now", Utc::now()))
-                .await
-                .and_then(|response| response.check())
-                .map_err(|e| {
-                    error!("Failed to check IP lockout status: {}", e);
-                    AuthError::DatabaseError("Query execution failed".to_string())
-                })?;
-
-            let is_locked: Option<String> = lockout_result.take("status").unwrap_or(None);
             let last_attempt = DateTime::from_timestamp(last_attempt_timestamp, 0)
-                .unwrap_or_else(|| Utc::now());
+                .unwrap_or_else(Utc::now);
 
             metrics.push(IpActivityMetric {
+                is_locked: locked.contains(&ip_address),
                 ip_address,
                 failed_attempts,
-                is_locked: is_locked.is_some(),
                 last_attempt,
             });
         }
@@ -233,8 +236,8 @@ impl AuditService {
                 continue;
             }
             let risk_score = self.calculate_risk_score(count, &activity_type);
-            let first_seen = DateTime::from_timestamp(first_seen_ts, 0).unwrap_or_else(|| Utc::now());
-            let last_seen = DateTime::from_timestamp(last_seen_ts, 0).unwrap_or_else(|| Utc::now());
+            let first_seen = DateTime::from_timestamp(first_seen_ts, 0).unwrap_or_else(Utc::now);
+            let last_seen = DateTime::from_timestamp(last_seen_ts, 0).unwrap_or_else(Utc::now);
 
             suspicious.push(SuspiciousActivity {
                 user_id,
@@ -442,7 +445,9 @@ impl AuditService {
         let security_incidents = self.get_security_incidents_count(start_time).await?;
         let auth_stats = self.get_authentication_stats(start_time).await?;
         
-        let risk_level = self.calculate_risk_level(security_incidents, auth_stats.success_rate).await;
+        let has_attempts = auth_stats.successful_logins + auth_stats.failed_logins > 0;
+        let risk_level =
+            self.calculate_risk_level(security_incidents, auth_stats.success_rate, has_attempts);
 
         Ok(ExecutiveSummary {
             total_users,
@@ -459,7 +464,10 @@ impl AuditService {
         
         // Check authentication success rate
         let auth_stats = self.get_authentication_stats(start_time).await?;
-        if auth_stats.success_rate < 90.0 {
+        // 同 `calculate_risk_level`：窗口内一次登录都没有时，成功率是 0.0 而非
+        // "无数据"，不加这个判断就会对一个空系统发出高优先级告警。
+        let has_attempts = auth_stats.successful_logins + auth_stats.failed_logins > 0;
+        if has_attempts && auth_stats.success_rate < 90.0 {
             recommendations.push(SecurityRecommendation {
                 priority: "High".to_string(),
                 category: "Authentication".to_string(),
@@ -630,10 +638,24 @@ impl AuditService {
         (base_score * frequency_multiplier).min(10)
     }
 
-    async fn calculate_risk_level(&self, security_incidents: i64, success_rate: f64) -> String {
-        if security_incidents > 20 || success_rate < 80.0 {
+    /// 风险等级。
+    ///
+    /// `has_attempts` 不能省。没有任何登录尝试时 `success_rate` 是 0.0
+    /// （`get_authentication_stats` 里 total_attempts == 0 就返回 0.0），
+    /// 而 `0.0 < 80.0` 恒真 —— 于是**一个刚装好、还没有人登录过的部署，
+    /// 执行摘要里的风险等级就是 High**。第一天就喊狼来了，
+    /// 训练出来的结果是运维不再看这个字段。
+    fn calculate_risk_level(
+        &self,
+        security_incidents: i64,
+        success_rate: f64,
+        has_attempts: bool,
+    ) -> String {
+        let rate_is_meaningful = has_attempts;
+
+        if security_incidents > 20 || (rate_is_meaningful && success_rate < 80.0) {
             "High".to_string()
-        } else if security_incidents > 10 || success_rate < 90.0 {
+        } else if security_incidents > 10 || (rate_is_meaningful && success_rate < 90.0) {
             "Medium".to_string()
         } else {
             "Low".to_string()

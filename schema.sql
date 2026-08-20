@@ -19,7 +19,8 @@ DEFINE FIELD verification_token ON user TYPE option<string>;
 DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
 DEFINE FIELD membership_level ON user TYPE string DEFAULT "FREE";
-DEFINE FIELD membership_expiry ON user TYPE option<string>;
+-- 时间点而非自由字符串：形状由 SoulAuth 保证，语义（过期与否）由消费方解释。
+DEFINE FIELD membership_expiry ON user TYPE option<datetime>;
 DEFINE FIELD last_login_at ON user TYPE option<number>;
 DEFINE FIELD last_login_ip ON user TYPE option<string>;
 DEFINE FIELD created_at ON user TYPE number;
@@ -158,8 +159,6 @@ DEFINE FIELD sms_notifications ON user_preferences TYPE bool DEFAULT false;
 DEFINE FIELD marketing_emails ON user_preferences TYPE bool DEFAULT false;
 DEFINE FIELD security_emails ON user_preferences TYPE bool DEFAULT true;
 DEFINE FIELD newsletter ON user_preferences TYPE bool DEFAULT false;
-DEFINE FIELD two_factor_required ON user_preferences TYPE bool DEFAULT false;
-DEFINE FIELD session_timeout ON user_preferences TYPE number DEFAULT 86400;
 DEFINE FIELD timezone ON user_preferences TYPE string DEFAULT "UTC";
 DEFINE FIELD date_format ON user_preferences TYPE string DEFAULT "YYYY-MM-DD";
 DEFINE FIELD time_format ON user_preferences TYPE string DEFAULT "24h";
@@ -256,27 +255,6 @@ DEFINE FIELD expires_at ON oidc_refresh_token TYPE number;
 DEFINE FIELD created_at ON oidc_refresh_token TYPE number;
 DEFINE INDEX oidc_refresh_token_idx ON oidc_refresh_token COLUMNS token UNIQUE;
 DEFINE INDEX oidc_refresh_token_expiry_idx ON oidc_refresh_token COLUMNS expires_at;
-
--- SSO 会话表
-DEFINE TABLE sso_session SCHEMAFULL;
-DEFINE FIELD session_id ON sso_session TYPE string;
-DEFINE FIELD user_id ON sso_session TYPE record<user>;
--- 数组元素是对象，SCHEMAFULL 下必须显式声明，否则写入被拒：
---   "Found field 'client_sessions[0].client_id', but no such field exists"
-DEFINE FIELD client_sessions ON sso_session TYPE array;
-DEFINE FIELD client_sessions.* ON sso_session TYPE object;
-DEFINE FIELD client_sessions.*.client_id ON sso_session TYPE string;
-DEFINE FIELD client_sessions.*.session_id ON sso_session TYPE string;
-DEFINE FIELD client_sessions.*.created_at ON sso_session TYPE number;
-DEFINE FIELD client_sessions.*.last_accessed_at ON sso_session TYPE number;
-DEFINE FIELD created_at ON sso_session TYPE number;
-DEFINE FIELD last_accessed_at ON sso_session TYPE number;
-DEFINE FIELD expires_at ON sso_session TYPE number;
-DEFINE FIELD ip_address ON sso_session TYPE string;
-DEFINE FIELD user_agent ON sso_session TYPE string;
-DEFINE INDEX sso_session_id_idx ON sso_session COLUMNS session_id UNIQUE;
-DEFINE INDEX sso_session_user_idx ON sso_session COLUMNS user_id;
-DEFINE INDEX sso_session_expiry_idx ON sso_session COLUMNS expires_at;
 
 -- 跨副本共享的限流计数桶。
 -- 记录 ID 是 (客户端标识, 端点) 的摘要；window_index 为固定窗口序号，

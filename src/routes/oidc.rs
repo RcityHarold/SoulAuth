@@ -437,7 +437,13 @@ async fn authorize(
                     // 先解 Claims 再取 user：ID Token 的 `sid` 需要 `session_id`，
                     // 而 `get_user_from_token` 只返回 User，把它丢掉了。
                     if let Ok(claims) = decode_and_verify_token(&db, token).await {
-                        if let Ok(user) = load_user_from_claims(&db, &claims).await {
+                        // 账号状态同样要看：`decode_and_verify_token` 只验签名、有效期
+                        // 与会话是否还在，对停用一无所知。不可用就当作未登录往下走到
+                        // 登录页，而不是在这里签授权码。
+                        if let Ok(user) = load_user_from_claims(&db, &claims)
+                            .await
+                            .and_then(|user| user.ensure_usable().map(|_| user))
+                        {
                             let user_id = record_id_key_to_string(
                                 user.id.as_ref().ok_or(AuthError::UserNotFound)?,
                             );
@@ -610,6 +616,11 @@ fn parse_response_types(response_type: &str) -> Result<Vec<ResponseType>, AuthEr
     Ok(response_types)
 }
 
+/// 解析浏览器会话背后的用户，并要求账号仍然可用。
+///
+/// 状态校验不能省：`browser_session_is_active` 只确认 `session` 行还在、还没过期，
+/// 它对账号被停用一无所知。少了这一步，被停用的用户拿着仍未过期的 cookie
+/// 就能继续换到新的授权码 —— 停用于是只挡住了原生 API，挡不住 SSO。
 async fn resolve_existing_user_id(db: &Arc<Database>, user_id: &str) -> Result<String, AuthError> {
     let users: Vec<User> = db
         .query_take0_vec(
@@ -620,6 +631,7 @@ async fn resolve_existing_user_id(db: &Arc<Database>, user_id: &str) -> Result<S
         .await?;
 
     let user = users.into_iter().next().ok_or(AuthError::UserNotFound)?;
+    user.ensure_usable()?;
     let user_id = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
 
     Ok(record_id_key_to_string(user_id))

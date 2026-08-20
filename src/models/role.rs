@@ -41,7 +41,14 @@ pub struct RoleResponse {
 impl From<Role> for RoleResponse {
     fn from(role: Role) -> Self {
         Self {
-            id: crate::utils::record_id::record_id_key_to_string(&role.id.unwrap()),
+            // `id` 是 Option（新建时还没有）。这里 unwrap 会把一条缺 id 的记录
+            // 变成整个 handler 线程 panic —— 与 `User::from` 已经修掉的是同一处隐患。
+            // 降级成空串，交由上层按"找不到"处理。
+            id: role
+                .id
+                .as_ref()
+                .map(crate::utils::record_id::record_id_key_to_string)
+                .unwrap_or_default(),
             name: role.name,
             display_name: role.display_name,
             description: role.description,

@@ -6,7 +6,7 @@
 > English version: [README.md](README.md)（主版本）
 
 ```
-axum 0.6 · SurrealDB 3.0 · 77 个 HTTP 端点 · 约 1.8 万行
+axum 0.6 · SurrealDB 3.0 · 70 个 HTTP 端点 · 约 1.7 万行
 单元测试 122 项（5 秒，零外部依赖）· 集成测试 25 组 242 项断言
 ```
 
@@ -35,7 +35,7 @@ RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulau
 | **凭证** | Argon2 口令散列、口令策略（长度 + 字符类别）、为 OAuth 建号的无密码账号设置首个密码 |
 | **第三方登录** | Google 与 GitHub，**两个都是可选的**——只用邮箱密码的部署一个都不必配 |
 | **MFA** | TOTP（RFC 6238）含二维码下发、一次性备用码、基于时间窗水位线的重放拒绝 |
-| **会话** | 服务端会话记录、单点登出、全端登出（同时吊销已签发的 OIDC 令牌）、按客户端跟踪的 SSO 会话 |
+| **会话** | 服务端会话记录、单点登出、全端登出（同时吊销已签发的 OIDC 令牌与浏览器会话）、停用账号同样一并吊销 |
 | **OIDC Provider** | 发现文档、JWKS、授权码 + PKCE（仅 S256）、带轮换的刷新、userinfo、RP 发起的登出、客户端管理接口 |
 | **RBAC** | 角色、权限、用户与角色、角色与权限的双向授予——范围限于 SoulAuth 自己的管理后台 |
 | **防护** | 跨副本合账的分端点限流、账号与 IP 双维度锁定、CORS 白名单 |
@@ -49,10 +49,10 @@ RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulau
 
 ```bash
 # 1. 表结构与初始数据 —— 应用自身不执行任何 DDL
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main schema.sql
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main initial_data.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 
 # 2. 最小配置 —— 只有四项是必填的
 export JWT_SECRET=$(openssl rand -hex 32)   # 至少 32 字符
@@ -73,20 +73,38 @@ cargo run
 
 ---
 
+## 响应形状
+
+每个端点直接返回资源本身，**没有 `{success, data, message}` 信封**。
+不产生资源的动作返回 `204 No Content`。
+
+```
+GET /api/auth/me        →  200  {"id":"…","email":"…","is_admin":true}
+GET /api/rbac/roles     →  200  [{"name":"admin","permissions":[…]}, …]
+POST …/roles/assign     →  204  （无响应体）
+出错                     →  4xx/5xx  {"error":"Invalid credentials"}
+```
+
+OIDC 那几个端点（`/.well-known/openid-configuration`、`/jwks`、`/token`、
+`/userinfo`、`/authorize`）返回各自规范规定的形状，包括令牌端点的
+`{"error":"invalid_grant","error_description":"…"}`。这是唯一一处有意的例外：
+给它们套外壳会让每一个标准 OIDC 客户端库解析失败。
+
 ## 接口面
 
-77 个端点，分八个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
+70 个端点，分八个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
 
 | 模块 | 端点数 | 覆盖 |
 |---|---:|---|
-| `auth` | 20 | 注册、登录、登出、全端登出、会话列表、邮箱验证、密码重置、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
+| `auth` | 21 | 注册、登录、登出、全端登出、会话列表、邮箱验证与重发、密码重置、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
 | `user_management` | 14 | 本人资料 / 偏好 / 活动日志，以及管理员的读取与账号状态、会员等级写入 |
 | `rbac` | 13 | 角色与权限的增删查、双向授予、自身权限自查 |
-| `sso_session` | 11 | SSO 会话的建立 / 读取 / 续期 / 注销、按客户端挂载与摘除、统计、清理 |
 | `oidc` | 7 | 发现文档、JWKS、authorize、token、userinfo、logout |
 | `oidc_client` | 6 | 客户端注册、列表、更新、停用、密钥轮换 |
 | `audit` | 5 | 看板、活动摘要、安全指标、安全报告、系统健康 |
 | `ops` | 1 | 会员总览 |
+| `security` | 2 | 查询锁定状态、手工解锁（账号或 IP）|
+| _根路径_ | 1 | `/health` 存活探针（不受限流约束） |
 
 每一个端点都被集成测试跑到。典型流程：
 
@@ -263,3 +281,12 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
   刻意做了防枚举。两者口径不一致，是可用性取舍而非疏漏。
 - ID Token 寿命对**所有**客户端一律夹到 300 秒，不只是对提出该要求的接入方。
 - 没有 RFC 7662 令牌自省。接入方感知吊销要等到令牌自然过期。
+
+---
+
+## 许可
+
+Apache-2.0，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
+
+已知的依赖公告、以及它们为什么在本项目里不可达，写在
+[SECURITY.md](SECURITY.md)。就 `cargo audit` 的输出提 issue 之前请先看那里。

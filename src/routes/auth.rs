@@ -94,17 +94,36 @@ pub(crate) fn request_context(
     config: &Config,
 ) -> RequestContext {
     let ip = client_ip(addr, headers, config.trust_proxy_headers);
+    // 截断之外还要滤掉控制字符：User-Agent 会进会话记录、审计日志和 tracing
+    // 输出。HTTP 头值本身不允许原始控制字符（协议层已挡住 ESC 这类），
+    // 但这里不依赖上游的严格程度 —— 净化的成本是一次 filter。
     let user_agent = headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
-        .map(|value| value.chars().take(256).collect::<String>())
+        .map(|value| {
+            value
+                .chars()
+                .filter(|ch| !ch.is_control())
+                .take(256)
+                .collect::<String>()
+        })
+        .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "Unknown".to_string());
 
     RequestContext::new(ip, user_agent)
 }
 
-fn error_body(error: &str, message: &str) -> Json<serde_json::Value> {
-    Json(json!({ "error": error, "message": message }))
+/// 错误响应体。
+///
+/// 形状与 `AuthError::into_response` 保持一致：**只有一个 `error` 字段**。
+/// 此前这里是 `{"error": <类别>, "message": <详情>}` 两字段，而全站其余端点
+/// 走 `AuthError` 出来的是 `{"error": <详情>}` —— 同一个 API 两种错误形状，
+/// 客户端得逐端点记。类别本身是冗余的：401 / 403 / 409 已经把它表达清楚了。
+///
+/// 第一个参数保留是为了让调用点读起来仍带上下文（它会被拼进日志语义），
+/// 但不再进响应体。
+fn error_body(_category: &str, message: &str) -> Json<serde_json::Value> {
+    Json(json!({ "error": message }))
 }
 
 /// 执行锁定检查；数据库鉴权态过期时先重连再试一次。
@@ -177,6 +196,7 @@ pub fn router() -> Router {
         .route("/login", post(login))
         .route("/admin/login", post(admin_login))
         .route("/verify-email/:token", get(verify_email))
+        .route("/resend-verification", post(resend_verification))
         .route("/me", get(get_current_user))
         .route("/initialize-password", post(initialize_password))
         .route("/request-password-reset", post(request_password_reset))
@@ -511,6 +531,22 @@ async fn verify_email(
     let ctx = request_context(&addr, &headers, &config);
     let issued = auth_service.verify_email(token, &ctx).await?;
     Ok(Json(issued.response))
+}
+
+/// 重新发送邮箱验证信。
+///
+/// 无条件返回 200：邮箱是否存在、是否已验证、账号是否可用都不通过状态码透露，
+/// 与 `request_password_reset` 同一套防枚举语义。
+async fn resend_verification(
+    Extension(auth_service): Extension<Arc<AuthService>>,
+    Json(request): Json<RequestPasswordResetRequest>,
+) -> Result<Json<serde_json::Value>> {
+    auth_service
+        .resend_verification_email(request.email)
+        .await?;
+    Ok(Json(json!({
+        "message": "Verification email sent if the address is registered and still unverified"
+    })))
 }
 
 async fn get_current_user(

@@ -2,6 +2,11 @@ use axum::http::header;
 use thiserror::Error;
 use surrealdb::Error as SurrealDBError;
 
+/// `enum_variant_names`：这里多数变体都以 `Error` 结尾，clippy 会提示改名。
+/// 不改 —— `DatabaseError` / `TokenError` / `OAuthError` 这套命名在错误类型里
+/// 是通行读法，去掉后缀（`Database` / `Token`）反而看不出是错误；
+/// 而重命名要动两百多个调用点，换来的只是少一条 lint。
+#[allow(clippy::enum_variant_names)]
 #[derive(Debug, Error)]
 pub enum AuthError {
     #[error("Database error: {0}")]
@@ -75,9 +80,6 @@ pub enum AuthError {
     
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
-    
-    #[error("Internal server error: {0}")]
-    InternalServerError(String),
 }
 
 impl From<reqwest::Error> for AuthError {
@@ -110,18 +112,14 @@ impl axum::response::IntoResponse for AuthError {
 
         if matches!(
             self,
-            AuthError::DatabaseError(_)
-                | AuthError::ServerError(_)
-                | AuthError::InternalServerError(_)
+            AuthError::DatabaseError(_) | AuthError::ServerError(_)
         ) {
             tracing::error!("AuthError response: {}", self);
         }
 
         // 服务端内部错误一律返回统一文案，不把底层细节（SQL、连接串等）泄露给调用方。
         let (status, message) = match &self {
-            AuthError::DatabaseError(_)
-            | AuthError::ServerError(_)
-            | AuthError::InternalServerError(_) => (
+            AuthError::DatabaseError(_) | AuthError::ServerError(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Internal server error".to_string(),
             ),

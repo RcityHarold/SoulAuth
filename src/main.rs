@@ -4,7 +4,7 @@ use std::{
     time::Instant,
 };
 
-use axum::{http::HeaderValue, middleware, routing::Router, Extension};
+use axum::{http::HeaderValue, middleware, routing::{get, Router}, Extension, Json};
 use tokio::time::{interval, Duration};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
@@ -29,7 +29,6 @@ use crate::{
         oidc_client_management::OidcClientService,
         oidc_keys::OidcSigningKey,
         rate_limiter::{RateLimiter, RateLimitRules},
-        sso_session_management::SsoSessionService,
     },
     utils::rate_limit_middleware::rate_limit_layer,
 };
@@ -43,6 +42,22 @@ pub fn process_uptime_seconds() -> i64 {
         .get()
         .map(|start| start.elapsed().as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// 存活探针。
+///
+/// DEPLOYMENT.md 从第一版起就让运维 `curl /health` 验证部署，而这个端点
+/// **从来没有存在过** —— 返回 404。它同时也是容器编排的 liveness probe 目标，
+/// 成本近乎为零，所以补上而不是把文档改掉。
+///
+/// 只报告进程存活，不查数据库：liveness 探针失败会触发重启，而数据库抖动
+/// 重启应用救不了，反而会在故障时把所有副本一起打掉。数据库连通性属于
+/// readiness 语义，已由 `/api/audit/system-health` 提供（需鉴权）。
+async fn health() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "status": "ok",
+        "uptime_seconds": process_uptime_seconds(),
+    }))
 }
 
 #[derive(Clone)]
@@ -90,7 +105,7 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "rust_auth=debug,tower_http=info".to_string()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "soulauth=debug,tower_http=info".to_string()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -98,14 +113,19 @@ async fn main() -> anyhow::Result<()> {
     let _ = PROCESS_START.set(Instant::now());
     info!("Starting auth service...");
 
-    dotenv::dotenv().ok();
+    dotenvy::dotenv().ok();
     let config = Config::from_env()?;
 
     // 数据库 schema 由 schema.sql / initial_data.sql 负责，应用本身不做 DDL。
     let db = Database::new(&config).await?;
     db.verify_connection().await?;
+    // 连得上不等于能用：空库同样通过 `INFO FOR DB`。这一步确认 schema 与种子数据
+    // 确实在本进程连接的那个 ns/db 上，否则带着 ns/db 一起拒绝启动。
+    db.ensure_schema_initialised().await?;
     info!(
-        "Database connection established. Ensure schema.sql and initial_data.sql have been applied."
+        namespace = %config.database_namespace,
+        database = %config.database_name,
+        "Database connection established and schema verified"
     );
 
     let shared_db = Arc::new(db.clone());
@@ -138,6 +158,12 @@ async fn main() -> anyhow::Result<()> {
                 "/api/auth/initialize-password".to_string(),
                 RateLimitRules::password_reset(),
             )
+            // 重发验证信：既是发信端点也是"该邮箱注册了没有"的潜在探针，
+            // 与密码重置同档限流。
+            .with_endpoint_rule(
+                "/api/auth/resend-verification".to_string(),
+                RateLimitRules::password_reset(),
+            )
             // 上面这些端点的计数走共享后端，跨副本合账。不接的话，部署 N 个
             // 副本就等于把暴力破解配额放大 N 倍 —— 每个副本各算各的。
             // 一般 API（默认规则）仍走进程内，不给每个请求加一次数据库往返。
@@ -166,7 +192,6 @@ async fn main() -> anyhow::Result<()> {
         signing_key,
     )?);
     let oidc_client_service = Arc::new(OidcClientService::new(shared_db.clone()));
-    let sso_session_service = Arc::new(SsoSessionService::new(shared_db.clone()));
     // AuthService 内部持有 OAuth / SMTP / MFA 客户端，构造一次复用，
     // 不再每个请求重新建一遍。
     let auth_service = Arc::new(AuthService::new(
@@ -178,9 +203,9 @@ async fn main() -> anyhow::Result<()> {
     // 后台清理任务
     let cleanup_limiter = rate_limiter.clone();
     let cleanup_lockout = lockout_service.clone();
-    let cleanup_sso = sso_session_service.clone();
     let cleanup_oidc = oidc_service.clone();
     let cleanup_auth_cache = auth_cache.clone();
+    let cleanup_db = shared_db.clone();
     tokio::spawn(async move {
         let mut interval = interval(Duration::from_secs(3600));
         loop {
@@ -189,11 +214,12 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = cleanup_lockout.cleanup_expired_lockouts().await {
                 error!("Failed to clean up expired lockouts: {e}");
             }
-            if let Err(e) = cleanup_sso.cleanup_expired_sessions().await {
-                error!("Failed to clean up expired SSO sessions: {e}");
-            }
             if let Err(e) = cleanup_oidc.cleanup_expired_artifacts().await {
                 error!("Failed to clean up expired OIDC tokens: {e}");
+            }
+            // 过期会话与失效的重置令牌。这两张表以前不在清理范围内，只增不减。
+            if let Err(e) = cleanup_db.cleanup_expired_auth_artifacts().await {
+                error!("Failed to clean up expired sessions / reset tokens: {e}");
             }
             cleanup_auth_cache.purge_expired().await;
         }
@@ -223,10 +249,10 @@ async fn main() -> anyhow::Result<()> {
         .nest("/api/rbac", routes::rbac::router())
         .nest("/api/users", routes::user_management::router())
         .nest("/api/ops", routes::ops::router())
+        .nest("/api/security", routes::security::router())
         .nest("/api/audit", routes::audit::audit_routes())
         .nest("/api/oidc", routes::oidc::oidc_routes())
         .nest("/api/oidc", routes::oidc_client::oidc_client_routes())
-        .nest("/api/sso", routes::sso_session::sso_session_routes())
         .merge(routes::oidc::discovery_routes()) // 根路径上的 /.well-known 发现端点
         // 限流放在最内层：外层的 Extension 已经注入，它才能拿到 AppState / Config。
         //
@@ -235,6 +261,10 @@ async fn main() -> anyhow::Result<()> {
         // 上只能拿到原始路径，带参数的端点会一个 token 一个计数桶，等于不限流。
         // 代价是打不中任何路由的请求（404）不再计数，这类请求本来也不碰业务逻辑。
         .route_layer(middleware::from_fn(rate_limit_layer))
+        // `/health` 挂在限流层**之后**注册，因此不受限流约束。
+        // 编排器的 liveness 探针如果被 429 打回，会被判成"进程死了"进而重启副本 ——
+        // 限流本是为了抗压，那样反而成了压力下的自杀开关。
+        .route("/health", get(health))
         .layer(Extension(shared_db))
         .layer(Extension(app_state))
         .layer(Extension(auth_service))
@@ -243,7 +273,6 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(config.clone()))
         .layer(Extension(oidc_service))
         .layer(Extension(oidc_client_service))
-        .layer(Extension(sso_session_service))
         .layer(build_cors_layer(&config));
 
     let addr: SocketAddr = config.bind_addr.parse().map_err(|e| {

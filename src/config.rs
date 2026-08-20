@@ -21,7 +21,6 @@ pub struct Config {
     pub database_namespace: String,
     pub database_name: String,
     pub database_connection_timeout: u64,
-    pub database_max_connections: u32,
     pub jwt_secret: String,
     pub jwt_expiration: i64,
     // 第三方登录的凭证是**可选**的：只用邮箱密码登录的部署不该被迫在配置里
@@ -84,6 +83,17 @@ pub struct Config {
     pub bind_addr: String,
     /// 已认证请求的会话校验缓存时长（秒）。0 表示关闭缓存。
     pub session_cache_ttl_seconds: u64,
+    /// 账号锁定策略。
+    ///
+    /// 这几项此前是写死的（5 次 / 15 分钟 / 60 分钟窗口）——
+    /// `AccountLockoutService::new` 收了一个 `Config` 参数却直接丢掉，
+    /// 用的是 `LockoutConfig::default()`。而这恰恰是认证产品里最需要按部署
+    /// 调整的一组参数：面向公众的服务和内网工具对暴力破解的容忍度完全不同。
+    pub lockout_max_attempts: u32,
+    pub lockout_duration_minutes: u32,
+    pub lockout_reset_window_minutes: u32,
+    pub lockout_user_enabled: bool,
+    pub lockout_ip_enabled: bool,
 }
 
 fn required(name: &'static str) -> Result<String, ConfigError> {
@@ -213,7 +223,6 @@ impl Config {
                 .unwrap_or_else(|| "auth".to_string()),
             database_name: optional("DATABASE_NAME").unwrap_or_else(|| "main".to_string()),
             database_connection_timeout: parse_with_default("DATABASE_CONNECTION_TIMEOUT", 30)?,
-            database_max_connections: parse_with_default("DATABASE_MAX_CONNECTIONS", 10)?,
             jwt_secret: required("JWT_SECRET")?,
             jwt_expiration: parse_with_default("JWT_EXPIRATION", 86_400)?,
             google_client_id: optional("GOOGLE_CLIENT_ID"),
@@ -243,12 +252,33 @@ impl Config {
             verify_email_page_url: optional("VERIFY_EMAIL_PAGE_URL"),
             bind_addr: optional("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
             session_cache_ttl_seconds: parse_with_default("AUTH_SESSION_CACHE_TTL_SECONDS", 5u64)?,
+            lockout_max_attempts: parse_with_default("LOCKOUT_MAX_ATTEMPTS", 5u32)?,
+            lockout_duration_minutes: parse_with_default("LOCKOUT_DURATION_MINUTES", 15u32)?,
+            lockout_reset_window_minutes: parse_with_default("LOCKOUT_RESET_WINDOW_MINUTES", 60u32)?,
+            lockout_user_enabled: parse_bool("LOCKOUT_USER_ENABLED", true),
+            lockout_ip_enabled: parse_bool("LOCKOUT_IP_ENABLED", true),
         };
 
         if config.jwt_secret.len() < 32 {
             return Err(ConfigError::Invalid {
                 name: "JWT_SECRET",
                 reason: "must be at least 32 characters".to_string(),
+            });
+        }
+
+        // 0 次尝试就锁定 = 任何人一登录就被锁死；0 分钟锁定 = 锁了等于没锁。
+        // 这两种配置都不是"更严格"，是把服务配坏，所以在启动时拦下。
+        if config.lockout_max_attempts == 0 {
+            return Err(ConfigError::Invalid {
+                name: "LOCKOUT_MAX_ATTEMPTS",
+                reason: "must be at least 1; zero would lock every account on first attempt"
+                    .to_string(),
+            });
+        }
+        if config.lockout_duration_minutes == 0 {
+            return Err(ConfigError::Invalid {
+                name: "LOCKOUT_DURATION_MINUTES",
+                reason: "must be at least 1; a zero-minute lockout is not a lockout".to_string(),
             });
         }
 
@@ -372,7 +402,6 @@ impl Config {
             database_namespace: "auth".to_string(),
             database_name: "main".to_string(),
             database_connection_timeout: 30,
-            database_max_connections: 10,
             jwt_secret: "0123456789abcdef0123456789abcdef".to_string(),
             jwt_expiration: 3600,
             google_client_id: Some("g".to_string()),
@@ -402,6 +431,11 @@ impl Config {
             verify_email_page_url: None,
             bind_addr: "0.0.0.0:8080".to_string(),
             session_cache_ttl_seconds: 5,
+            lockout_max_attempts: 5,
+            lockout_duration_minutes: 15,
+            lockout_reset_window_minutes: 60,
+            lockout_user_enabled: true,
+            lockout_ip_enabled: true,
         }
     }
 }

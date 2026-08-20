@@ -251,8 +251,10 @@ impl UserManagementService {
             return Err(AuthError::ValidationError("User preferences already exist".to_string()));
         }
 
-        let mut preferences = UserPreferences::default();
-        preferences.user_id = user_thing;
+        let mut preferences = UserPreferences {
+            user_id: user_thing,
+            ..Default::default()
+        };
         
         if let Some(theme) = request.theme {
             preferences.theme = theme;
@@ -274,12 +276,6 @@ impl UserManagementService {
         }
         if let Some(newsletter) = request.newsletter {
             preferences.newsletter = newsletter;
-        }
-        if let Some(two_factor_required) = request.two_factor_required {
-            preferences.two_factor_required = two_factor_required;
-        }
-        if let Some(session_timeout) = request.session_timeout {
-            preferences.session_timeout = session_timeout;
         }
         if let Some(timezone) = request.timezone {
             preferences.timezone = timezone;
@@ -369,8 +365,6 @@ impl UserManagementService {
                 marketing_emails = $marketing_emails ?? marketing_emails,
                 security_emails = $security_emails ?? security_emails,
                 newsletter = $newsletter ?? newsletter,
-                two_factor_required = $two_factor_required ?? two_factor_required,
-                session_timeout = $session_timeout ?? session_timeout,
                 timezone = $timezone ?? timezone,
                 date_format = $date_format ?? date_format,
                 time_format = $time_format ?? time_format,
@@ -387,8 +381,6 @@ impl UserManagementService {
             "marketing_emails": request.marketing_emails,
             "security_emails": request.security_emails,
             "newsletter": request.newsletter,
-            "two_factor_required": request.two_factor_required,
-            "session_timeout": request.session_timeout,
             "timezone": request.timezone,
             "date_format": request.date_format,
             "time_format": request.time_format,
@@ -767,12 +759,9 @@ impl UserManagementService {
             .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
 
         user.membership_level = Self::normalize_membership_level(&request.membership_level)?;
-        user.membership_expiry = request
-            .membership_expiry
-            .and_then(|value| {
-                let trimmed = value.trim().to_string();
-                if trimmed.is_empty() { None } else { Some(trimmed) }
-            });
+        // 格式校验已经由 `Option<DateTime<Utc>>` 的反序列化完成：非法输入根本
+        // 到不了这里。以前这里只做 trim + 空串过滤，任意字符串都能落库。
+        user.membership_expiry = request.membership_expiry;
         user.updated_at = chrono::Utc::now().timestamp();
 
         let user_thing = user

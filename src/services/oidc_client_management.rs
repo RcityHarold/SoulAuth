@@ -32,6 +32,24 @@ fn clamp_id_token_lifetime(requested: i64) -> i64 {
     requested.min(MAX_ID_TOKEN_LIFETIME_SECS)
 }
 
+/// public 客户端一律要求 PKCE，管理员传什么都不作数。
+///
+/// public 客户端按定义没有 client_secret，PKCE 是它**唯一**的绑定手段。
+/// 两个都没有，就意味着谁拿到那串授权码谁就能换到令牌 —— 而授权码走在 URL 里，
+/// 会落进 Referer、浏览器历史、反向代理日志，以及移动端上任何抢注了同一
+/// custom scheme 的 App。OAuth 2.1 / RFC 9700 把「public 客户端必须用 PKCE」
+/// 列为强制正是为此。
+///
+/// 这里和 `clamp_id_token_lifetime` 是同一种写法：**不接受管理员配歪**。
+/// 只改默认值挡不住显式传 `false`，所以判据放在服务端而不是文档里。
+/// confidential 客户端仍可自行决定（它有 secret 兜底），默认开。
+fn resolve_require_pkce(client_type: &ClientType, requested: Option<bool>) -> bool {
+    match client_type {
+        ClientType::Public => true,
+        ClientType::Confidential => requested.unwrap_or(true),
+    }
+}
+
 #[derive(Clone)]
 pub struct OidcClientService {
     db: Arc<Database>,
@@ -72,7 +90,7 @@ impl OidcClientService {
             allowed_response_types: request.allowed_response_types.unwrap_or_else(|| {
                 vec![ResponseType::Code]
             }),
-            require_pkce: request.require_pkce.unwrap_or(true),
+            require_pkce: resolve_require_pkce(&request.client_type, request.require_pkce),
             access_token_lifetime: request.access_token_lifetime.unwrap_or(3600),
             refresh_token_lifetime: request.refresh_token_lifetime.unwrap_or(86400),
             id_token_lifetime: clamp_id_token_lifetime(
@@ -201,7 +219,8 @@ impl OidcClientService {
         client.allowed_scopes = request.allowed_scopes.unwrap_or(client.allowed_scopes);
         client.allowed_grant_types = request.allowed_grant_types.unwrap_or(client.allowed_grant_types);
         client.allowed_response_types = request.allowed_response_types.unwrap_or(client.allowed_response_types);
-        client.require_pkce = request.require_pkce.unwrap_or(client.require_pkce);
+        client.require_pkce =
+            resolve_require_pkce(&client.client_type, request.require_pkce.or(Some(client.require_pkce)));
         client.access_token_lifetime = request.access_token_lifetime.unwrap_or(client.access_token_lifetime);
         client.refresh_token_lifetime = request.refresh_token_lifetime.unwrap_or(client.refresh_token_lifetime);
         client.id_token_lifetime = clamp_id_token_lifetime(
@@ -427,4 +446,40 @@ fn response_type_values(values: &[ResponseType]) -> Vec<&'static str> {
             ResponseType::CodeIdToken => "code id_token",
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_id_token_lifetime, resolve_require_pkce, MAX_ID_TOKEN_LIFETIME_SECS};
+    use crate::models::oidc_client::ClientType;
+
+    #[test]
+    fn public_clients_cannot_turn_pkce_off() {
+        // 这是本次修复的核心断言：public 客户端没有 secret，PKCE 是唯一的绑定手段。
+        // 实测过关掉之后的后果 —— 无 verifier 无 secret 即可兑换授权码，
+        // 截获 code 就等于接管账号。所以管理员传什么都不作数。
+        for requested in [Some(false), Some(true), None] {
+            assert!(
+                resolve_require_pkce(&ClientType::Public, requested),
+                "public client must require PKCE regardless of requested={requested:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn confidential_clients_keep_the_choice_and_default_to_on() {
+        // confidential 有 client_secret 兜底，可以自己决定；缺省仍然是开。
+        assert!(resolve_require_pkce(&ClientType::Confidential, None));
+        assert!(resolve_require_pkce(&ClientType::Confidential, Some(true)));
+        assert!(!resolve_require_pkce(&ClientType::Confidential, Some(false)));
+    }
+
+    #[test]
+    fn id_token_lifetime_is_clamped_not_defaulted() {
+        // 与 resolve_require_pkce 同一种写法：只改默认值挡不住显式传一个大值。
+        assert_eq!(clamp_id_token_lifetime(3600), MAX_ID_TOKEN_LIFETIME_SECS);
+        assert_eq!(clamp_id_token_lifetime(0), MAX_ID_TOKEN_LIFETIME_SECS);
+        assert_eq!(clamp_id_token_lifetime(-1), MAX_ID_TOKEN_LIFETIME_SECS);
+        assert_eq!(clamp_id_token_lifetime(120), 120);
+    }
 }

@@ -281,7 +281,19 @@ impl OidcService {
             return Err(anyhow!("Redirect URI mismatch"));
         }
 
-        // 验证 PKCE
+        // 验证 PKCE。
+        //
+        // public 客户端**必须**有 code_challenge，没有就拒绝兑换。注册那一侧已经
+        // 把 require_pkce 对 public 强制为 true（见 `resolve_require_pkce`），
+        // 这里是第二道：存量里可能还留着改动之前建的 require_pkce=false 的客户端，
+        // 以及它们已经发出去的授权码。少了这一道，那些客户端仍然是
+        // 「无 verifier 无 secret 即可兑换」—— 谁截获授权码谁就接管账号。
+        if matches!(client.client_type, ClientType::Public) && auth_code.code_challenge.is_none() {
+            return Err(anyhow!(
+                "PKCE is required for public clients; this authorization code was issued without a code_challenge"
+            ));
+        }
+
         if let Some(code_challenge) = &auth_code.code_challenge {
             let code_verifier = request
                 .code_verifier
@@ -387,6 +399,14 @@ impl OidcService {
     ) -> Result<TokenResponse> {
         let now = Utc::now().timestamp();
 
+        // 账号闸门放在**签发之前**，且不依赖 scope。
+        // 放在下面"scope 含 openid 才取用户"那一段里是不够的：不带 openid 的
+        // 请求同样会拿到 access token，而停用的账号一张都不该再拿到。
+        let user = self
+            .load_active_user(user_id)
+            .await
+            .map_err(|e| anyhow!("refusing to issue tokens: {e}"))?;
+
         // 生成访问令牌
         let access_token = generate_random_string(32);
         let access_token_expires_at = now + client.access_token_lifetime;
@@ -432,12 +452,8 @@ impl OidcService {
             None
         };
 
-        // 生成 ID 令牌（如果 scope 包含 openid）
+        // 生成 ID 令牌（如果 scope 包含 openid）。用户在上面已经取过并校验过状态。
         let id_token = if scope.split_whitespace().any(|value| value == "openid") {
-            let user = self
-                .get_user_by_id(user_id)
-                .await
-                .map_err(|e| anyhow!("get id token user failed: {e}"))?;
             Some(
                 self.generate_id_token(client, &user, nonce, auth_session_ref)
                     .await?,
@@ -536,7 +552,8 @@ impl OidcService {
             return Err(anyhow!("Access token does not carry the openid scope"));
         }
 
-        let user = self.get_user_by_id(&token.user_id).await?;
+        // 停用之后，此前签发的 access token 不该还能换出身份。
+        let user = self.load_active_user(&token.user_id).await?;
         let include_email = scopes.contains(&"email");
         let include_profile = scopes.contains(&"profile");
 
@@ -664,6 +681,21 @@ impl OidcService {
             .into_iter()
             .next()
             .ok_or_else(|| anyhow!("User not found"))
+    }
+
+    /// 取用户，并要求账号当前可用。
+    ///
+    /// OIDC 这一侧此前**一个关口都没有校验账号状态**：停用一个账号之后，
+    /// userinfo 照常返回身份、刷新令牌照常换到新的 access + ID Token、
+    /// 浏览器 cookie 照常换到新授权码。而刷新令牌每次刷新都会轮换出新的一张，
+    /// 所以那不是"一小时的窗口"，是只要接入方持续刷新、停用就永远不会到达。
+    ///
+    /// 判定共用 [`User::ensure_usable`]，与登录闸门、令牌闸门是同一份。
+    async fn load_active_user(&self, user_id: &str) -> Result<User> {
+        let user = self.get_user_by_id(user_id).await?;
+        user.ensure_usable()
+            .map_err(|e| anyhow!("Account is not active: {e}"))?;
+        Ok(user)
     }
 
     async fn save_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {

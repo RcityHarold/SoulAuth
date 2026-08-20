@@ -7,6 +7,19 @@ use surrealdb::types::SurrealValue;
 /// `TYPE number` 对齐。以前这里用 `DateTime<Utc>`，写进 SCHEMAFULL 的
 /// number 列会被数据库拒绝。对外的 Response 结构仍然返回 RFC3339 时间。
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
+/// 用户偏好。
+///
+/// **SoulAuth 只负责存取，不解释其中任何一项。** 这些是给前端用的展示与通知偏好，
+/// 服务端没有、也不打算有对应的执行逻辑。写清楚是因为它此前不清楚：
+/// 这张表原本还有 `two_factor_required` 与 `session_timeout` 两个字段，
+/// 名字读起来像是服务端强制项，实际上全代码库没有任何地方读过它们 ——
+/// 用户把"要求二次验证"打开，登录链路照旧只看 MFA 是否配置。
+/// 一个永远不生效的安全开关比没有这个开关更糟，所以两个都已删除。
+///
+/// 通知类字段（`email_notifications` / `security_emails` / `marketing_emails` /
+/// `newsletter` / `sms_notifications`）同理：本服务只发验证信与密码重置信两种
+/// 事务邮件，两者都必须无条件送达，不受这些开关影响。它们留在这里是给接入方
+/// 存偏好用的。
 pub struct UserPreferences {
     pub id: Option<Thing>,
     pub user_id: Thing,
@@ -17,8 +30,6 @@ pub struct UserPreferences {
     pub marketing_emails: bool,
     pub security_emails: bool,
     pub newsletter: bool,
-    pub two_factor_required: bool,
-    pub session_timeout: i32,
     pub timezone: String,
     pub date_format: String,
     pub time_format: String,
@@ -35,8 +46,6 @@ pub struct CreateUserPreferencesRequest {
     pub marketing_emails: Option<bool>,
     pub security_emails: Option<bool>,
     pub newsletter: Option<bool>,
-    pub two_factor_required: Option<bool>,
-    pub session_timeout: Option<i32>,
     pub timezone: Option<String>,
     pub date_format: Option<String>,
     pub time_format: Option<String>,
@@ -51,8 +60,6 @@ pub struct UpdateUserPreferencesRequest {
     pub marketing_emails: Option<bool>,
     pub security_emails: Option<bool>,
     pub newsletter: Option<bool>,
-    pub two_factor_required: Option<bool>,
-    pub session_timeout: Option<i32>,
     pub timezone: Option<String>,
     pub date_format: Option<String>,
     pub time_format: Option<String>,
@@ -69,8 +76,6 @@ pub struct UserPreferencesResponse {
     pub marketing_emails: bool,
     pub security_emails: bool,
     pub newsletter: bool,
-    pub two_factor_required: bool,
-    pub session_timeout: i32,
     pub timezone: String,
     pub date_format: String,
     pub time_format: String,
@@ -92,8 +97,6 @@ impl From<UserPreferences> for UserPreferencesResponse {
             marketing_emails: prefs.marketing_emails,
             security_emails: prefs.security_emails,
             newsletter: prefs.newsletter,
-            two_factor_required: prefs.two_factor_required,
-            session_timeout: prefs.session_timeout,
             timezone: prefs.timezone,
             date_format: prefs.date_format,
             time_format: prefs.time_format,
@@ -116,8 +119,6 @@ impl Default for UserPreferences {
             marketing_emails: false,
             security_emails: true,
             newsletter: false,
-            two_factor_required: false,
-            session_timeout: 86400, // 24 hours
             timezone: "UTC".to_string(),
             date_format: "YYYY-MM-DD".to_string(),
             time_format: "24h".to_string(),

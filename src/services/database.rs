@@ -9,7 +9,7 @@ use std::{
 };
 use std::time::Duration;
 use serde_json::Value as JsonValue;
-use surrealdb::engine::remote::http::{Client, Http};
+use surrealdb::engine::remote::http::{Client, Http, Https};
 use surrealdb::opt::auth::Root;
 use surrealdb::{Surreal, types::RecordId};
 use surrealdb::types::SurrealValue;
@@ -21,6 +21,10 @@ use crate::{config::Config, error::{Result, AuthError}};
 #[derive(Clone)]
 pub struct Database {
     pub client: Surreal<Client>,
+    // 保存建连时用的原始 URL：重连必须连回同一个地址、同一个 scheme。
+    // 以前 `fresh_client` 直接读 env::var("DATABASE_URL")，与构造时的 Config
+    // 可能不一致 —— 那样 https 分派在重连路径上会被绕开。
+    database_url: String,
     // Keep auth context so we can re-authenticate when tokens expire.
     database_user: String,
     database_pass: String,
@@ -56,6 +60,54 @@ impl Database {
             .or_else(|| ep.strip_prefix("https://"))
             .unwrap_or(ep)
             .to_string()
+    }
+
+
+    /// 端点是否要求 TLS。
+    fn is_tls_endpoint(raw: &str) -> bool {
+        raw.trim().to_ascii_lowercase().starts_with("https://")
+    }
+
+    /// 按 scheme 选连接器建连。
+    ///
+    /// 以前**只用 `Http`**：`endpoint_without_scheme` 先把 `https://` 剥掉，
+    /// 然后一律走明文连接器。于是配 `DATABASE_URL=https://db.internal:8000`
+    /// 的部署实际是明文连库 —— root 口令、每一条查询、所有密码哈希与会话令牌
+    /// 都在链路上裸奔，而且没有任何提示。同一个进程里 `rpc_signin_token`
+    /// 走的却是 `endpoint_with_scheme`，它是认 https 的：两套行为并存，
+    /// 说明这是疏漏而不是取舍。
+    ///
+    /// surrealdb 3.0 的 `Https` 连接器与 `Http` 共用同一个 `Client` 类型，
+    /// 所以这里只在建连这一步分派，其余代码不受影响。
+    async fn connect(raw: &str) -> Result<Surreal<Client>> {
+        let endpoint = Self::endpoint_without_scheme(raw);
+        let result = if Self::is_tls_endpoint(raw) {
+            Surreal::<Client>::new::<Https>(&endpoint).await
+        } else {
+            Surreal::<Client>::new::<Http>(&endpoint).await
+        };
+        result.map_err(|e| AuthError::DatabaseError(format!("Failed to connect: {e}")))
+    }
+
+    /// 明文连接非环回数据库时告警一次。
+    ///
+    /// 这里**不拒绝启动**（与 `check_oauth_base_url` 不同）：把 SurrealDB 放在
+    /// 私有网络里不加 TLS 是常见且可接受的部署形态，硬拦会把所有存量部署挡在门外。
+    /// 真正的缺陷是"配了 https 却静默降级"—— 那一条已由 `connect` 修掉。
+    /// 剩下的是知情权，所以给一条明确的 WARN，而不是沉默。
+    fn warn_if_plaintext_remote(raw: &str) {
+        if Self::is_tls_endpoint(raw) {
+            return;
+        }
+        let host = Self::endpoint_without_scheme(raw);
+        let host_only = host.split(&[':', '/'][..]).next().unwrap_or(&host);
+        let loopback = matches!(host_only, "127.0.0.1" | "localhost" | "::1" | "[")
+            || host.starts_with("[::1]");
+        if !loopback {
+            warn!(
+                "DATABASE_URL points at a non-loopback host over plaintext HTTP ({host});                  database credentials, password hashes and session tokens travel unencrypted.                  Use https:// (or keep the database on a private link you trust)."
+            );
+        }
     }
 
     fn endpoint_with_scheme(raw: &str) -> String {
@@ -140,15 +192,14 @@ impl Database {
     }
 
     pub async fn fresh_client(&self) -> Result<Surreal<Client>> {
-        let endpoint_raw = env::var("DATABASE_URL").unwrap_or_else(|_| "127.0.0.1:8000".to_string());
-        let endpoint = Self::endpoint_without_scheme(&endpoint_raw);
+        let endpoint_raw = self.database_url.clone();
         let with_scheme = Self::endpoint_with_scheme(&endpoint_raw);
         let ns = self.database_namespace.trim().to_string();
         let db = self.database_name.trim().to_string();
         let user = self.database_user.trim().to_string();
         let pass = self.database_pass.trim().to_string();
 
-        let client = Surreal::<Client>::new::<Http>(&endpoint)
+        let client = Self::connect(&endpoint_raw)
             .await
             .map_err(|e| AuthError::DatabaseError(format!("Failed to connect fresh client: {e}")))?;
 
@@ -242,9 +293,7 @@ impl Database {
                         "native signin failed for user={} ns={} db={}, fallback to rpc token auth: {}",
                         user, ns, db, native_err
                     );
-                    let endpoint = Self::endpoint_with_scheme(
-                        &env::var("DATABASE_URL").unwrap_or_else(|_| "127.0.0.1:8000".to_string()),
-                    );
+                    let endpoint = Self::endpoint_with_scheme(&self.database_url);
                     match Self::rpc_signin_token(&endpoint, &user, &pass, &ns, &db).await {
                         Ok(token) => self
                             .client
@@ -337,13 +386,12 @@ impl Database {
         debug!("Connecting to database url={}", config.database_url);
         
         // 设置连接超时
-        let endpoint = Self::endpoint_without_scheme(&config.database_url);
+        Self::warn_if_plaintext_remote(&config.database_url);
         let client = tokio::time::timeout(
             Duration::from_secs(config.database_connection_timeout),
-            Surreal::<Client>::new::<Http>(&endpoint)
+            Self::connect(&config.database_url),
         ).await
-        .map_err(|_| AuthError::DatabaseError("Database connection timeout".to_string()))?
-        .map_err(|e| AuthError::DatabaseError(format!("Failed to connect: {}", e)))?;
+        .map_err(|_| AuthError::DatabaseError("Database connection timeout".to_string()))??;
             
         debug!("Authenticating with database");
         // Prefer native signin first, fallback to RPC token authenticate.
@@ -388,6 +436,7 @@ impl Database {
         debug!("Database connection established successfully");
         Ok(Database {
             client,
+            database_url: config.database_url.clone(),
             database_user: config.database_user.clone(),
             database_pass: config.database_pass.clone(),
             database_namespace: config.database_namespace.clone(),
@@ -714,15 +763,24 @@ impl Database {
         Ok(())
     }
 
-    /// 列出某用户的全部会话。两参形式的原因同 `delete_sessions_by_user_id`。
+    /// 列出某用户**仍然有效**的会话。两参形式的原因同 `delete_sessions_by_user_id`。
+    ///
+    /// `expires_at > $now` 这个条件不能省：这个接口的用途正是让用户核对
+    /// "我还在哪些设备上登录着"，据此判断账号有没有被盗用。以前它不过滤过期行，
+    /// 把早就失效的会话一并列出（实测：4 条里 3 条已过期，接口返回 4 条）——
+    /// 展示的东西不对，这个功能就起了反作用。
+    ///
+    /// LIMIT 同样是必要的：`session` 行此前只增不减，重度用户能攒出很长一串。
     pub async fn get_sessions_by_user_id(&self, user_id: &str) -> Result<Vec<crate::models::session::Session>> {
         let mut result = self
             .raw_query(
                 "get_sessions_by_user_id",
-                "SELECT * FROM session WHERE user_id = type::record('user', $user_key) \
-                 ORDER BY created_at DESC",
+                "SELECT * FROM session \
+                 WHERE user_id = type::record('user', $user_key) AND expires_at > $now \
+                 ORDER BY created_at DESC LIMIT 200",
                 serde_json::json!({
                     "user_key": crate::utils::record_id::normalize_user_id(user_id),
+                    "now": chrono::Utc::now().timestamp(),
                 }),
             )
             .await
@@ -731,6 +789,89 @@ impl Database {
         result
             .take(0)
             .map_err(|e| AuthError::DatabaseError(format!("Failed to parse sessions: {}", e)))
+    }
+
+    /// 启动自检：确认 schema 与种子数据确实落在**本进程连接的这个 ns/db** 上。
+    ///
+    /// `verify_connection` 只跑 `INFO FOR DB`，一个完全空的库照样通过。于是配错
+    /// 命名空间的部署会「看起来一切正常」：进程起来、`/health` 返回 ok，
+    /// 直到第一个用户请求才 500。实测过一次 —— 部署文档让你把 schema 导进
+    /// `ns=production/db=auth`，而应用默认连 `ns=auth/db=main`，
+    /// 注册接口直接 500 "Database error"，错误信息里没有任何线索指向 ns/db。
+    ///
+    /// 这里把那个运行期 500 提前成启动期的一句话，并且**把实际用的 ns/db 打出来**
+    /// —— 那正是排查时唯一需要的信息。
+    ///
+    /// 判据用种子数据里的 `role:admin`：它同时覆盖两种失败（schema 没导 →
+    /// 表不存在，查询报错；schema 导了但 initial_data 没导 → 查得到表、没有行）。
+    /// 两种情况下运维要做的事是一样的，所以不必区分。
+    pub async fn ensure_schema_initialised(&self) -> Result<()> {
+        let rows: Vec<JsonValue> = self
+            .query_take0_vec(
+                "ensure_schema_initialised",
+                "SELECT count() AS count FROM role WHERE name = 'admin' GROUP ALL",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap_or_default();
+
+        let seeded = rows
+            .first()
+            .and_then(|row| row.get("count"))
+            .and_then(|count| count.as_u64())
+            .unwrap_or(0)
+            > 0;
+
+        if seeded {
+            return Ok(());
+        }
+
+        Err(AuthError::ServerError(format!(
+            "Database `{ns}` / `{db}` is not initialised: the seeded `admin` role is missing. \
+             Apply schema.sql and initial_data.sql to **this** namespace and database, e.g.\n  \
+             surreal import --endpoint {endpoint} --user <u> --pass <p> \
+             --namespace {ns} --database {db} schema.sql\n  \
+             surreal import --endpoint {endpoint} --user <u> --pass <p> \
+             --namespace {ns} --database {db} initial_data.sql\n\
+             (namespace/database come from DATABASE_NAMESPACE / DATABASE_NAME; \
+             importing into a different one is the most common cause of this.)",
+            ns = self.database_namespace,
+            db = self.database_name,
+            endpoint = Self::endpoint_with_scheme(&self.database_url),
+        )))
+    }
+
+    /// 回收过期会话与失效的密码重置令牌。由每小时的后台任务调用。
+    ///
+    /// 这两张表此前**没有任何清理路径**：`session` 只在登出（按 token）与停用
+    /// （按 user）时被删，`password_reset_token` 全代码库一条 DELETE 都没有，
+    /// 用过的只是标记 `used = true`。两张都随时间单调增长，而
+    /// `session.token` 上还有一个建在完整 JWT 字符串上的 UNIQUE 索引，
+    /// 每个已认证请求都要查它。
+    ///
+    /// 重置令牌更麻烦一些：它是**明文**入库的，永不删除意味着历史上
+    /// 每一枚发出去的重置令牌都留在库里。
+    pub async fn cleanup_expired_auth_artifacts(&self) -> Result<()> {
+        let now = chrono::Utc::now();
+
+        self.raw_query(
+            "cleanup_expired_sessions",
+            "DELETE session WHERE expires_at < $now",
+            serde_json::json!({ "now": now.timestamp() }),
+        )
+        .await?;
+
+        // `expires_at` 在这张表里是 datetime 列（与 session 的 number 不同），
+        // 所以要走 type::datetime 而不是时间戳。
+        self.raw_query(
+            "cleanup_spent_password_reset_tokens",
+            "DELETE password_reset_token \
+             WHERE used = true OR expires_at < type::datetime($now_rfc3339)",
+            serde_json::json!({ "now_rfc3339": now.to_rfc3339() }),
+        )
+        .await?;
+
+        Ok(())
     }
 
     pub async fn raw_query(

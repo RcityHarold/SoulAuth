@@ -65,6 +65,27 @@ PROFILES = {
             {"email": "gh-unverified@test.local", "primary": True, "verified": False},
         ],
     },
+    # ── 跨 provider 同号：两家给出**数值相同**的用户 id ──
+    #
+    # 身份查找若只按 provider_user_id 单列匹配（而不是 (provider, id) 两列），
+    # 后一家登录就会命中前一家的记录，直接登进别人的账号。
+    # 曾经实测到过：不建新号、不建新关联、HTTP 303 成功，全程无任何报错。
+    # 这两个画像存在的唯一目的就是把那条路钉死。
+    "google-collide": {
+        "id": "4100",                       # Google 的 sub 是字符串
+        "email": "collide-google@test.local",
+        "verified_email": True,
+        "name": "Collide via Google",
+        "picture": None,
+    },
+    "github-collide": {
+        "id": 4100,                         # GitHub 的 id 是整数，数值相同
+        "name": "Collide via GitHub",
+        "avatar_url": None,
+        "_emails": [
+            {"email": "collide-github@test.local", "primary": True, "verified": True},
+        ],
+    },
 }
 
 

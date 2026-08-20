@@ -114,6 +114,12 @@ pub struct RateLimiter {
     shared: Option<Arc<Database>>,
 }
 
+impl Default for RateLimiter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RateLimiter {
     /// 创建新的速率限制器
     pub fn new() -> Self {

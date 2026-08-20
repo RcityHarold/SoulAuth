@@ -7,7 +7,7 @@ without ever touching its database.
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
-axum 0.6 · SurrealDB 3.0 · 77 HTTP endpoints · ~18k lines
+axum 0.6 · SurrealDB 3.0 · 70 HTTP endpoints · ~17k lines
 122 unit tests (5s, no external dependencies) · 25 integration groups / 242 assertions
 ```
 
@@ -39,7 +39,7 @@ about the account, never an authorization decision inside the consumer. See
 | **Credentials** | Argon2 password hashing, password policy (length + character-class rules), first-password initialisation for accounts created via OAuth |
 | **Third-party sign-in** | Google and GitHub. Both optional — an instance that only wants email/password configures neither |
 | **MFA** | TOTP (RFC 6238) with QR provisioning, single-use backup codes, replay rejection via a step watermark |
-| **Sessions** | Server-side session records, single logout, global logout (also revokes issued OIDC tokens), SSO session tracking per client |
+| **Sessions** | Server-side session records, single logout, global logout (also revokes issued OIDC tokens and every browser session), suspension revokes both |
 | **OIDC provider** | Discovery, JWKS, authorization code + PKCE (S256 only), refresh with rotation, userinfo, RP-initiated logout, client management API |
 | **RBAC** | Roles, permissions, user/role and role/permission assignment — scoped to SoulAuth's own admin surface |
 | **Protection** | Per-endpoint rate limiting shared across replicas, account lockout on both user and IP dimensions, CORS allow-list |
@@ -53,10 +53,10 @@ Requires a running SurrealDB and a Rust toolchain (edition 2021).
 
 ```bash
 # 1. Schema and seed data — the application performs no DDL of its own
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main schema.sql
-surreal import --conn http://127.0.0.1:8000 --user root --pass root \
-    --ns auth --db main initial_data.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
+surreal import --endpoint http://127.0.0.1:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 
 # 2. Minimal configuration — four variables, nothing else is required
 export JWT_SECRET=$(openssl rand -hex 32)   # at least 32 characters
@@ -78,21 +78,40 @@ see [Production posture](#production-posture) and
 
 ---
 
+## Response shape
+
+Every endpoint returns the resource itself — there is no `{success, data, message}`
+envelope. Actions that produce no resource answer `204 No Content`.
+
+```
+GET /api/auth/me        →  200  {"id":"…","email":"…","is_admin":true}
+GET /api/rbac/roles     →  200  [{"name":"admin","permissions":[…]}, …]
+POST …/roles/assign     →  204  (no body)
+error                   →  4xx/5xx  {"error":"Invalid credentials"}
+```
+
+The OIDC endpoints (`/.well-known/openid-configuration`, `/jwks`, `/token`,
+`/userinfo`, `/authorize`) return the shapes their specs mandate — including
+`{"error":"invalid_grant","error_description":"…"}` on the token endpoint.
+That is the one deliberate exception: wrapping them would break every standard
+OIDC client library.
+
 ## API surface
 
-77 endpoints across eight modules. The route tables in `src/routes/` are the
+70 endpoints across eight modules. The route tables in `src/routes/` are the
 authoritative list; this is the shape of it.
 
 | Module | Endpoints | Covers |
 |---|---:|---|
-| `auth` | 20 | register, login, logout, logout-all, sessions, email verification, password reset, MFA (5), OAuth entry and callback for two providers |
+| `auth` | 21 | register, login, logout, logout-all, sessions, email verification and resend, password reset, MFA (5), OAuth entry and callback for two providers |
 | `user_management` | 14 | own profile / preferences / activity log, plus admin reads and account-status / membership writes |
 | `rbac` | 13 | role and permission CRUD, assignment in both directions, self permission checks |
-| `sso_session` | 11 | SSO session create / read / extend / logout, per-client session attach and detach, stats, cleanup |
 | `oidc` | 7 | discovery, JWKS, authorize, token, userinfo, logout |
 | `oidc_client` | 6 | client registration, listing, update, disable, secret rotation |
 | `audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
 | `ops` | 1 | membership overview |
+| `security` | 2 | lockout status query, manual unlock (user or IP) |
+| _root_ | 1 | `/health` liveness probe (outside the rate limiter) |
 
 Every endpoint is exercised by the integration suite. Representative flows:
 
@@ -293,3 +312,13 @@ DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshoo
   consumers that asked for it.
 - No RFC 7662 token introspection. Consumers learn about revocation at token
   expiry, not immediately.
+
+---
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
+Known dependency advisories and why they are not reachable in this codebase are
+documented in [SECURITY.md](SECURITY.md) — worth reading before you file an
+issue about `cargo audit` output.

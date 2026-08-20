@@ -29,8 +29,13 @@ use uuid::Uuid;
 
 /// 邮箱验证令牌有效期。
 const VERIFICATION_TOKEN_TTL_HOURS: i64 = 24;
-/// 会话（以及随之签发的访问令牌）有效期。
-const SESSION_TTL_HOURS: i64 = 24;
+/// 会话有效期的兜底值（秒），仅在 `JWT_EXPIRATION` 不合法时使用。
+///
+/// 这里以前是写死的 `SESSION_TTL_HOURS = 24`，而 `Config::jwt_expiration`
+/// 解析完之后**从来没有人读过** —— DEPLOYMENT.md 却把 `JWT_EXPIRATION`
+/// 当成可用开关写进文档。后果是反向的：运维把它设成 900 以为拿到 15 分钟令牌，
+/// 实际拿到的是 24 小时，而且没有任何反馈能让他发现。
+const DEFAULT_SESSION_TTL_SECONDS: i64 = 86_400;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct Claims {
@@ -102,6 +107,35 @@ fn record_key(thing: &Thing) -> String {
 
 fn record_address(thing: &Thing) -> String {
     format!("{}:{}", thing.table, record_key(thing))
+}
+
+/// 把唯一索引冲突翻译成对应的业务错误。
+///
+/// 注册走的是"先查重、再插入"，两步之间有窗口：并发注册同一邮箱时，
+/// 两个请求都通过了查重，插入阶段由数据库的唯一索引挡下后来那个。
+/// 数据完整性没问题（实测 8 个并发只建出 1 个账号），但错误会以
+/// 裸 `DatabaseError` 冒出来 —— 调用方收到 **500 而不是 409**，
+/// 看起来像服务器故障，于是重试，再撞一次。
+///
+/// 索引名来自 `schema.sql`：`email_idx` / `username_idx`。
+fn translate_unique_violation(error: AuthError) -> AuthError {
+    let AuthError::DatabaseError(message) = &error else {
+        return error;
+    };
+
+    // SurrealDB 的报错形如：
+    //   Database index `email_idx` already contains 'a@b.com', with record `user:...`
+    if !message.contains("already contains") {
+        return error;
+    }
+    if message.contains("email_idx") {
+        return AuthError::EmailExists;
+    }
+    if message.contains("username_idx") {
+        return AuthError::UsernameExists;
+    }
+
+    error
 }
 
 impl AuthService {
@@ -261,16 +295,32 @@ impl AuthService {
             user_info.provider
         );
 
-        // 首先通过 identity_provider 查找用户
-        if let Some(identity) = self
+        // 首先通过 identity_provider 查找用户。
+        //
+        // **必须 (provider, provider_user_id) 两列一起查**，与 schema 上的唯一索引
+        // 对齐。以前只按 provider_user_id 单列查并取第一条 —— 身份的定义在代码里
+        // 是"这个 id"，在 schema 里却是"哪一家的这个 id"，两者不一致。
+        //
+        // 后果是跨 provider 顶号，已实测复现：给 Google 侧一个 sub 为 "4001" 的账号，
+        // 再用 id 为 4001 的 GitHub 账号登录，命中的是那条 google 记录，于是 GitHub
+        // 用户直接登进了 Google 用户的账号 —— 不建新号、不建新关联、HTTP 303 成功，
+        // 全程没有任何一处报错。今天挡住它的只是"Google 的 sub 是 21 位、GitHub 的
+        // id 是 8 位"这个恰好，而那是 provider 的 id 空间分配，不归我们管：
+        // 代码里已经支持 GITHUB_OAUTH_BASE_URL 指向自建 GHE（id 从 1 重新计数）。
+        let identities: Vec<IdentityProvider> = self
             .db
-            .find_record_by_field::<IdentityProvider>(
-                "identity_provider",
-                "provider_user_id",
-                &user_info.provider_user_id,
+            .query_take0_vec(
+                "find_identity_by_provider_and_subject",
+                "SELECT * FROM identity_provider \
+                 WHERE provider = $provider AND provider_user_id = $provider_user_id LIMIT 1",
+                serde_json::json!({
+                    "provider": &user_info.provider,
+                    "provider_user_id": &user_info.provider_user_id,
+                }),
             )
-            .await?
-        {
+            .await?;
+
+        if let Some(identity) = identities.into_iter().next() {
             let user = self
                 .db
                 .find_record_by_field::<User>("user", "id", &record_key(&identity.user_id))
@@ -404,7 +454,11 @@ impl AuthService {
             last_login_ip: None,
         };
 
-        let created_user = self.db.create_record("user", &user).await?;
+        let created_user = self
+            .db
+            .create_record("user", &user)
+            .await
+            .map_err(translate_unique_violation)?;
 
         if let Some(token) = verification_token {
             // 用户记录已经提交了，此时再抛错只会让调用方拿到 500、重试又撞 409，
@@ -509,18 +563,10 @@ impl AuthService {
         self.create_session_with_metadata(user, ctx).await
     }
 
-    /// 登录闸门。与 `utils::jwt` 的令牌闸门共用同一份状态判定
-    /// （`AccountStatus::parse`），两处以前是逐字副本，谁也拦不住它们走偏。
+    /// 登录闸门。判定在 [`User::ensure_usable`]，与令牌闸门、密码重置、
+    /// OIDC 三关口共用同一份 —— 这里以前是一份逐字副本。
     fn ensure_account_usable(user: &User) -> Result<()> {
-        use crate::models::user::AccountStatus;
-        match user.account_status_parsed() {
-            AccountStatus::Active => Ok(()),
-            AccountStatus::Suspended => Err(AuthError::AccountSuspended),
-            AccountStatus::Inactive => Err(AuthError::AccountInactive),
-            AccountStatus::PendingDeletion | AccountStatus::Deleted => {
-                Err(AuthError::AccountDeleted)
-            }
-        }
+        user.ensure_usable()
     }
 
     async fn touch_last_login(&self, mut user: User, ctx: &RequestContext) -> Result<User> {
@@ -535,13 +581,25 @@ impl AuthService {
             .await
     }
 
+    /// 会话与访问令牌的有效期，由 `JWT_EXPIRATION`（秒）决定。
+    ///
+    /// 非正值回落到兜底值：一个 0 或负数的有效期意味着签出来的令牌当场就过期，
+    /// 与其让整站登录静默失效，不如按默认值走并保持可用。
+    fn session_ttl_seconds(&self) -> i64 {
+        if self.config.jwt_expiration > 0 {
+            self.config.jwt_expiration
+        } else {
+            DEFAULT_SESSION_TTL_SECONDS
+        }
+    }
+
     async fn create_session_with_metadata(
         &self,
         user: User,
         ctx: &RequestContext,
     ) -> Result<IssuedSession> {
         let now = Utc::now();
-        let exp = now + Duration::hours(SESSION_TTL_HOURS);
+        let exp = now + Duration::seconds(self.session_ttl_seconds());
 
         let session_id = new_thing("session");
         let session_key = record_key(&session_id);
@@ -651,8 +709,16 @@ impl AuthService {
             .find_record_by_field::<User>("user", "email", &email)
             .await?;
 
-        if user.is_none() {
-            return Ok(());
+        // 停用 / 待删除的账号不发重置信。**必须和"账号不存在"走完全相同的
+        // 静默成功**，不能返回 403：那会让这个端点变成"该邮箱是否被停用"的
+        // 判别信道，把上面那段防枚举白做。
+        match &user {
+            None => return Ok(()),
+            Some(user) if user.ensure_usable().is_err() => {
+                info!("Password reset requested for a non-active account; ignoring silently");
+                return Ok(());
+            }
+            Some(_) => {}
         }
 
         // 先作废该邮箱名下所有还没用掉的旧令牌，保证任一时刻只有最新那封邮件有效。
@@ -685,6 +751,74 @@ impl AuthService {
             .await
         {
             error!("Failed to send password reset email: {e}");
+        }
+
+        Ok(())
+    }
+
+    /// 重新签发邮箱验证令牌并再发一封验证信。
+    ///
+    /// # 为什么必须有这个入口
+    ///
+    /// 验证令牌 24 小时过期，而在此之前**没有任何补发路径**：过期之后点链接得
+    /// 401、登录得 403（Email not verified）、重新注册得 409（Email already
+    /// registered）、走密码重置也救不了（重置不改 `is_email_verified`）。
+    /// 四条路全堵，账号只能靠改库救。
+    ///
+    /// 而且这条路比看上去更容易走上：注册时 SMTP 发送失败是**刻意吞掉只记日志**的
+    /// （见 `register`，那个取舍本身是对的——否则用户会拿到 500、重试又撞 409）。
+    /// 两者叠加，一次短暂的 SMTP 抖动就能静默制造一个永久无法登录的账号。
+    ///
+    /// # 防枚举
+    ///
+    /// 与 `request_password_reset` 同一套语义：无论邮箱是否存在、是否已验证、
+    /// 账号是否可用，**一律静默返回 Ok**。任何一种情况下回不同的错误码，
+    /// 这个端点就成了账号状态的判别信道。
+    pub async fn resend_verification_email(&self, email: String) -> Result<()> {
+        if !self.config.email_verification_enabled {
+            return Ok(());
+        }
+
+        let Ok(email) = validate_email(&email) else {
+            return Ok(());
+        };
+
+        let Some(user) = self
+            .db
+            .find_record_by_field::<User>("user", "email", &email)
+            .await?
+        else {
+            return Ok(());
+        };
+
+        // 已验证的账号不需要、也不应该再收到验证信：否则任何人都能靠这个端点
+        // 反复给一个已注册邮箱发信。
+        if user.is_email_verified || user.ensure_usable().is_err() {
+            return Ok(());
+        }
+
+        let now = Utc::now();
+        let token = Uuid::new_v4().to_string();
+
+        let mut updated_user = user.clone();
+        updated_user.verification_token = Some(token.clone());
+        updated_user.verification_token_expires_at =
+            Some((now + Duration::hours(VERIFICATION_TOKEN_TTL_HOURS)).timestamp());
+        updated_user.updated_at = now.timestamp();
+
+        let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?.clone();
+        self.db
+            .update_record("user", &record_address(&user_thing), &updated_user)
+            .await?;
+
+        // 发信失败同样不外抛：令牌已经换了，再抛错只会让调用方拿到 500，
+        // 而这个端点的整个意义就是"再试一次"。
+        if let Err(e) = self
+            .email_service
+            .send_verification_email(&email, &token)
+            .await
+        {
+            error!("Failed to resend verification email to '{email}': {e}");
         }
 
         Ok(())
@@ -725,6 +859,11 @@ impl AuthService {
             .find_record_by_field::<User>("user", "email", &reset_token.email)
             .await?
             .ok_or(AuthError::UserNotFound)?;
+
+        // 令牌可能是停用之前签发的。这里可以回具体状态而不必含糊：
+        // 能走到这一步说明对方已经持有一枚有效的重置令牌，
+        // "该账号被停用"对他不是新信息。
+        user.ensure_usable()?;
 
         user.password_hash = Some(hash_password_blocking(new_password.clone()).await?);
         user.updated_at = Utc::now().timestamp();
@@ -854,4 +993,42 @@ fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| AuthError::ServerError(e.to_string()))?
         .to_string();
     Ok(hashed_password)
+}
+
+#[cfg(test)]
+mod unique_violation_tests {
+    use super::translate_unique_violation;
+    use crate::error::AuthError;
+
+    #[test]
+    fn maps_index_violations_to_conflict_errors() {
+        // 并发注册撞上唯一索引时，调用方该收到 409 而不是 500。
+        let email = AuthError::DatabaseError(
+            "Failed to create record: Database index `email_idx` already contains \
+             'a@b.com', with record `user:abc`".to_string(),
+        );
+        assert!(matches!(translate_unique_violation(email), AuthError::EmailExists));
+
+        let username = AuthError::DatabaseError(
+            "Database index `username_idx` already contains 'alice'".to_string(),
+        );
+        assert!(matches!(
+            translate_unique_violation(username),
+            AuthError::UsernameExists
+        ));
+    }
+
+    #[test]
+    fn leaves_other_database_errors_alone() {
+        // 不是索引冲突的库错误仍然是 500，不能被伪装成 409。
+        let other = AuthError::DatabaseError("connection refused".to_string());
+        assert!(matches!(
+            translate_unique_violation(other),
+            AuthError::DatabaseError(_)
+        ));
+        assert!(matches!(
+            translate_unique_violation(AuthError::InvalidToken),
+            AuthError::InvalidToken
+        ));
+    }
 }

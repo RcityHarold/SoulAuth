@@ -1,6 +1,13 @@
-# Rust Auth System 部署指南
+# SoulAuth 部署指南
 
-本文档说明如何正确部署 Rust Auth System 到生产环境。
+本文档说明如何把 SoulAuth 部署到生产环境。
+
+> **命名空间与数据库必须自始至终一致。** 全文统一用 `auth` / `main`
+> （即 `DATABASE_NAMESPACE` / `DATABASE_NAME` 的默认值）。若你改用别的名字，
+> **导入 SQL 时用的和应用启动时读到的必须是同一对** —— 这是最常见的部署失败原因：
+> schema 建在一处、应用连另一处，进程照常启动、`/health` 照常返回 ok，
+> 直到第一个真实请求才 500。应用现在会在启动时自检并拒绝启动，
+> 但前提仍然是你把这两处对齐。
 
 ## 数据库部署
 
@@ -9,14 +16,13 @@
 在启动应用程序之前，必须先运行以下SQL文件来创建数据库表结构：
 
 ```bash
-# 连接到 SurrealDB
-surreal sql --conn http://localhost:8000 --user root --pass root --ns production --db auth
-
-# 导入表结构
-surreal import --conn http://localhost:8000 --user root --pass root --ns production --db auth schema.sql
-
-# 或者手动执行SQL文件内容
+# 导入表结构（注意参数是 --endpoint，不是 --conn）
+surreal import --endpoint http://localhost:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
 ```
+
+> `--namespace` / `--database` 的取值必须与应用的 `DATABASE_NAMESPACE` /
+> `DATABASE_NAME` 完全一致（默认 `auth` / `main`）。
 
 **重要说明**：
 - `schema.sql` 包含所有必需的数据库表定义
@@ -28,15 +34,14 @@ surreal import --conn http://localhost:8000 --user root --pass root --ns product
 创建完表结构后，运行初始数据文件来创建系统角色和权限：
 
 ```bash
-# 导入初始数据
-surreal import --conn http://localhost:8000 --user root --pass root --ns production --db auth initial_data.sql
-
-# 或者手动执行SQL文件内容
+# 导入初始数据（ns/db 必须与上一步、以及应用配置三者一致）
+surreal import --endpoint http://localhost:8000 --user root --pass root \
+    --namespace auth --database main initial_data.sql
 ```
 
 **`initial_data.sql` 包含的内容**：
-- 系统权限（12个基础权限）
-- 系统角色（5个预定义角色）
+- 系统权限（18 个，全部带 `soulauth:` 命名空间前缀）
+- 系统角色（5 个预定义角色）
 - 系统用户账户（用于权限分配的内部账户）
 - 角色权限关联（为系统角色分配适当的权限）
 
@@ -94,12 +99,42 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    `oidc_clients.write` 两个权限并授予 admin 角色。已有部署单独执行该段即可，
    否则管理员将无法访问 `/api/oidc/clients`。
 
-3. **补充 user 表字段：**
+3. **`membership_expiry` 由 `string` 改为 `datetime`。**
+
+   该字段以前是自由字符串且写入不校验，`"下个月"` 这类值也能落库。
+   现在由类型保证形状（语义仍不由 SoulAuth 解释，见
+   P0-DECISION-09 §4.7）。**必须先清洗数据再改字段定义**，
+   否则改完之后读取旧行会失败：
+
+   ```sql
+   -- ① 把无法解析的值清空（能解析的按 RFC3339 转换）
+   UPDATE user SET membership_expiry = NONE
+     WHERE membership_expiry != NONE
+       AND type::is::datetime(<datetime> membership_expiry) = false;
+
+   -- ② 再改字段定义
+   DEFINE FIELD membership_expiry ON user TYPE option<datetime>;
+   ```
+
+4. **`AccountStatus` 移除了 `PendingDeletion` 变体。**
+
+   它此前的行为与 `Deleted` 完全同义（没有宽限期、没有到期推进、
+   没有级联清除、也没有撤销入口），却对外宣告了一条不存在的删除流水线。
+   存量的 `"PendingDeletion"` 行会被解析成 `Inactive`（不可用），
+   方向是 fail-closed、不会误放行；但建议显式归位：
+
+   ```sql
+   UPDATE user SET account_status = 'Deleted' WHERE account_status = 'PendingDeletion';
+   ```
+
+   `PUT /api/users/users/{id}/status` 从此拒收 `"PendingDeletion"`（400）。
+
+5. **补充 user 表字段：**
    ```sql
    DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
    ```
 
-4. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
+6. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
    存量行里存的是 record 链接，必须**先转换数据、再改字段定义**，否则改完之后
    读取旧行会直接失败：
    ```sql
@@ -110,22 +145,22 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    DEFINE FIELD created_by ON oidc_client TYPE string;
    ```
 
-5. **社交相关表已不再使用**，可在确认无其他消费方后删除：
+7. **社交相关表已不再使用**，可在确认无其他消费方后删除：
    `friend_request`、`friendship`、`direct_conversation`、`direct_message`、
    `social_group`、`social_group_member`、`group_thread`、`group_thread_message`、
    `group_collab_run`。
 
-6. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
+8. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
    `OIDC_RSA_PRIVATE_KEY_PATH`。`JWT_SECRET` 现在要求至少 32 字符。
 
-7. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
+9. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
    手动执行——这与本文档开头"应用程序不应具有 DDL 权限"的原则一致。
 
-8. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
+10. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
    但建议逐个调用 `POST /api/oidc/clients/:client_id/regenerate-secret`
    迁移到 Argon2 存储。
 
-9. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
+11. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
    ```bash
    openssl rand -base64 32   # 填入 MFA_SECRET_ENCRYPTION_KEY
    ```
@@ -133,26 +168,26 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    会导致所有已存的 TOTP 密钥无法解密，生产环境务必单独配置。
    存量的明文密钥可继续使用，并在下一次写入时自动就地加密。
 
-10. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
+12. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
     但建议让已启用 MFA 的用户重新生成一次（`POST /api/auth/mfa/setup`）。
 
-11. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
+13. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
     `UPSERT`），可以安全地重复执行。权限名前缀化后，重跑它即可就地改名 ——
     `role_permission` 按 record ID 关联，角色授权关系不受影响。
 
-12. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
+14. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
     现在跳 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带 `return_to`。
     登录页需要做两件事：调用 `POST /api/auth/login` 完成登录，
     然后跳回 `return_to` 指向的地址；如果仍需要 Google 登录入口，
     在页面上链到 `GET /api/auth/login/google` 即可。
 
-13. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
+15. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
     决定，`http://localhost:8080` 下会自动省略。
 
-14. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
+16. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
     每个请求都校验会话（吊销绝对即时，代价是每请求两次查询）。
 
-15. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
+17. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
     下旧定义会拒绝新写入）：
     ```sql
     -- 审计事件未必对应已存在的用户（登录失败、限流触发等）
@@ -162,14 +197,14 @@ chmod 600 /etc/soulauth/oidc-signing.pem
     由于此前的写入本就会被 SCHEMAFULL 拒绝，这些表大概率是空的；若确有数据，
     需要把 datetime 值转成 Unix 秒后再启用新版本。
 
-16. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
+18. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
     并对应一条有效的 `session` 记录，升级前签发的 cookie 会被拒绝。
 
-17. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
+19. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
     验证邮件的链接现在是 `{VERIFY_EMAIL_PAGE_URL}?token=xxx`，页面拿到 token 后
     再调 `GET /api/auth/verify-email/{token}`。
 
-18. **审计接口的响应结构有两处变化：**
+20. **审计接口的响应结构有两处变化：**
     - `GET /api/audit/system-health` 删除了 `connection_pool_used` /
       `connection_pool_size` 两个字段（SurrealDB HTTP 客户端不暴露连接池指标，
       之前一直是写死的 1/10）；内存与运行时长改为真实值。
@@ -179,32 +214,32 @@ chmod 600 /etc/soulauth/oidc-signing.pem
       —— 这个口径本来就是活跃率而非留存率。同一接口的
       `geographic_distribution` 现在恒为空数组（没有接入 GeoIP 数据源）。
 
-19. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
+21. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
     `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` /
     `GITHUB_CLIENT_SECRET` / `OAUTH_REDIRECT_URL` 五项此前是硬必填，只用邮箱
     密码登录的部署被迫填假值。现在不配即不启用，登录入口返回 501。
     **已填假值的实例建议清掉**——配置里的假数据一旦哪天被当真就是事故。
 
-20. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
+22. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
     `OIDC_RSA_PRIVATE_KEY_PEM`/`_PATH` 或 `MFA_SECRET_ENCRYPTION_KEY` 会让进程
     起不来（此前只打 WARN）。升级前请确认这两项已配，否则重启后服务不可用。
     理由见「生产环境额外必填」一节。
 
-21. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
+23. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
     （或单独执行该表的 `DEFINE`）。登录 / 注册 / 改密 / 验邮箱等敏感端点的
     计数经数据库共享，多副本不再各算各的。
     ⚠ 副作用：**重启副本不再清空配额**。这是它该有的性质，但排查时容易误判。
 
-22. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
+24. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
     只解析表单——用标准 OIDC 客户端库接入的机密客户端会失败，且错误信息
     指向「未提供 secret」。升级后两种方式都可用。
 
-23. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
+25. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
     处理（此前是「没被显式列为坏的就算好的」）。若你的数据库里有非标准的
     `account_status` 值，那些账号升级后将无法登录——升级前先查：
     ```sql
     SELECT VALUE account_status FROM user
-    WHERE account_status NOT IN ['Active','Inactive','Suspended','PendingDeletion','Deleted'];
+    WHERE account_status NOT IN ['Active','Inactive','Suspended','Deleted'];
     ```
 
 ## 权限系统说明
@@ -305,14 +340,21 @@ MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
 #### 数据库
 
 ```env
-DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000
+DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000；写 https:// 即走 TLS
 DATABASE_USER=root
 DATABASE_PASS=root
 DATABASE_NAMESPACE=auth            # 默认 auth
 DATABASE_NAME=main                 # 默认 main
 DATABASE_CONNECTION_TIMEOUT=30
-DATABASE_MAX_CONNECTIONS=10
 ```
+
+**关于数据库链路加密**：`DATABASE_URL` 带 `https://` 前缀即用 TLS 连接器，
+否则走明文。指向非环回地址却用明文时，启动日志会给出一条 WARN —— 那条链路上
+跑的是数据库口令、密码哈希与会话令牌。放在受信私有网段里可以接受，
+跨网段务必用 https。
+
+> 早期版本无论写不写 `https://` 都只用明文连接器（scheme 会被剥掉后丢弃），
+> 且没有任何提示。若你此前配的是 `https://`，请确认数据库侧确实启用了 TLS。
 
 #### 网络与前端
 
@@ -368,6 +410,40 @@ GITHUB_OAUTH_BASE_URL=https://ghe.example.com    # 自托管 GitHub Enterprise
 **明文 http 只允许指向环回地址**，且不得带尾斜杠，否则拒绝启动：远端端点走
 明文等于把 `client_secret` 与访问令牌交给链路上的任何人。
 
+#### 账号锁定
+
+```env
+LOCKOUT_MAX_ATTEMPTS=5             # 连续失败多少次后锁定，必须 ≥1
+LOCKOUT_DURATION_MINUTES=15        # 锁定多少分钟，必须 ≥1
+LOCKOUT_RESET_WINDOW_MINUTES=60    # 多久没有新失败就清零计数
+LOCKOUT_USER_ENABLED=true          # 账号维度
+LOCKOUT_IP_ENABLED=true            # IP 维度
+```
+
+前两项为 0 会在启动时被拒绝：0 次尝试即锁定等于任何人一登录就被锁死，
+0 分钟锁定等于没锁 —— 这两种都不是「更严格」，是把服务配坏。
+
+**手工解锁**（需 `soulauth:security.write`，种子里授予 admin 与 security_manager）：
+
+```bash
+# 查状态
+curl "$APP_URL/api/security/lockout?scope=user&identifier=user%40example.com" \
+  -H "Authorization: Bearer $TOKEN"
+# → {"is_locked":true,"remaining_lockout_seconds":812,…}
+
+# 解锁（scope 取 user 或 ip；解锁是幂等的，本来没锁会返回 unlocked:false）
+curl -X POST "$APP_URL/api/security/unlock" -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":"user","identifier":"user@example.com"}'
+# → {"unlocked":true}
+```
+
+用户维度的标识是**邮箱**：锁定计数在登录失败时按邮箱累加，那时还没有用户记录
+可言 —— 不存在的邮箱同样会被计数，否则「有没有留下锁定记录」本身就成了
+账号枚举信道。
+
+每一次解锁都会写一条 `lockout_cleared` 审计（包括本来就没锁的空操作）。
+
 #### 邮件
 
 ```env
@@ -384,7 +460,7 @@ EMAIL_VERIFICATION_ENABLED=false   # 开启后注册需先验证邮箱
 #### 其它
 
 ```env
-JWT_EXPIRATION=86400               # 秒，默认 1 天
+JWT_EXPIRATION=86400               # 会话与访问令牌有效期，秒，默认 1 天
 PASSWORD_MIN_LENGTH=12
 AUTH_SESSION_CACHE_TTL_SECONDS=5   # 0 = 每请求都校验会话
 PROXY_ENABLED=false                # 出站 OAuth 请求走代理
@@ -403,7 +479,7 @@ TLS 的反向代理（nginx / Caddy / ALB 均可）。
 这不是可选项，有两个硬约束逼着它：
 
 1. `APP_URL` 是 https 时，会话 cookie 才会带 `Secure`；
-2. **接入 SoulSeedOS 时，OS 硬拒非 https 的 JWKS 地址**——它的 `HttpJwksProvider`
+4. **接入 SoulSeedOS 时，OS 硬拒非 https 的 JWKS 地址**——它的 `HttpJwksProvider`
    直接检查 `https://` 前缀（明文取签名公钥 = 路径上任何人都能换掉信任根）。
 
 nginx 最小片段：
@@ -450,62 +526,122 @@ server {
 export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 ```
 
-### 2. 数据库权限
+### 2. 数据库账号
 
-为应用程序创建专用的数据库用户，只授予必要的权限：
+**现状：应用只支持以 root 身份连接数据库。** 代码里走的是
+`surrealdb::opt::auth::Root`，没有 namespace / database 级登录的分支。
+所以下面这件事**目前做不到**，写在这里是为了说清限制，不是操作指引：
 
-```sql
--- 创建应用程序专用用户
-CREATE USER app_user ON DATABASE auth PASSWORD 'secure-password';
+> 为应用创建一个最小权限的库级用户，只给数据读写、不给 DDL。
 
--- 授予必要的数据权限（不包括DDL权限）
-GRANT SELECT, INSERT, UPDATE, DELETE ON auth.* TO app_user;
+这是一项已知的待办。在它落地之前，务实的做法是把风险挡在数据库之外：
 
--- 不要授予CREATE, DROP, ALTER等DDL权限
-```
+- SurrealDB **只监听内网或 loopback**，不要暴露到公网；
+- root 口令用强随机值，与其它服务不复用；
+- `DATABASE_URL` 跨网段时写 `https://`（应用会按 scheme 选择 TLS 连接器；
+  写明文指向非环回地址时启动日志会告警 —— 那条链路上跑的是数据库口令、
+  密码哈希与会话令牌）。
+
+顺带纠正一处历史错误：本节此前给的是
+`CREATE USER ... PASSWORD` / `GRANT SELECT,... ON auth.* TO ...`，
+那是 MySQL / PostgreSQL 语法，SurrealDB 不认。SurrealDB 的写法是
+`DEFINE USER ... ON DATABASE ... PASSWORD ... ROLES OWNER|EDITOR|VIEWER`，
+但如上所述，当前的应用代码还用不了这种账号。
 
 ### 3. 部署步骤
 
-1. **准备数据库**：
+1. **启动 SurrealDB** 并确认可达：
    ```bash
-   # 1. 执行schema.sql创建表结构
-   surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE schema.sql
-   
-   # 2. 执行initial_data.sql创建初始数据
-   surreal import --conn $DATABASE_URL --user root --pass root --ns $NAMESPACE --db $DATABASE initial_data.sql
+   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" file:/var/lib/surrealdb
+   curl -f http://127.0.0.1:8000/health && echo " SurrealDB OK"
    ```
 
-2. **构建应用程序**：
+2. **准备环境变量**。四项必填，生产环境再加两项（见 §1）：
+   ```bash
+   export DATABASE_URL=127.0.0.1:8000
+   export DATABASE_NAMESPACE=auth      # 下一步导入时必须用同一个值
+   export DATABASE_NAME=main           # 同上
+   export DATABASE_USER=root
+   export DATABASE_PASS="$DB_PASS"
+   export JWT_SECRET=$(openssl rand -hex 32)
+   export APP_URL=https://auth.example.com
+   export SMTP_HOST=smtp.example.com
+   export SMTP_FROM=noreply@example.com
+   export OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem
+   export MFA_SECRET_ENCRYPTION_KEY=$(openssl rand -base64 32)
+   ```
+
+3. **准备数据库**。注意这里直接复用上一步导出的变量，
+   保证导入目标与应用启动后连接的是同一个 ns/db：
+   ```bash
+   surreal import --endpoint "http://$DATABASE_URL" \
+       --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
+       --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" schema.sql
+
+   surreal import --endpoint "http://$DATABASE_URL" \
+       --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
+       --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" initial_data.sql
+   ```
+
+4. **构建应用程序**：
    ```bash
    cargo build --release
    ```
 
-3. **启动应用程序**：
+5. **启动应用程序**：
    ```bash
-   ./target/release/rust-auth
+   ./target/release/soulauth
    ```
 
-4. **验证部署**：
+6. **验证部署**：
    ```bash
-   # 检查健康状态
    curl http://localhost:8080/health
-   
-   # 创建第一个管理员用户
+   # → {"status":"ok","uptime_seconds":12}
+   ```
+
+7. **建立第一个管理员**：
+
+   注册接口本身不发管理员权限——第一个 admin 必须在库里手工授予，
+   这是刻意的：否则"谁是第一个注册的人"就成了拿到全部权限的条件。
+
+   ```bash
+   # ① 注册。username 是必填项，密码需满足策略：
+   #    至少 12 个字符，且含大写 / 小写 / 数字 / 符号四类中的三类
    curl -X POST http://localhost:8080/api/auth/register \
      -H "Content-Type: application/json" \
-     -d '{"email":"admin@your-domain.com","password":"secure-password"}'
-   ```
+     -d '{"email":"admin@your-domain.com","username":"admin","password":"CorrectHorse42!"}'
 
-5. **分配管理员权限**：
-   ```bash
-   # 登录获取JWT token
+   # ② 在数据库里把 admin 角色授予该账号
+   curl -u "$DATABASE_USER:$DATABASE_PASS" \
+     -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
+     --data "LET \$u = (SELECT VALUE id FROM user WHERE email = 'admin@your-domain.com')[0];
+             CREATE user_role CONTENT {
+               user_id: \$u, role_id: role:admin,
+               assigned_at: 0, assigned_by: user:system
+             };" \
+     "http://$DATABASE_URL/sql"
+
+   # ③ 重新登录拿令牌（角色变更后需要重新登录，令牌本身不带角色）
    curl -X POST http://localhost:8080/api/auth/login \
      -H "Content-Type: application/json" \
-     -d '{"email":"admin@your-domain.com","password":"secure-password"}'
-   
-   # 手动为第一个用户分配admin角色（通过数据库）
-   # 或者使用系统管理界面
+     -d '{"email":"admin@your-domain.com","password":"CorrectHorse42!"}'
+
+   # ④ 确认权限已生效
+   curl http://localhost:8080/api/auth/me -H "Authorization: Bearer <token>"
+   # → "is_admin": true
    ```
+
+### 4. 验证这份文档本身
+
+`tests/deployment_walkthrough.sh` 会照上面 §3 的步骤 1-7 从零跑一遍，
+最后断言拿到一个 `is_admin: true` 的管理员：
+
+```bash
+cargo build && ./tests/deployment_walkthrough.sh
+```
+
+改动本文档的部署步骤后请一并跑它。这份文档曾经通不过自己 —— 参数名写错、
+ns/db 三处不一致，而这些只有真正执行才会暴露。
 
 ## 作为 OIDC Provider 接入（SoulSeedOS / 其它应用）
 
@@ -710,17 +846,17 @@ echo "$ID_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sid, exp
 
 ### 其它常见问题
 
-1. **应用启动失败**：
+3. **应用启动失败**：
    - 检查数据库连接配置
    - 确认数据库表已创建
    - 检查环境变量设置
 
-2. **权限检查失败**：
+4. **权限检查失败**：
    - 确认用户已分配正确角色
    - 检查角色权限配置
    - 验证系统权限是否正确初始化
 
-3. **数据库连接问题**：
+5. **数据库连接问题**：
    - 检查数据库服务状态
    - 验证连接字符串
    - 确认网络连通性

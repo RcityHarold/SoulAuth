@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
+use crate::error::AuthError;
+
 fn default_membership_level() -> String {
     "FREE".to_string()
 }
@@ -31,18 +33,43 @@ pub struct User {
     pub account_status: String,
     #[serde(default = "default_membership_level")]
     pub membership_level: String,
+    /// 会员到期时间。
+    ///
+    /// **SoulAuth 只持有与透传，不解释它。** 会员状态归 Product Entitlement /
+    /// Billing（P0-DECISION-09 §4.7 已把 `membership_level` 归到那一侧，
+    /// 不归 P3 Canonical Permission），所以"过期了没有"不由本服务判断 ——
+    /// 那是消费方的事。
+    ///
+    /// 但**形状**必须由持有方保证。这里以前是 `Option<String>` 且写入不做校验，
+    /// `"2026-13-45"` / `"下个月"` / `"asdf"` 都能照单全收再原样发出去，
+    /// 等于把一个本该在写入时挡下的错误顺延给每一个消费方去防御性解析。
+    /// 换成时间类型之后，非法输入在反序列化阶段就被拒。
     #[serde(default)]
-    pub membership_expiry: Option<String>,
+    pub membership_expiry: Option<DateTime<Utc>>,
     pub last_login_at: Option<i64>,
     pub last_login_ip: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, SurrealValue)]
+/// 账号状态。
+///
+/// 这里**刻意没有** `PendingDeletion`。它曾经存在，但全代码库对它的处理只有
+/// "判定为不可用"一条，与 `Deleted` 完全同义：没有宽限期计时、没有到期推进、
+/// 没有级联清除、也没有撤销入口。而它是对外暴露的（管理员可设置、可按它筛选、
+/// 会出现在响应里），`PendingDeletion` 又恰好是删除权实现里的标准状态名 ——
+/// 一个认证服务对外宣告这个状态却不删除任何数据，会让接入方以为删除义务
+/// 已经履行。承诺一件不做的事比没有这个能力更糟，所以删掉。
+///
+/// 将来真要做删除流水线（宽限期 + 到期级联清除 + 撤销 + 审计留痕），
+/// 再把它作为一个有内容的状态加回来。
+///
+/// 存量数据：库里遗留的 `"PendingDeletion"` 字符串会被 [`AccountStatus::parse`]
+/// 归入 `Inactive`（不可用），方向是 fail-closed，不会误放行。
+#[derive(Debug, Clone, PartialEq, Eq, SurrealValue, Default)]
 pub enum AccountStatus {
+    #[default]
     Active,
     Inactive,
     Suspended,
-    PendingDeletion,
     Deleted,
 }
 
@@ -58,7 +85,6 @@ impl AccountStatus {
             "Active" => AccountStatus::Active,
             "Inactive" => AccountStatus::Inactive,
             "Suspended" => AccountStatus::Suspended,
-            "PendingDeletion" => AccountStatus::PendingDeletion,
             "Deleted" => AccountStatus::Deleted,
             _ => AccountStatus::Inactive,
         }
@@ -69,7 +95,6 @@ impl AccountStatus {
             AccountStatus::Active => "Active",
             AccountStatus::Inactive => "Inactive",
             AccountStatus::Suspended => "Suspended",
-            AccountStatus::PendingDeletion => "PendingDeletion",
             AccountStatus::Deleted => "Deleted",
         }
     }
@@ -100,7 +125,6 @@ impl<'de> serde::Deserialize<'de> for AccountStatus {
             "Active" => Ok(AccountStatus::Active),
             "Inactive" => Ok(AccountStatus::Inactive),
             "Suspended" => Ok(AccountStatus::Suspended),
-            "PendingDeletion" => Ok(AccountStatus::PendingDeletion),
             "Deleted" => Ok(AccountStatus::Deleted),
             other => Err(serde::de::Error::custom(format!(
                 "invalid account status: {other}"
@@ -139,7 +163,7 @@ pub struct UserResponse {
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
     pub membership_level: String,
-    pub membership_expiry: Option<String>,
+    pub membership_expiry: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub has_password: bool,
     pub account_status: AccountStatus,
@@ -189,13 +213,37 @@ pub struct UserListResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateMembershipRequest {
     pub membership_level: String,
-    pub membership_expiry: Option<String>,
+    /// RFC3339 时间点。格式非法时 serde 直接拒收（400），
+    /// 不再像以前那样把任意字符串存进去。
+    pub membership_expiry: Option<DateTime<Utc>>,
 }
 
 impl User {
     /// 账号是否处于可用状态。鉴权闸门与登录闸门都走这里，不各写各的。
     pub fn account_status_parsed(&self) -> AccountStatus {
         AccountStatus::parse(&self.account_status)
+    }
+
+    /// 账号当前是否允许执行任何需要"这个人还在"的操作。
+    ///
+    /// **这是全库唯一的一处状态闸门判定**，所有入口共用：
+    /// 令牌校验（`utils::jwt`）、登录（`services::auth`）、密码重置、
+    /// 以及 OIDC 的三个关口（userinfo / 签发令牌 / authorize 复用会话）。
+    ///
+    /// 收成一处的原因是它此前不是：判定逐处抄写，于是"哪些路径要看状态"
+    /// 变成了每加一条路径就要重新想一次的事。实际结果是原生 API 那侧看了、
+    /// OIDC 那侧一处都没看 —— 停用一个账号，它在接入方那里照旧能用刷新令牌
+    /// 无限续期。判定只有一份，新路径就只会忘记调用（编译期能靠 review 抓到），
+    /// 而不会出现"抄了但抄漏一个分支"这种不报错的偏差。
+    ///
+    /// 放行集合是闭的：只有 `Active` 通过，其余一律拒。
+    pub fn ensure_usable(&self) -> Result<(), AuthError> {
+        match self.account_status_parsed() {
+            AccountStatus::Active => Ok(()),
+            AccountStatus::Suspended => Err(AuthError::AccountSuspended),
+            AccountStatus::Inactive => Err(AuthError::AccountInactive),
+            AccountStatus::Deleted => Err(AuthError::AccountDeleted),
+        }
     }
 }
 
@@ -231,11 +279,6 @@ impl From<User> for UserResponse {
     }
 }
 
-impl Default for AccountStatus {
-    fn default() -> Self {
-        AccountStatus::Active
-    }
-}
 
 #[cfg(test)]
 mod account_status_tests {
@@ -258,9 +301,57 @@ mod account_status_tests {
     #[test]
     fn only_active_maps_to_active() {
         assert_eq!(AccountStatus::parse("Active"), AccountStatus::Active);
-        for raw in ["Inactive", "Suspended", "PendingDeletion", "Deleted"] {
+        for raw in ["Inactive", "Suspended", "Deleted"] {
             assert_ne!(AccountStatus::parse(raw), AccountStatus::Active, "{raw}");
         }
+    }
+
+    #[test]
+    fn ensure_usable_admits_only_active() {
+        use crate::error::AuthError;
+        use crate::models::user::User;
+
+        fn user_with(status: &str) -> User {
+            User {
+                id: None,
+                subject_id: None,
+                email: "a@example.com".to_string(),
+                username: "a".to_string(),
+                username_normalized: "a".to_string(),
+                password_hash: None,
+                created_at: 0,
+                updated_at: 0,
+                is_email_verified: true,
+                verification_token: None,
+                verification_token_expires_at: None,
+                account_status: status.to_string(),
+                membership_level: "FREE".to_string(),
+                membership_expiry: None,
+                last_login_at: None,
+                last_login_ip: None,
+            }
+        }
+
+        assert!(user_with("Active").ensure_usable().is_ok());
+        assert!(matches!(
+            user_with("Suspended").ensure_usable(),
+            Err(AuthError::AccountSuspended)
+        ));
+        assert!(matches!(
+            user_with("Inactive").ensure_usable(),
+            Err(AuthError::AccountInactive)
+        ));
+        assert!(matches!(
+            user_with("Deleted").ensure_usable(),
+            Err(AuthError::AccountDeleted)
+        ));
+        // 已删除的变体：作为未知值落到 Inactive，仍然不可用（fail-closed）。
+        assert!(matches!(
+            user_with("PendingDeletion").ensure_usable(),
+            Err(AuthError::AccountInactive)
+        ));
+        // 未知值同样不可用 —— 与 AccountStatus::parse 的 fail-closed 一致。
+        assert!(user_with("whatever").ensure_usable().is_err());
     }
 
     #[test]
@@ -271,7 +362,6 @@ mod account_status_tests {
             AccountStatus::Active,
             AccountStatus::Inactive,
             AccountStatus::Suspended,
-            AccountStatus::PendingDeletion,
             AccountStatus::Deleted,
         ] {
             assert_eq!(AccountStatus::parse(v.as_str()), v, "{} did not round-trip", v.as_str());
