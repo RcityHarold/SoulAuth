@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
 use surrealdb::types::SurrealValue;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, SurrealValue)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, SurrealValue, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SubjectType {
+    #[default]
     Human,
     Agent,
 }
@@ -18,11 +19,6 @@ impl SubjectType {
     }
 }
 
-impl Default for SubjectType {
-    fn default() -> Self {
-        SubjectType::Human
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct Subject {

@@ -236,8 +236,8 @@ impl AuditService {
                 continue;
             }
             let risk_score = self.calculate_risk_score(count, &activity_type);
-            let first_seen = DateTime::from_timestamp(first_seen_ts, 0).unwrap_or_else(|| Utc::now());
-            let last_seen = DateTime::from_timestamp(last_seen_ts, 0).unwrap_or_else(|| Utc::now());
+            let first_seen = DateTime::from_timestamp(first_seen_ts, 0).unwrap_or_else(Utc::now);
+            let last_seen = DateTime::from_timestamp(last_seen_ts, 0).unwrap_or_else(Utc::now);
 
             suspicious.push(SuspiciousActivity {
                 user_id,

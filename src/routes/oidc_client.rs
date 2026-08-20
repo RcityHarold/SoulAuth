@@ -77,7 +77,7 @@ async fn create_client(
     // created_by 记录真实操作人，不再是硬编码的 "system"。
     match client_service.create_client(request, &user_id).await {
         Ok(client) => Ok(Json(client)),
-        Err(e) => Err(AuthError::InternalServerError(e.to_string())),
+        Err(e) => Err(AuthError::ServerError(e.to_string())),
     }
 }
 
@@ -104,7 +104,7 @@ async fn list_clients(
                 offset,
             }))
         }
-        Err(e) => Err(AuthError::InternalServerError(e.to_string())),
+        Err(e) => Err(AuthError::ServerError(e.to_string())),
     }
 }
 
@@ -123,7 +123,7 @@ fn client_error(operation: &str, error: anyhow::Error) -> AuthError {
     }
 
     tracing::error!(error = %error, operation, "OIDC client operation failed");
-    AuthError::InternalServerError(error.to_string())
+    AuthError::ServerError(error.to_string())
 }
 
 // 获取单个客户端

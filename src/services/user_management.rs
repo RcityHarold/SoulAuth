@@ -251,8 +251,10 @@ impl UserManagementService {
             return Err(AuthError::ValidationError("User preferences already exist".to_string()));
         }
 
-        let mut preferences = UserPreferences::default();
-        preferences.user_id = user_thing;
+        let mut preferences = UserPreferences {
+            user_id: user_thing,
+            ..Default::default()
+        };
         
         if let Some(theme) = request.theme {
             preferences.theme = theme;

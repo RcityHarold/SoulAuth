@@ -97,114 +97,6 @@ pub struct OAuthService {
     github_emails_url: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::OAuthService;
-    use crate::config::Config;
-
-    fn test_config() -> Config {
-        Config::test_default()
-    }
-
-    #[test]
-    fn google_auth_url_carries_the_supplied_signed_state() {
-        let service = OAuthService::new(test_config()).expect("service");
-        let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
-
-        let url = service
-            .get_google_auth_url_with_state(signed_state)
-            .expect("auth url");
-
-        assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.state.sig"));
-    }
-
-    #[test]
-    fn endpoint_overrides_keep_each_providers_real_path_shape() {
-        // 覆盖之所以只给一个根地址，前提就是路径形状照抄真实 provider；
-        // 形状一旦被改歪，本地替身就不再是忠实替身，测过也说明不了什么。
-        let (auth, token, userinfo) = super::google_endpoints(Some("http://127.0.0.1:8126"));
-        assert_eq!(auth, "http://127.0.0.1:8126/o/oauth2/v2/auth");
-        assert_eq!(token, "http://127.0.0.1:8126/token");
-        assert_eq!(userinfo, "http://127.0.0.1:8126/oauth2/v2/userinfo");
-
-        // GitHub 覆盖后的路径正是 GitHub Enterprise 的约定
-        let (auth, token, user, emails) = super::github_endpoints(Some("https://ghe.example.com"));
-        assert_eq!(auth, "https://ghe.example.com/login/oauth/authorize");
-        assert_eq!(token, "https://ghe.example.com/login/oauth/access_token");
-        assert_eq!(user, "https://ghe.example.com/api/v3/user");
-        assert_eq!(emails, "https://ghe.example.com/api/v3/user/emails");
-    }
-
-    #[test]
-    fn without_override_the_official_endpoints_are_used() {
-        // 防的是「加了覆盖能力，结果默认路径也被顺手改掉」。
-        let (auth, token, userinfo) = super::google_endpoints(None);
-        assert_eq!(auth, "https://accounts.google.com/o/oauth2/v2/auth");
-        assert_eq!(token, "https://oauth2.googleapis.com/token");
-        assert_eq!(userinfo, "https://www.googleapis.com/oauth2/v2/userinfo");
-
-        let (auth, token, user, emails) = super::github_endpoints(None);
-        assert_eq!(auth, "https://github.com/login/oauth/authorize");
-        assert_eq!(token, "https://github.com/login/oauth/access_token");
-        assert_eq!(user, "https://api.github.com/user");
-        assert_eq!(emails, "https://api.github.com/user/emails");
-    }
-
-    #[test]
-    fn an_empty_override_is_treated_as_absent() {
-        // `GOOGLE_OAUTH_BASE_URL=` 会读成 Some("")，若不当空处理，
-        // 端点就变成 `/token` 这种没有主机名的地址，直接把换令牌打断。
-        let mut config = test_config();
-        config.google_oauth_base_url = Some("   ".to_string());
-        let service = OAuthService::new(config).expect("service");
-        assert_eq!(
-            service.google_userinfo_url,
-            "https://www.googleapis.com/oauth2/v2/userinfo"
-        );
-    }
-
-    #[test]
-    fn an_unconfigured_provider_reports_not_configured_rather_than_failing_later() {
-        // 不配凭证时必须在入口就说清「本部署没开这个」，
-        // 而不是拿空 client_id 一路走到换令牌才失败、还把错误指向 OAuth 库。
-        let mut config = test_config();
-        config.google_client_id = None;
-        config.google_client_secret = None;
-        let service = OAuthService::new(config).expect("service");
-
-        let err = service
-            .get_google_auth_url_with_state("state")
-            .expect_err("must not hand out an auth url for an unconfigured provider");
-        assert!(
-            matches!(err, crate::error::AuthError::NotConfigured(_)),
-            "expected NotConfigured, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn one_provider_can_be_configured_without_the_other() {
-        // 只用 GitHub 的部署不该被迫为 Google 填假凭证。
-        let mut config = test_config();
-        config.google_client_id = None;
-        config.google_client_secret = None;
-        let service = OAuthService::new(config).expect("service");
-
-        assert!(service.get_github_auth_url_with_state("state").is_ok());
-        assert!(service.get_google_auth_url_with_state("state").is_err());
-    }
-
-    #[test]
-    fn github_auth_url_carries_the_supplied_signed_state() {
-        let service = OAuthService::new(test_config()).expect("service");
-        let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
-
-        let url = service
-            .get_github_auth_url_with_state(signed_state)
-            .expect("auth url");
-
-        assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.state.sig"));
-    }
-}
 
 /// 各 provider 的端点。`base` 为 `None` 时用官方地址；为 `Some` 时
 /// **沿用该 provider 真实的路径形状**，只换根地址 —— 这样本地替身是忠实
@@ -499,7 +391,7 @@ impl OAuthService {
         let primary_email = emails
             .into_iter()
             .find(|e| e.primary && e.verified)
-            .ok_or_else(|| AuthError::EmailNotVerified)?;
+            .ok_or(AuthError::EmailNotVerified)?;
 
         Ok(OAuthUserInfo {
             provider: "github".to_string(),
@@ -508,5 +400,114 @@ impl OAuthService {
             name: user_info.name,
             picture: user_info.avatar_url,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::OAuthService;
+    use crate::config::Config;
+
+    fn test_config() -> Config {
+        Config::test_default()
+    }
+
+    #[test]
+    fn google_auth_url_carries_the_supplied_signed_state() {
+        let service = OAuthService::new(test_config()).expect("service");
+        let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
+
+        let url = service
+            .get_google_auth_url_with_state(signed_state)
+            .expect("auth url");
+
+        assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.state.sig"));
+    }
+
+    #[test]
+    fn endpoint_overrides_keep_each_providers_real_path_shape() {
+        // 覆盖之所以只给一个根地址，前提就是路径形状照抄真实 provider；
+        // 形状一旦被改歪，本地替身就不再是忠实替身，测过也说明不了什么。
+        let (auth, token, userinfo) = super::google_endpoints(Some("http://127.0.0.1:8126"));
+        assert_eq!(auth, "http://127.0.0.1:8126/o/oauth2/v2/auth");
+        assert_eq!(token, "http://127.0.0.1:8126/token");
+        assert_eq!(userinfo, "http://127.0.0.1:8126/oauth2/v2/userinfo");
+
+        // GitHub 覆盖后的路径正是 GitHub Enterprise 的约定
+        let (auth, token, user, emails) = super::github_endpoints(Some("https://ghe.example.com"));
+        assert_eq!(auth, "https://ghe.example.com/login/oauth/authorize");
+        assert_eq!(token, "https://ghe.example.com/login/oauth/access_token");
+        assert_eq!(user, "https://ghe.example.com/api/v3/user");
+        assert_eq!(emails, "https://ghe.example.com/api/v3/user/emails");
+    }
+
+    #[test]
+    fn without_override_the_official_endpoints_are_used() {
+        // 防的是「加了覆盖能力，结果默认路径也被顺手改掉」。
+        let (auth, token, userinfo) = super::google_endpoints(None);
+        assert_eq!(auth, "https://accounts.google.com/o/oauth2/v2/auth");
+        assert_eq!(token, "https://oauth2.googleapis.com/token");
+        assert_eq!(userinfo, "https://www.googleapis.com/oauth2/v2/userinfo");
+
+        let (auth, token, user, emails) = super::github_endpoints(None);
+        assert_eq!(auth, "https://github.com/login/oauth/authorize");
+        assert_eq!(token, "https://github.com/login/oauth/access_token");
+        assert_eq!(user, "https://api.github.com/user");
+        assert_eq!(emails, "https://api.github.com/user/emails");
+    }
+
+    #[test]
+    fn an_empty_override_is_treated_as_absent() {
+        // `GOOGLE_OAUTH_BASE_URL=` 会读成 Some("")，若不当空处理，
+        // 端点就变成 `/token` 这种没有主机名的地址，直接把换令牌打断。
+        let mut config = test_config();
+        config.google_oauth_base_url = Some("   ".to_string());
+        let service = OAuthService::new(config).expect("service");
+        assert_eq!(
+            service.google_userinfo_url,
+            "https://www.googleapis.com/oauth2/v2/userinfo"
+        );
+    }
+
+    #[test]
+    fn an_unconfigured_provider_reports_not_configured_rather_than_failing_later() {
+        // 不配凭证时必须在入口就说清「本部署没开这个」，
+        // 而不是拿空 client_id 一路走到换令牌才失败、还把错误指向 OAuth 库。
+        let mut config = test_config();
+        config.google_client_id = None;
+        config.google_client_secret = None;
+        let service = OAuthService::new(config).expect("service");
+
+        let err = service
+            .get_google_auth_url_with_state("state")
+            .expect_err("must not hand out an auth url for an unconfigured provider");
+        assert!(
+            matches!(err, crate::error::AuthError::NotConfigured(_)),
+            "expected NotConfigured, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn one_provider_can_be_configured_without_the_other() {
+        // 只用 GitHub 的部署不该被迫为 Google 填假凭证。
+        let mut config = test_config();
+        config.google_client_id = None;
+        config.google_client_secret = None;
+        let service = OAuthService::new(config).expect("service");
+
+        assert!(service.get_github_auth_url_with_state("state").is_ok());
+        assert!(service.get_google_auth_url_with_state("state").is_err());
+    }
+
+    #[test]
+    fn github_auth_url_carries_the_supplied_signed_state() {
+        let service = OAuthService::new(test_config()).expect("service");
+        let signed_state = "eyJhbGciOiJIUzI1NiJ9.state.sig";
+
+        let url = service
+            .get_github_auth_url_with_state(signed_state)
+            .expect("auth url");
+
+        assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.state.sig"));
     }
 }

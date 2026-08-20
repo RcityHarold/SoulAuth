@@ -64,8 +64,9 @@ pub struct User {
 ///
 /// 存量数据：库里遗留的 `"PendingDeletion"` 字符串会被 [`AccountStatus::parse`]
 /// 归入 `Inactive`（不可用），方向是 fail-closed，不会误放行。
-#[derive(Debug, Clone, PartialEq, Eq, SurrealValue)]
+#[derive(Debug, Clone, PartialEq, Eq, SurrealValue, Default)]
 pub enum AccountStatus {
+    #[default]
     Active,
     Inactive,
     Suspended,
@@ -278,11 +279,6 @@ impl From<User> for UserResponse {
     }
 }
 
-impl Default for AccountStatus {
-    fn default() -> Self {
-        AccountStatus::Active
-    }
-}
 
 #[cfg(test)]
 mod account_status_tests {
