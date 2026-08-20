@@ -109,6 +109,35 @@ fn record_address(thing: &Thing) -> String {
     format!("{}:{}", thing.table, record_key(thing))
 }
 
+/// 把唯一索引冲突翻译成对应的业务错误。
+///
+/// 注册走的是"先查重、再插入"，两步之间有窗口：并发注册同一邮箱时，
+/// 两个请求都通过了查重，插入阶段由数据库的唯一索引挡下后来那个。
+/// 数据完整性没问题（实测 8 个并发只建出 1 个账号），但错误会以
+/// 裸 `DatabaseError` 冒出来 —— 调用方收到 **500 而不是 409**，
+/// 看起来像服务器故障，于是重试，再撞一次。
+///
+/// 索引名来自 `schema.sql`：`email_idx` / `username_idx`。
+fn translate_unique_violation(error: AuthError) -> AuthError {
+    let AuthError::DatabaseError(message) = &error else {
+        return error;
+    };
+
+    // SurrealDB 的报错形如：
+    //   Database index `email_idx` already contains 'a@b.com', with record `user:...`
+    if !message.contains("already contains") {
+        return error;
+    }
+    if message.contains("email_idx") {
+        return AuthError::EmailExists;
+    }
+    if message.contains("username_idx") {
+        return AuthError::UsernameExists;
+    }
+
+    error
+}
+
 impl AuthService {
     pub fn new(db: Arc<Database>, config: Config, auth_cache: Arc<AuthCache>) -> Result<Self> {
         // 在启动阶段就把哑哈希算出来。留给第一个请求懒初始化的话，进程起来后
@@ -425,7 +454,11 @@ impl AuthService {
             last_login_ip: None,
         };
 
-        let created_user = self.db.create_record("user", &user).await?;
+        let created_user = self
+            .db
+            .create_record("user", &user)
+            .await
+            .map_err(translate_unique_violation)?;
 
         if let Some(token) = verification_token {
             // 用户记录已经提交了，此时再抛错只会让调用方拿到 500、重试又撞 409，
@@ -960,4 +993,42 @@ fn hash_password(password: &str) -> Result<String> {
         .map_err(|e| AuthError::ServerError(e.to_string()))?
         .to_string();
     Ok(hashed_password)
+}
+
+#[cfg(test)]
+mod unique_violation_tests {
+    use super::translate_unique_violation;
+    use crate::error::AuthError;
+
+    #[test]
+    fn maps_index_violations_to_conflict_errors() {
+        // 并发注册撞上唯一索引时，调用方该收到 409 而不是 500。
+        let email = AuthError::DatabaseError(
+            "Failed to create record: Database index `email_idx` already contains \
+             'a@b.com', with record `user:abc`".to_string(),
+        );
+        assert!(matches!(translate_unique_violation(email), AuthError::EmailExists));
+
+        let username = AuthError::DatabaseError(
+            "Database index `username_idx` already contains 'alice'".to_string(),
+        );
+        assert!(matches!(
+            translate_unique_violation(username),
+            AuthError::UsernameExists
+        ));
+    }
+
+    #[test]
+    fn leaves_other_database_errors_alone() {
+        // 不是索引冲突的库错误仍然是 500，不能被伪装成 409。
+        let other = AuthError::DatabaseError("connection refused".to_string());
+        assert!(matches!(
+            translate_unique_violation(other),
+            AuthError::DatabaseError(_)
+        ));
+        assert!(matches!(
+            translate_unique_violation(AuthError::InvalidToken),
+            AuthError::InvalidToken
+        ));
+    }
 }
