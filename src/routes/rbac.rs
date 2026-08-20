@@ -31,32 +31,6 @@ pub struct PaginationQuery {
     pub limit: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ApiResponse<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub message: String,
-}
-
-impl<T> ApiResponse<T> {
-    pub fn success(data: T, message: &str) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: message.to_string(),
-        }
-    }
-
-    pub fn success_message(message: &str) -> ApiResponse<()> {
-        ApiResponse {
-            success: true,
-            data: None,
-            message: message.to_string(),
-        }
-    }
-
-}
-
 pub fn router() -> Router {
     Router::new()
         // 角色管理路由
@@ -100,7 +74,7 @@ async fn create_role(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Json(request): Json<CreateRoleRequest>,
-) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
+) -> Result<Json<RoleResponse>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
@@ -109,7 +83,7 @@ async fn create_role(
     match rbac_service.create_role(request, current_user.user()).await {
         Ok(role) => {
             info!("Role created successfully by user '{}'", current_user.user().email);
-            Ok(Json(ApiResponse::success(role, "Role created successfully")))
+            Ok(Json(role))
         }
         Err(AuthError::ValidationError(msg)) => {
             error!("Role creation validation error: {}", msg);
@@ -126,14 +100,14 @@ async fn list_roles(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Query(pagination): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<Vec<RoleResponse>>>, StatusCode> {
+) -> Result<Json<Vec<RoleResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
     match rbac_service.list_roles(pagination.page, pagination.limit).await {
-        Ok(roles) => Ok(Json(ApiResponse::success(roles, "Roles retrieved successfully"))),
+        Ok(roles) => Ok(Json(roles)),
         Err(e) => {
             error!("Failed to list roles: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -145,7 +119,7 @@ async fn get_role(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(role_name): Path<String>,
-) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
+) -> Result<Json<RoleResponse>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
@@ -158,7 +132,7 @@ async fn get_role(
             if let Ok(permissions) = rbac_service.get_role_permissions(&role_name).await {
                 role_response.permissions = permissions;
             }
-            Ok(Json(ApiResponse::success(role_response, "Role retrieved successfully")))
+            Ok(Json(role_response))
         }
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
@@ -173,7 +147,7 @@ async fn update_role(
     current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<UpdateRoleRequest>,
-) -> Result<Json<ApiResponse<RoleResponse>>, StatusCode> {
+) -> Result<Json<RoleResponse>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_WRITE);
 
@@ -182,7 +156,7 @@ async fn update_role(
     match rbac_service.update_role(&role_name, request, current_user.user()).await {
         Ok(role) => {
             info!("Role '{}' updated successfully by user '{}'", role_name, current_user.user().email);
-            Ok(Json(ApiResponse::success(role, "Role updated successfully")))
+            Ok(Json(role))
         }
         Err(AuthError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
         Err(AuthError::ValidationError(msg)) => {
@@ -200,7 +174,7 @@ async fn delete_role(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(role_name): Path<String>,
-) -> Result<Json<ApiResponse<()>>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_DELETE);
 
@@ -213,7 +187,7 @@ async fn delete_role(
                 role_name,
                 current_user.user().email
             );
-            Ok(Json(ApiResponse::<()>::success_message("Role deleted successfully")))
+            Ok(StatusCode::NO_CONTENT)
         }
         Err(AuthError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
         // 系统角色不可删、仍被用户占用时都归为 400。
@@ -234,7 +208,7 @@ async fn create_permission(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Json(request): Json<CreatePermissionRequest>,
-) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
+) -> Result<Json<PermissionResponse>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
@@ -243,7 +217,7 @@ async fn create_permission(
     match rbac_service.create_permission(request, current_user.user()).await {
         Ok(permission) => {
             info!("Permission created successfully by user '{}'", current_user.user().email);
-            Ok(Json(ApiResponse::success(permission, "Permission created successfully")))
+            Ok(Json(permission))
         }
         Err(AuthError::ValidationError(msg)) => {
             error!("Permission creation validation error: {}", msg);
@@ -260,14 +234,14 @@ async fn list_permissions(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Query(pagination): Query<PaginationQuery>,
-) -> Result<Json<ApiResponse<Vec<PermissionResponse>>>, StatusCode> {
+) -> Result<Json<Vec<PermissionResponse>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
     match rbac_service.list_permissions(pagination.page, pagination.limit).await {
-        Ok(permissions) => Ok(Json(ApiResponse::success(permissions, "Permissions retrieved successfully"))),
+        Ok(permissions) => Ok(Json(permissions)),
         Err(e) => {
             error!("Failed to list permissions: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -279,14 +253,14 @@ async fn get_permission(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(permission_name): Path<String>,
-) -> Result<Json<ApiResponse<PermissionResponse>>, StatusCode> {
+) -> Result<Json<PermissionResponse>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_READ);
 
     let rbac_service = RBACService::new(db);
     
     match rbac_service.get_permission_by_name(&permission_name).await {
-        Ok(Some(permission)) => Ok(Json(ApiResponse::success(permission.into(), "Permission retrieved successfully"))),
+        Ok(Some(permission)) => Ok(Json(permission.into())),
         Ok(None) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             error!("Failed to get permission: {}", e);
@@ -301,14 +275,14 @@ async fn get_role_permissions(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(role_name): Path<String>,
-) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
+) -> Result<Json<Vec<String>>, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::ROLES_READ);
 
     let rbac_service = RBACService::new(db);
     
     match rbac_service.get_role_permissions(&role_name).await {
-        Ok(permissions) => Ok(Json(ApiResponse::success(permissions, "Role permissions retrieved successfully"))),
+        Ok(permissions) => Ok(Json(permissions)),
         Err(AuthError::NotFound(_)) => Err(StatusCode::NOT_FOUND),
         Err(e) => {
             error!("Failed to get role permissions: {}", e);
@@ -322,7 +296,7 @@ async fn assign_permission_to_role(
     current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<AssignPermissionToRoleRequest>,
-) -> Result<Json<ApiResponse<()>>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
@@ -332,7 +306,7 @@ async fn assign_permission_to_role(
         Ok(_) => {
             info!("Permission '{}' assigned to role '{}' by user '{}'", 
                   request.permission_name, role_name, current_user.user().email);
-            Ok(Json(ApiResponse::<()>::success_message("Permission assigned to role successfully")))
+            Ok(StatusCode::NO_CONTENT)
         }
         Err(AuthError::NotFound(msg)) => {
             error!("Assignment failed - not found: {}", msg);
@@ -354,7 +328,7 @@ async fn remove_permission_from_role(
     current_user: AuthedUser,
     Path(role_name): Path<String>,
     Json(request): Json<RemovePermissionFromRoleRequest>,
-) -> Result<Json<ApiResponse<()>>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let user_id = current_user_id(&current_user)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::PERMISSIONS_WRITE);
 
@@ -364,7 +338,7 @@ async fn remove_permission_from_role(
         Ok(_) => {
             info!("Permission '{}' removed from role '{}' by user '{}'", 
                   request.permission_name, role_name, current_user.user().email);
-            Ok(Json(ApiResponse::<()>::success_message("Permission removed from role successfully")))
+            Ok(StatusCode::NO_CONTENT)
         }
         Err(AuthError::NotFound(msg)) => {
             error!("Removal failed - not found: {}", msg);
@@ -383,7 +357,7 @@ async fn get_user_roles(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(target_user_id): Path<String>,
-) -> Result<Json<ApiResponse<UserRoleResponse>>, StatusCode> {
+) -> Result<Json<UserRoleResponse>, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
     let target_user_id = normalize_user_id(&target_user_id);
 
@@ -402,7 +376,7 @@ async fn get_user_roles(
     let rbac_service = RBACService::new(db);
 
     match rbac_service.get_user_roles(&target_user_id).await {
-        Ok(user_roles) => Ok(Json(ApiResponse::success(user_roles, "User roles retrieved successfully"))),
+        Ok(user_roles) => Ok(Json(user_roles)),
         Err(e) => {
             error!("Failed to get user roles: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -415,7 +389,7 @@ async fn assign_role_to_user(
     current_user: AuthedUser,
     Path(user_id): Path<String>,
     Json(request): Json<AssignRoleRequest>,
-) -> Result<Json<ApiResponse<()>>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
     require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
@@ -429,7 +403,7 @@ async fn assign_role_to_user(
         Ok(_) => {
             info!("Role '{}' assigned to user '{}' by user '{}'",
                   request.role_name, target_user_id, current_user.user().email);
-            Ok(Json(ApiResponse::<()>::success_message("Role assigned to user successfully")))
+            Ok(StatusCode::NO_CONTENT)
         }
         Err(AuthError::NotFound(msg)) => {
             error!("Assignment failed - not found: {}", msg);
@@ -451,7 +425,7 @@ async fn remove_role_from_user(
     current_user: AuthedUser,
     Path(user_id): Path<String>,
     Json(request): Json<RemoveRoleRequest>,
-) -> Result<Json<ApiResponse<()>>, StatusCode> {
+) -> Result<StatusCode, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
     require_permission_status!(db, &requester_id, crate::models::permission::names::ROLES_WRITE);
 
@@ -465,7 +439,7 @@ async fn remove_role_from_user(
         Ok(_) => {
             info!("Role '{}' removed from user '{}' by user '{}'",
                   request.role_name, target_user_id, current_user.user().email);
-            Ok(Json(ApiResponse::<()>::success_message("Role removed from user successfully")))
+            Ok(StatusCode::NO_CONTENT)
         }
         Err(AuthError::NotFound(msg)) => {
             error!("Removal failed - not found: {}", msg);
@@ -482,7 +456,7 @@ async fn get_user_permissions(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(target_user_id): Path<String>,
-) -> Result<Json<ApiResponse<Vec<String>>>, StatusCode> {
+) -> Result<Json<Vec<String>>, StatusCode> {
     let requester_id = current_user_id(&current_user)?;
     let target_user_id = normalize_user_id(&target_user_id);
 
@@ -500,7 +474,7 @@ async fn get_user_permissions(
     let rbac_service = RBACService::new(db);
 
     match rbac_service.get_user_permissions(&target_user_id).await {
-        Ok(permissions) => Ok(Json(ApiResponse::success(permissions, "User permissions retrieved successfully"))),
+        Ok(permissions) => Ok(Json(permissions)),
         Err(e) => {
             error!("Failed to get user permissions: {}", e);
             Err(StatusCode::INTERNAL_SERVER_ERROR)
@@ -528,7 +502,7 @@ async fn check_permission(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(permission_name): Path<String>,
-) -> Result<Json<ApiResponse<PermissionCheckResponse>>, StatusCode> {
+) -> Result<Json<PermissionCheckResponse>, StatusCode> {
     let rbac_service = RBACService::new(db);
     let user_id = current_user_id(&current_user)?;
     
@@ -539,7 +513,7 @@ async fn check_permission(
                 user_id: user_id.clone(),
                 permission: permission_name,
             };
-            Ok(Json(ApiResponse::success(response, "Permission checked successfully")))
+            Ok(Json(response))
         }
         Err(e) => {
             error!("Failed to check permission: {}", e);
@@ -552,7 +526,7 @@ async fn check_role(
     Extension(db): Extension<Arc<Database>>,
     current_user: AuthedUser,
     Path(role_name): Path<String>,
-) -> Result<Json<ApiResponse<RoleCheckResponse>>, StatusCode> {
+) -> Result<Json<RoleCheckResponse>, StatusCode> {
     let rbac_service = RBACService::new(db);
     let user_id = current_user_id(&current_user)?;
     
@@ -563,7 +537,7 @@ async fn check_role(
                 user_id: user_id.clone(),
                 role: role_name,
             };
-            Ok(Json(ApiResponse::success(response, "Role checked successfully")))
+            Ok(Json(response))
         }
         Err(e) => {
             error!("Failed to check role: {}", e);

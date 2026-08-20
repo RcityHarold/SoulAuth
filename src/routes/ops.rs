@@ -7,29 +7,11 @@
 use std::sync::Arc;
 
 use axum::{http::StatusCode, response::Json, routing::get, Extension, Router};
-use serde::Serialize;
 use serde_json::json;
 
 use crate::{
     require_permission_status, services::database::Database, utils::jwt::AuthedUser,
 };
-
-#[derive(Debug, Serialize)]
-pub struct ApiResponse<T> {
-    pub success: bool,
-    pub data: Option<T>,
-    pub message: String,
-}
-
-impl<T> ApiResponse<T> {
-    pub fn success(data: T, message: &str) -> Self {
-        Self {
-            success: true,
-            data: Some(data),
-            message: message.to_string(),
-        }
-    }
-}
 
 pub fn router() -> Router {
     Router::new().route("/memberships/overview", get(get_membership_overview))
@@ -38,7 +20,7 @@ pub fn router() -> Router {
 async fn get_membership_overview(
     user: AuthedUser,
     Extension(db): Extension<Arc<Database>>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, StatusCode> {
+) -> Result<Json<serde_json::Value>, StatusCode> {
     let user_id = user.id().map_err(|_| StatusCode::UNAUTHORIZED)?;
     require_permission_status!(db, &user_id, crate::models::permission::names::USERS_READ);
 
@@ -81,8 +63,7 @@ async fn get_membership_overview(
         distribution.insert(level, json!(current + count));
     }
 
-    Ok(Json(ApiResponse::success(
-        json!({
+    Ok(Json(json!({
             "total_users": total_users,
             "distribution": distribution,
             "limits": {
@@ -92,7 +73,5 @@ async fn get_membership_overview(
                 "ULTIMATE": { "ai_limit": 7, "daily_messages": null, "price": 79.9 },
                 "TEAM": { "ai_limit": 35, "daily_messages": null, "price": 299.9 }
             }
-        }),
-        "Membership overview retrieved successfully",
-    )))
+        })))
 }

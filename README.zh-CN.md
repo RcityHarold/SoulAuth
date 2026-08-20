@@ -73,6 +73,23 @@ cargo run
 
 ---
 
+## 响应形状
+
+每个端点直接返回资源本身，**没有 `{success, data, message}` 信封**。
+不产生资源的动作返回 `204 No Content`。
+
+```
+GET /api/auth/me        →  200  {"id":"…","email":"…","is_admin":true}
+GET /api/rbac/roles     →  200  [{"name":"admin","permissions":[…]}, …]
+POST …/roles/assign     →  204  （无响应体）
+出错                     →  4xx/5xx  {"error":"Invalid credentials"}
+```
+
+OIDC 那几个端点（`/.well-known/openid-configuration`、`/jwks`、`/token`、
+`/userinfo`、`/authorize`）返回各自规范规定的形状，包括令牌端点的
+`{"error":"invalid_grant","error_description":"…"}`。这是唯一一处有意的例外：
+给它们套外壳会让每一个标准 OIDC 客户端库解析失败。
+
 ## 接口面
 
 68 个端点，分七个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。

@@ -113,8 +113,17 @@ pub(crate) fn request_context(
     RequestContext::new(ip, user_agent)
 }
 
-fn error_body(error: &str, message: &str) -> Json<serde_json::Value> {
-    Json(json!({ "error": error, "message": message }))
+/// 错误响应体。
+///
+/// 形状与 `AuthError::into_response` 保持一致：**只有一个 `error` 字段**。
+/// 此前这里是 `{"error": <类别>, "message": <详情>}` 两字段，而全站其余端点
+/// 走 `AuthError` 出来的是 `{"error": <详情>}` —— 同一个 API 两种错误形状，
+/// 客户端得逐端点记。类别本身是冗余的：401 / 403 / 409 已经把它表达清楚了。
+///
+/// 第一个参数保留是为了让调用点读起来仍带上下文（它会被拼进日志语义），
+/// 但不再进响应体。
+fn error_body(_category: &str, message: &str) -> Json<serde_json::Value> {
+    Json(json!({ "error": message }))
 }
 
 /// 执行锁定检查；数据库鉴权态过期时先重连再试一次。

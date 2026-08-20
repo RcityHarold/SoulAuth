@@ -94,6 +94,7 @@ jget() {
 import json,sys
 try: d=json.load(open('$WORK/body'))
 except Exception: print(''); sys.exit()
+# 全部端点现在都返回裸对象；这行只是对历史 ApiResponse 信封的兼容回退。
 b=d.get('data') if isinstance(d,dict) and isinstance(d.get('data'),dict) else d
 if not isinstance(b, dict):
     print(''); sys.exit()
@@ -328,12 +329,12 @@ req POST /api/rbac/roles -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Typ
 req POST /api/rbac/permissions -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
     -d '{"name":"soulauth:itest.read","display_name":"ITR","resource":"itest","action":"read"}' > /dev/null
 
-eq 200 "$(req POST /api/rbac/roles/itest/permissions/assign -H "Authorization: Bearer $ADMIN_TOKEN" \
+eq 204 "$(req POST /api/rbac/roles/itest/permissions/assign -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H 'Content-Type: application/json' -d '{"permission_name":"soulauth:itest.read"}')" "给角色授权限"
 eq 1 "$(sql_count "SELECT count() FROM role_permission WHERE role_id IN (SELECT VALUE id FROM role WHERE name='itest') GROUP ALL")" \
     "授权确实落库"
 
-eq 200 "$(req POST /api/rbac/roles/itest/permissions/remove -H "Authorization: Bearer $ADMIN_TOKEN" \
+eq 204 "$(req POST /api/rbac/roles/itest/permissions/remove -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H 'Content-Type: application/json' -d '{"permission_name":"soulauth:itest.read"}')" "撤销权限"
 eq 0 "$(sql_count "SELECT count() FROM role_permission WHERE role_id IN (SELECT VALUE id FROM role WHERE name='itest') GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
@@ -918,7 +919,7 @@ eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('u
     "越权尝试没有留下任何授权记录"
 
 # 管理员授角色，且要落库、可查、可撤
-eq 200 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_A}" \
+eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员给用户授角色"
 eq 1 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
     "授权确实落库"
@@ -932,7 +933,7 @@ ADMIN_UID="$(user_id_of admin@test.local)"
 eq 403 "$(req GET "/api/rbac/users/${ADMIN_UID}/roles" -H "Authorization: Bearer ${TOK_P}")" \
     "无 users.read 查不了他人角色"
 
-eq 200 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/remove" -H "Authorization: Bearer ${TOK_A}" \
+eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/remove" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员撤销角色"
 eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
@@ -1482,8 +1483,7 @@ has '366' "$(body)" "超出上限的窗口被夹到 366 天，而不是退化成
 eq 200 "$(req GET /api/ops/memberships/overview -H "Authorization: Bearer ${TOK_AUDIT}")" "会员总览可读"
 OV_TOTAL="$(python3 -c "
 import json
-d=json.load(open('$WORK/body')).get('data',{})
-print(d.get('total_users',-1))" 2>/dev/null)"
+print(json.load(open('$WORK/body')).get('total_users',-1))" 2>/dev/null)"
 DB_TOTAL="$(sql_count "SELECT count() FROM user WHERE account_status != 'Deleted' GROUP ALL")"
 eq "$DB_TOTAL" "$OV_TOTAL" "聚合出来的 total_users 与库中实际行数一致"
 
@@ -1638,7 +1638,7 @@ has 'PRO' "$(body)" "已过期的会员等级不被本服务自动降级（解�
 req GET "/api/rbac/roles/admin" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 ONE_PERMS="$(python3 -c "
 import json
-try: print(len(json.load(open('$WORK/body')).get('data',{}).get('permissions',[])))
+try: print(len(json.load(open('$WORK/body')).get('permissions',[])))
 except Exception: print(-1)" 2>/dev/null)"
 [ "$ONE_PERMS" -gt 0 ] && ok "单角色查询返回 ${ONE_PERMS} 条权限" ||
     bad "单角色查询返回权限" "拿到 ${ONE_PERMS}"
@@ -1647,7 +1647,7 @@ req GET "/api/rbac/roles" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 LIST_PERMS="$(python3 -c "
 import json
 try:
-    d=json.load(open('$WORK/body')).get('data',[])
+    d=json.load(open('$WORK/body'))
     print(next((len(r.get('permissions',[])) for r in d if r.get('name')=='admin'), -1))
 except Exception: print(-1)" 2>/dev/null)"
 eq "$ONE_PERMS" "$LIST_PERMS" "角色列表里 admin 的权限数与单角色查询一致（不再恒空）"
@@ -1713,6 +1713,63 @@ eq 200 "$(req POST /api/rbac/roles -H "Authorization: Bearer ${TOK_R}" \
     -H 'Content-Type: application/json' \
     -d '{"name":"itest_role","display_name":"正常","description":null}')" \
     "正常角色名可创建"
+
+# ───────── 25.9 响应形状：裸对象，无 ApiResponse 信封 ─────────
+#
+# 曾经是一半对一半：rbac / user_management / ops 套 {success,data,message}，
+# auth / audit / oidc 直接返回裸对象。客户端得逐端点记住用哪种 ——
+# 写本套件时就因此踩过一次（按 data 取审计报告字段，拿到空值）。
+req GET /api/auth/me -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if ('email' in d and 'data' not in d and 'success' not in d) else 1)" \
+  && ok "/api/auth/me 返回裸对象" || bad "/api/auth/me 返回裸对象" "$(body | head -c 90)"
+
+req GET /api/rbac/roles -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if isinstance(d,list) and d and 'name' in d[0] else 1)" \
+  && ok "/api/rbac/roles 直接返回数组（信封已移除）" || bad "/api/rbac/roles 直接返回数组" "$(body | head -c 90)"
+
+req GET /api/users/users -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if ('users' in d and 'data' not in d) else 1)" \
+  && ok "/api/users/users 返回裸对象" || bad "/api/users/users 返回裸对象" "$(body | head -c 90)"
+
+req GET /api/ops/memberships/overview -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if ('total_users' in d and 'data' not in d) else 1)" \
+  && ok "/api/ops 返回裸对象" || bad "/api/ops 返回裸对象" "$(body | head -c 90)"
+
+# 错误体统一为单字段 {"error": …}
+req GET /api/auth/me -H "Authorization: Bearer not-a-token" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if (list(d.keys())==['error']) else 1)" \
+  && ok "错误体只有 error 一个字段" || bad "错误体形状" "$(body | head -c 90)"
+
+req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d '{"email":"nobody@test.local","password":"WrongPass99!"}' > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if (list(d.keys())==['error']) else 1)" \
+  && ok "登录失败的错误体同样是单字段" || bad "登录失败错误体" "$(body | head -c 90)"
+
+# OIDC 是有意的例外：形状由规范规定
+req GET /api/oidc/.well-known/openid-configuration > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if ('issuer' in d and 'data' not in d) else 1)" \
+  && ok "OIDC 发现文档保持规范形状" || bad "OIDC 发现文档形状"
 
 group "26. 运行期无 panic"
 

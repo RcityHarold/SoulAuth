@@ -78,6 +78,24 @@ see [Production posture](#production-posture) and
 
 ---
 
+## Response shape
+
+Every endpoint returns the resource itself — there is no `{success, data, message}`
+envelope. Actions that produce no resource answer `204 No Content`.
+
+```
+GET /api/auth/me        →  200  {"id":"…","email":"…","is_admin":true}
+GET /api/rbac/roles     →  200  [{"name":"admin","permissions":[…]}, …]
+POST …/roles/assign     →  204  (no body)
+error                   →  4xx/5xx  {"error":"Invalid credentials"}
+```
+
+The OIDC endpoints (`/.well-known/openid-configuration`, `/jwks`, `/token`,
+`/userinfo`, `/authorize`) return the shapes their specs mandate — including
+`{"error":"invalid_grant","error_description":"…"}` on the token endpoint.
+That is the one deliberate exception: wrapping them would break every standard
+OIDC client library.
+
 ## API surface
 
 68 endpoints across seven modules. The route tables in `src/routes/` are the
