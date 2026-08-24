@@ -460,13 +460,37 @@ impl RBACService {
 
     // 用户角色分配
     pub async fn assign_role_to_user(&self, user_id: &str, role_name: &str, assigned_by: &User) -> Result<(), AuthError> {
+        let assigned_by_thing = assigned_by.id.as_ref()
+            .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
+        self.assign_role(user_id, role_name, assigned_by_thing, &assigned_by.email).await
+    }
+
+    /// 由系统自身发起的角色授予（没有人类操作者）。
+    ///
+    /// 目前唯一的调用方是首个管理员的引导路径。那一刻系统里还没有任何可以充当
+    /// 操作者的账号，记一个真实用户 ID 反而是伪造归因，所以 `assigned_by` 落在
+    /// `user:system` 上 —— 与部署文档里那段手工 SQL 用的是同一个约定。
+    pub async fn assign_role_as_system(&self, user_id: &str, role_name: &str) -> Result<(), AuthError> {
+        let system = crate::utils::record_id::user_record_id("system");
+        self.assign_role(user_id, role_name, &system, "system").await
+    }
+
+    /// 授予角色的共享实现。
+    ///
+    /// 拆出来是为了让引导路径不必伪造一个 `User` 才能调用 —— 那样既要给领域
+    /// 类型加 `Default`，又会让一个空壳对象在日志和归因里冒充真实操作者。
+    async fn assign_role(
+        &self,
+        user_id: &str,
+        role_name: &str,
+        assigned_by_thing: &surrealdb::types::RecordId,
+        actor_label: &str,
+    ) -> Result<(), AuthError> {
         let role = self.get_role_by_name(role_name).await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
         let user_thing = crate::utils::record_id::user_record_id(user_id);
-        let assigned_by_thing = assigned_by.id.as_ref()
-            .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
 
         // 检查用户是否已经有此角色
         let check_query = "SELECT * FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
@@ -518,7 +542,7 @@ impl RBACService {
             return Err(AuthError::DatabaseError("Failed to persist user role".to_string()));
         }
 
-        info!("Role '{}' assigned to user '{}' by '{}'", role_name, user_id, assigned_by.email);
+        info!("Role '{}' assigned to user '{}' by '{}'", role_name, user_id, actor_label);
         Ok(())
     }
 

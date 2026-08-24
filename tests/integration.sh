@@ -302,7 +302,51 @@ eq 200 "$(req GET /api/auth/me -H "authorization: bearer $ADMIN_TOKEN")" "小写
 eq 401 "$(req GET /api/auth/me -H "authorization: Basic $ADMIN_TOKEN")" "Basic 方案被拒绝"
 eq 401 "$(req GET /api/auth/me)" "无令牌 401"
 
-group "3. 权限名前缀与 RBAC 守卫"
+group "3. 引导路径（首个管理员）"
+
+# 公开文档 03｜Quickstart 的验收标准：
+#   「一个全新的 SoulAuth 实例，应该让开发者在不直接修改数据库的情况下，
+#     从零走到第一份经过验证的 Actor 身份。」
+# 这一组就是那条标准的可执行形式。测试库是 memory 后端，每次全新，
+# 因此此刻系统里确实还没有任何管理员。
+
+# 令牌只从启动日志取 —— 这同时验证了它的交付方式，而不只是验证端点本身。
+BOOT_TOKEN="$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log" | head -1)"
+[ -n "$BOOT_TOKEN" ] && ok "启动日志打印了引导令牌" ||
+    bad "启动日志打印了引导令牌" "$(grep -i bootstrap "$WORK/app.log" | head -3)"
+
+# 错误令牌必须被拒，且要留审计。
+eq 401 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d '{"token":"wrong","email":"nope@test.local","username":"nope","password":"CorrectHorse42!"}')" \
+    "错误引导令牌被拒"
+
+# 密码策略不因为「这是第一个用户」而放宽。
+eq 400 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"boot@test.local\",\"username\":\"boot\",\"password\":\"short\"}")" \
+    "引导路径同样执行密码策略"
+
+eq 200 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"boot@test.local\",\"username\":\"bootadmin\",\"password\":\"CorrectHorse42!\"}")" \
+    "引导创建首个管理员"
+has '"is_admin":true' "$(body)" "引导响应直接断言 is_admin"
+
+# 引导后该账号登录，确认权限真的生效（令牌不带角色，必须重新登录）。
+req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d '{"email":"boot@test.local","password":"CorrectHorse42!"}' > /dev/null
+BOOT_TOKEN_USER="$(jget token)"
+eq 200 "$(req GET /api/users/users -H "Authorization: Bearer ${BOOT_TOKEN_USER}")" \
+    "引导出的管理员可访问受保护端点"
+
+# 门是一次性的：已有管理员之后，正确令牌同样被拒。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"second@test.local\",\"username\":\"second\",\"password\":\"CorrectHorse42!\"}")" \
+    "已有管理员后正确令牌也被拒"
+# 且与错误令牌返回同一状态码 —— 否则失效令牌就成了「实例是否已初始化」的探针。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d '{"token":"wrong","email":"third@test.local","username":"third","password":"CorrectHorse42!"}')" \
+    "已初始化后错误令牌返回同一状态码，不构成探测信道"
+
+group "4. 权限名前缀与 RBAC 守卫"
 
 ADMIN_UID="$(user_id_of admin@test.local)"
 grant_admin "$ADMIN_UID"
@@ -322,7 +366,7 @@ PLAIN_TOKEN="$(signup plain@test.local plaintest)"
 eq 403 "$(req GET /api/users/users -H "Authorization: Bearer $PLAIN_TOKEN")" "无权限用户被拒"
 has 'soulauth:users.read' "$(body)" "拒绝信息里带命名空间前缀"
 
-group "4. RBAC 授予与撤销的往返"
+group "5. RBAC 授予与撤销的往返"
 
 req POST /api/rbac/roles -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
     -d '{"name":"itest","display_name":"IT","description":"d"}' > /dev/null
@@ -339,7 +383,7 @@ eq 204 "$(req POST /api/rbac/roles/itest/permissions/remove -H "Authorization: B
 eq 0 "$(sql_count "SELECT count() FROM role_permission WHERE role_id IN (SELECT VALUE id FROM role WHERE name='itest') GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
 
-group "5. OIDC 客户端与生命周期上限"
+group "6. OIDC 客户端与生命周期上限"
 
 mk_client() {
     req POST /api/oidc/clients -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
@@ -360,7 +404,7 @@ eq 404 "$(req DELETE /api/oidc/clients/no-such-client -H "Authorization: Bearer 
 eq 404 "$(req POST /api/oidc/clients/no-such-client/regenerate-secret -H "Authorization: Bearer $ADMIN_TOKEN")" \
     "为不存在的客户端轮换密钥 404（非 200 + 假密钥）"
 
-group "6. OIDC 授权码流程与 sid"
+group "7. OIDC 授权码流程与 sid"
 
 mk_client flow; CLIENT_ID="$(jget client_id)"
 VERIFIER='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
@@ -437,7 +481,7 @@ eq 200 "$(req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urle
     --data-urlencode "client_id=$CLIENT_ID")" "刷新令牌兑换成功"
 eq "$EXPECT_SID" "$(claim "$(jget id_token)" sid)" "刷新后的 ID Token 保留同一 sid"
 
-group "7. 认证会话缺失时拒签 ID Token（fail-closed）"
+group "8. 认证会话缺失时拒签 ID Token（fail-closed）"
 
 REFRESH2="$(jget refresh_token)"
 sql "UPDATE oidc_refresh_token SET auth_session_ref = NONE WHERE client_id = '$CLIENT_ID'" > /dev/null
@@ -447,7 +491,7 @@ eq 400 "$(req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urle
     --data-urlencode "client_id=$CLIENT_ID")" "无会话引用时刷新被拒"
 has 'Missing auth session reference' "$(body)" "拒绝原因明确"
 
-group "8. OAuth 登录 CSRF 绑定"
+group "9. OAuth 登录 CSRF 绑定"
 
 restart_app   # 前面用掉了登录配额
 
@@ -467,7 +511,7 @@ eq 400 "$(req GET '/api/auth/callback/google?code=x')" "缺 state —— 拒绝"
 STATUS="$(req GET "$CB" -H "Cookie: soulauth_oauth_state=${NONCE}")"
 has 'OAuth error' "$(body)" "nonce 匹配后越过 state 校验，止于上游兑换失败"
 
-group "9. 账号锁定：并发失败登录不丢计数"
+group "10. 账号锁定：并发失败登录不丢计数"
 
 restart_app
 sql "DELETE account_lockout" > /dev/null
@@ -490,7 +534,7 @@ STATUS_L="$(sql "SELECT VALUE status FROM account_lockout WHERE identifier='admi
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
 eq Locked "$STATUS_L" "达到阈值后置为 Locked"
 
-group "10. 限流按路由模板计数"
+group "11. 限流按路由模板计数"
 
 restart_app
 
@@ -503,7 +547,7 @@ BLOCKED="$(printf '%s' "$CODES" | tr ' ' '\n' | grep -c 429)"
     ok "带路径参数的端点会被限流（每次 token 不同，共拦下 ${BLOCKED} 次）" ||
     bad "带路径参数的端点会被限流" "6 次请求无一被拦：$CODES"
 
-group "11. 邮件投递：注册验证信"
+group "12. 邮件投递：注册验证信"
 
 # 这条链此前从未被验证过 —— 没有 SMTP 就只能标「无法实测」。
 # 这里起一个零依赖的收信端（tests/smtp_sink.py），把整条
@@ -549,7 +593,7 @@ VERIFIED="$(sql "SELECT VALUE verified FROM user WHERE email='mail@test.local'" 
     python3 -c "import json,sys;r=json.load(sys.stdin);print(str(r[0]).lower() if r else 'none')")"
 eq true "$VERIFIED" "验证状态确实落库"
 
-group "12. 邮件投递：密码重置信"
+group "13. 邮件投递：密码重置信"
 
 # 第 9 组是故意把 127.0.0.1 打到 IP 锁定的。锁定记录在库里，重启服务不会清，
 # 而被锁时登录返回 429 —— 不清掉的话，本组的登录断言全成假阳性。
@@ -588,7 +632,7 @@ eq 401 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
 
 kill -9 "$SINK_PID" 2>/dev/null; SINK_PID=""
 
-group "13. OAuth 回调：换到令牌之后的整段"
+group "14. OAuth 回调：换到令牌之后的整段"
 
 # 这一段此前完全没有覆盖：第 8 组只验到「拿假 code 去换令牌然后失败」，
 # 再往后 —— 取用户信息、按邮箱验证状态放行、建号还是关联既有账号 ——
@@ -684,7 +728,7 @@ STATUS="$(oauth_callback google definitely-not-a-code)"
 
 kill -9 "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
-group "14. 登出与会话吊销"
+group "15. 登出与会话吊销"
 
 # 「登出返回 200」什么也证明不了 —— 要证明的是**那个令牌真的不能再用了**。
 # 这一段直接关系 OS 接入：OS 拿 sid 指向的会话做判断，注销做不干净就是安全洞。
@@ -716,7 +760,7 @@ eq 200 "$(req POST /api/auth/logout-all -H "Authorization: Bearer ${TOK_B}")" "�
 eq 401 "$(req GET /api/auth/me -H "Authorization: Bearer ${TOK_B}")" "发起方令牌失效"
 eq 401 "$(req GET /api/auth/me -H "Authorization: Bearer ${TOK_C}")" "另一条会话的令牌同样失效"
 
-group "15. MFA 全生命周期（真实 TOTP）"
+group "16. MFA 全生命周期（真实 TOTP）"
 
 # 之前只有单测级的 last_totp_step 水位线，整条链路没端到端跑过。
 # 这里用 RFC 6238 算真码（tests/totp.py，已用标准向量自校）。
@@ -804,7 +848,7 @@ eq 200 "$(req POST /api/auth/mfa/disable -H "Authorization: Bearer ${TOK_MFA}" \
 req GET /api/auth/mfa/status -H "Authorization: Bearer ${TOK_MFA}" > /dev/null
 eq false "$(jget enabled)" "关闭后状态归位"
 
-group "16. 用户资料与偏好"
+group "17. 用户资料与偏好"
 
 restart_app
 sql "DELETE account_lockout" > /dev/null
@@ -851,7 +895,7 @@ eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/activity-log" -H "Authorization
 eq 200 "$(req GET "/api/users/users/${PLAIN_UID}" -H "Authorization: Bearer ${TOK_A}")" "管理员可按 id 读用户"
 eq 403 "$(req GET "/api/users/users/${ADMIN_UID}" -H "Authorization: Bearer ${TOK_P}")" "普通用户按 id 读不了他人"
 
-group "17. 账号状态与会员等级：越权与即时失效"
+group "18. 账号状态与会员等级：越权与即时失效"
 
 restart_app
 
@@ -900,7 +944,7 @@ eq 403 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"victim@test.local","password":"CorrectHorse42!"}')" \
     "未知账号状态按不可用处理（未列白名单即拒）"
 
-group "18. RBAC 用户侧授权与权限查询"
+group "19. RBAC 用户侧授权与权限查询"
 
 restart_app
 
@@ -948,7 +992,7 @@ eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/remove" -H "Authorization
 eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
 
-group "19. 限流跨副本合账"
+group "20. 限流跨副本合账"
 
 # 这条性质**只能用两个真实进程验**：单进程里怎么测都测不出「各副本各算各的」。
 # 起第二个副本，与第一个共用同一个数据库，配置完全一致 —— 就是生产上
@@ -1009,7 +1053,7 @@ eq 0 "$(sql_count "SELECT count() FROM rate_limit WHERE endpoint = '/api/auth/me
 
 kill -9 "$APP2_PID" 2>/dev/null; APP2_PID=""
 
-group "20. 审计 / OIDC userinfo / 管理端剩余端点"
+group "21. 审计 / OIDC userinfo / 管理端剩余端点"
 
 # 这批端点此前只手工 curl 验过（当时还从中揪出过 security-report 的 500），
 # 一直没进自动化 = 没有回归保护。补上。
@@ -1091,7 +1135,7 @@ restart_app
 eq 200 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"plain@test.local","password":"CorrectHorse42!"}')" "被拒的调用没有改掉原密码"
 
-group "21. 不配第三方登录也能独立跑"
+group "22. 不配第三方登录也能独立跑"
 
 # 以前这四个凭证是硬必填，只用邮箱密码的部署被迫在配置里填 dummy ——
 # 而配置里的假数据一旦被当真就是事故。这组验「不填也能跑」。
@@ -1131,7 +1175,7 @@ has 'not enabled' "$(body)" "501 的说明是「本部署未启用」而非 OAut
 
 restart_app   # 交还给带 dummy 凭证的标准配置
 
-group "22. BFF 要走的那条路：confidential 客户端"
+group "23. BFF 要走的那条路：confidential 客户端"
 
 # 此前全部 OIDC 覆盖用的都是 public 客户端、换令牌不带 client_secret。
 # 而 SoulSeedOS 接入的实际形态是 BFF 持有 secret 的 confidential 客户端 ——
@@ -1235,7 +1279,7 @@ exchange "$(bff_code)" -H "Authorization: Basic ${BASIC}" \
     --data-urlencode "client_secret=${C_SECRET}" > /dev/null
 has 'invalid_request' "$(body)" "Basic 与表单同时带凭证 → invalid_request"
 
-group "23. 刷新令牌的轮换与复用检测（BFF 必须知道）"
+group "24. 刷新令牌的轮换与复用检测（BFF 必须知道）"
 
 # BFF 长期持有 refresh token，每 300 秒换一次 ID Token。这两条行为直接
 # 决定 BFF 该怎么写，写错的代价是把用户会话整个打掉。
@@ -1264,7 +1308,7 @@ NEW_ID="$(jget id_token)"
 eq 400 "$(refresh_with "$REFRESH")" "复用已轮换的刷新令牌 → 拒绝"
 eq 400 "$(refresh_with "$REFRESH2")" "复用检测触发后新令牌也失效（整个会话被吊销）"
 
-group "24. 安全回归：停用生效范围 / PKCE 下限 / 跨 provider 顶号"
+group "25. 安全回归：停用生效范围 / PKCE 下限 / 跨 provider 顶号"
 
 # 这一组的三条都对应**已实测复现过的缺陷**，且三条都曾经在这套用例全绿的情况下
 # 存在 —— 因为前面 24 组恰好没有在这些交界处取过样。所以它们不是"补充覆盖"，
@@ -1437,7 +1481,7 @@ eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('use
 
 kill -9 "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
-group "25. 回归：会话列表 / 审计窗口 / 验证信重发 / 回收"
+group "26. 回归：会话列表 / 审计窗口 / 验证信重发 / 回收"
 
 # 本组四条同样都对应实测复现过的缺陷，且都发生在前 24 组的取样盲区里。
 
@@ -1869,7 +1913,7 @@ req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
 eq 200 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"relock@test.local","password":"CorrectHorse42!"}')" "解锁后可以重新登录"
 
-group "26. 运行期无 panic"
+group "27. 运行期无 panic"
 
 
 

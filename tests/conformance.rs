@@ -1029,3 +1029,55 @@ fn h10_metadata_advertises_only_what_runtime_supports() {
             .unwrap_or(false);
     assert!(!advertises_plain, "不接受 plain 就不得在发现文档里声明它");
 }
+
+/// H11 · 全新实例必须能在不改数据库的前提下走到第一份身份
+///
+/// 法源: 03 §8「一个全新的 SoulAuth 实例，应该让开发者在**不直接修改数据库**
+/// 的情况下，从零走到第一份经过验证的 Actor 身份」
+/// 与 10 §4「Client Registration ≠ Direct Database Mutation」。
+///
+/// 此前存在死锁：注册 Client 需要 admin，而第一个 admin 只能手工写库。
+#[test]
+fn h11_fresh_instance_bootstraps_without_database_mutation() {
+    let sources = sources();
+    assert!(
+        sources.iter().any(|(f, _)| f == "routes/bootstrap.rs"),
+        "缺少引导路径 —— 全新实例无法在不改库的情况下建立第一个管理员"
+    );
+    let main = read("src/main.rs");
+    assert!(main.contains("/api/bootstrap"), "引导路由未挂载");
+    // 容器路径：文档要求开发者只需 Git + Docker + Compose。
+    for artifact in ["Dockerfile", "docker-compose.yml"] {
+        assert!(
+            root().join(artifact).exists(),
+            "缺少 {artifact} —— Quickstart 声明的容器路径不成立"
+        );
+    }
+}
+
+/// H12 · 引导门是一次性的，且不构成初始化状态的探测信道
+///
+/// 法源: 10 §4「Bootstrap Client ≠ Administrator」「Client Creation Order
+/// ≠ Administrative Authority」。
+///
+/// 结构判据：必须先判系统状态再验令牌。反过来的话，「令牌错」与「已初始化」
+/// 会返回不同状态码，一枚失效令牌就成了探测实例是否已初始化的信道。
+#[test]
+fn h12_bootstrap_gate_is_single_use_and_not_an_oracle() {
+    let bootstrap = read("src/routes/bootstrap.rs");
+    let admin_check = bootstrap
+        .find("admin_exists(&db)")
+        .expect("引导端点必须检查是否已存在管理员");
+    let token_check = bootstrap
+        .find("bootstrap.verify(")
+        .expect("引导端点必须校验令牌");
+    assert!(
+        admin_check < token_check,
+        "必须先判「是否已初始化」再验令牌 —— 顺序颠倒会让失效令牌变成探测信道"
+    );
+    // 令牌比对必须等时：引导窗口期内它就是整个实例的管理权。
+    assert!(
+        bootstrap.contains("constant_time_eq"),
+        "引导令牌比对必须是常量时间"
+    );
+}
