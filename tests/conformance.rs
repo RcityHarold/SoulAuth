@@ -785,3 +785,247 @@ fn g3_error_contract_is_stable() {
         "非 OIDC API 的错误体必须携带稳定的机器可读 `code`"
     );
 }
+
+// ═════════════════════ H. 30 篇公开文档补充的不变式 ═════════════════════
+// 法源: SoulAuth_Public_Documentation_Current_01-30
+//
+// Stage 0 首版从 3 份内部文档提炼了 34 条。30 篇公开文档（1307 条唯一不等式）
+// 校准后发现以下 10 条未被覆盖。其中 H8/H9/H10 防的不是代码缺陷，而是
+// **文档层面的过度声称** —— 它们同样会伤害一个开源项目的可信度。
+
+/// H1 · Retired Subject ≠ Reusable Subject
+///
+/// 法源: 06 §7「一个已经退役的 Subject 可以停止认证，但不能被静默重新分配
+/// 给另一个 Actor」。否则历史 Claims、Audit 与外部记录里的同一个 Subject，
+/// 会在不同时间指向不同主体。这是标识符完整性规则，不是数据保留策略。
+#[test]
+#[ignore = "V2 Stage 1 —— 无 subject_key，也无退役后禁止复用的约束"]
+fn h1_retired_subject_is_not_reusable() {
+    assert!(
+        field_exists(identity_root(), "subject_key"),
+        "缺少稳定 subject_key"
+    );
+    let all: String = sources().iter().map(|(_, b)| b.clone()).collect();
+    assert!(
+        all.contains("retired") || all.contains("Retired"),
+        "身份状态机缺少 Retired，无法表达「停止认证但保留标识符」"
+    );
+}
+
+/// H2 · Actor Identity ≠ Profile
+///
+/// 法源: 06 §6「Profile 描述 Actor，Subject 标识 Actor」。
+/// Display Name、Avatar、Locale 变化不得改变身份。
+#[test]
+#[ignore = "V2 Stage 1 —— user_profile 通过 user_id 挂在身份根上，无独立 actor 引用"]
+fn h2_actor_identity_is_not_profile() {
+    assert!(table_exists("user_profile") || table_exists("actor_profile"));
+    let profile = if table_exists("actor_profile") {
+        "actor_profile"
+    } else {
+        "user_profile"
+    };
+    assert!(
+        field_exists(profile, "actor_identity_id"),
+        "Profile 必须引用 ActorIdentity，而不是复用身份根主键"
+    );
+}
+
+/// H3 · Identity Binding ≠ Credential
+///
+/// 法源: 06 §3「外部 IdP 中 Human 使用的 Password、Passkey 或其它 Credential，
+/// 并不会因此成为 SoulAuth Actor Credential」。Binding 解析主体对应关系，
+/// Federated Authentication 验证本次外部认证结果 —— 两个问题。
+#[test]
+#[ignore = "V2 Stage 1/2 —— 无 credential 表，binding 与 credential 尚未分开"]
+fn h3_binding_is_not_credential() {
+    assert!(table_exists("credential"), "缺少 credential 表");
+    let binding = if table_exists("identity_binding") {
+        "identity_binding"
+    } else {
+        "identity_provider"
+    };
+    // 绑定表不得存放认证密材 —— 那等于把外部 Credential 复制进 SoulAuth。
+    for secret in ["password", "secret_hash", "credential_secret"] {
+        assert!(
+            !field_exists(binding, secret),
+            "{binding} 不得存放认证密材 `{secret}`"
+        );
+    }
+}
+
+/// H4 · Actor Credential ≠ Client Authentication Material
+///
+/// 法源: 06 §5 / 10 §5。Client Authentication 证明软件，
+/// Actor Authentication 证明 Human 或 AIActor。即使出现在同一次交互中，
+/// 也属于不同安全关系，生命周期互不牵连。
+#[test]
+fn h4_actor_credential_is_not_client_material() {
+    // 客户端密材存在 oidc_client 上，主体凭证不得与它同表。
+    assert!(field_exists("oidc_client", "client_secret_hash"));
+    let credential_table = if table_exists("credential") {
+        "credential"
+    } else {
+        identity_root()
+    };
+    assert_ne!(
+        credential_table, "oidc_client",
+        "Actor Credential 与 Client Authentication Material 不得共表"
+    );
+    assert!(
+        !field_exists("oidc_client", "actor_identity_id")
+            && !field_exists("oidc_client", "user_id"),
+        "oidc_client 不得持有主体引用 —— Client 不是 Actor 的凭证载体"
+    );
+}
+
+/// H5 · Registered Client ≠ Administrative Authority
+///
+/// 法源: 10 §4「Bootstrap Client ≠ Administrator」「Client Creation Order
+/// ≠ Administrative Authority」。第一个被创建的 Client 不因顺序获得任何权限。
+#[test]
+fn h5_registered_client_grants_no_authority() {
+    // 客户端表不得携带角色/权限字段。
+    let fields = fields_of("oidc_client");
+    for authority in ["role", "role_id", "permissions", "is_admin"] {
+        assert!(
+            !fields.iter().any(|f| f == authority),
+            "oidc_client 不得携带 `{authority}` —— 注册 Client 不产生管理资格"
+        );
+    }
+}
+
+/// H6 · ID Token ≠ API Access Token
+///
+/// 法源: 全套文档出现 9 次，跨 12/13/18/19/21 五篇。
+/// ID Token 表达 Authentication Event 与 Identity Claims，
+/// 不得被当作普通 API Access Token 使用。
+///
+/// 结构判据：两者必须由不同签发路径产出，且 ID Token 不得进入
+/// access token 的校验通路。
+#[test]
+fn h6_id_token_is_not_an_access_token() {
+    let oidc = read("src/services/oidc.rs");
+    assert!(
+        oidc.contains("fn generate_id_token"),
+        "ID Token 应有独立签发路径"
+    );
+    // access token 走库查（不透明串），ID Token 走签名 —— 两条通路不得互换。
+    assert!(
+        oidc.contains("fn get_access_token"),
+        "Access Token 应有独立校验路径"
+    );
+    assert_absent(
+        hits_any(&["decode::<IdTokenClaims>(access_token"]),
+        "H6: 不得把 Access Token 当 ID Token 解",
+    );
+}
+
+/// H7 · Claims 必须经过 Purpose-bound Projection
+///
+/// 法源: 26「Claims必须经过 Purpose-bound Projection」。
+///
+/// 校准中发现的真实缺陷：`generate_id_token` 此前没有 `scope` 参数，
+/// 无条件下发 email / email_verified / preferred_username，
+/// 而同一台服务器的 UserInfo 是裁剪的。已修复为共用 `ClaimDisclosure`。
+#[test]
+fn h7_claims_are_purpose_bound() {
+    let oidc = read("src/services/oidc.rs");
+    assert!(
+        oidc.contains("struct ClaimDisclosure"),
+        "身份 claim 的披露判定必须收在一处，否则两条通路会再次分叉"
+    );
+    // 两条生产通路都必须经过它。数全文件出现次数是不够的 —— 那样即使生产代码
+    // 一次都不用，光靠测试里的调用也能让断言通过。这里按函数体分别查。
+    for func in ["fn generate_id_token", "pub async fn get_userinfo"] {
+        let start = oidc.find(func).unwrap_or_else(|| panic!("找不到 {func}"));
+        let body_end = oidc[start..]
+            .find("\n    }")
+            .map(|i| start + i)
+            .unwrap_or(oidc.len());
+        assert!(
+            oidc[start..body_end].contains("ClaimDisclosure::from_scope"),
+            "{func} 没有经过统一的 claim 披露判定"
+        );
+    }
+}
+
+/// H8 · Operational Log ≠ Audit Record
+///
+/// 法源: 15/16/19。应用日志用于运维观测，审计表才是权威安全记录。
+/// 判据：审计不得只写日志宏了事。
+#[test]
+fn h8_audit_is_not_merely_logging() {
+    let logger = read("src/services/audit_logger.rs");
+    assert!(
+        logger.contains("AuditEvent"),
+        "审计必须落结构化事件，而不是 tracing 宏"
+    );
+    assert!(
+        table_exists("user_activity") || table_exists("audit_event"),
+        "审计必须有持久化表"
+    );
+}
+
+/// H9 · Tamper-evident ≠ Tamper-proof
+///
+/// 法源: 19/28「目标是让关键 Audit History 的异常修改能够被检测和验证，
+/// 而不是宣称任何数字系统拥有绝对不可篡改性」。
+///
+/// 这一条约束的是**措辞**：代码与文档都不得使用 tamper-proof / immutable
+/// 这类绝对化表述。
+#[test]
+fn h9_no_absolute_immutability_claims() {
+    assert_absent(
+        hits_any(&[
+            "tamper-proof",
+            "tamper_proof",
+            "immutable audit",
+            "unalterable",
+        ]),
+        "H9: 审计的保证是可检测（tamper-evident），不是不可篡改（tamper-proof）",
+    );
+}
+
+/// H10 · Implemented ≠ Supported，内部语义 ≠ RFC 符合
+///
+/// 法源: 22「Internal Revocation Semantics ≠ RFC 7009 Support」
+/// 「Internal / Online Token Lookup ≠ RFC 7662 Introspection」
+/// 「SoulAuth issues Access Tokens ≠ RFC 9068 Conformance」。
+///
+/// 判据：没有实现对应 wire contract 时，发现文档不得 Advertise 它。
+/// 这正是 26「Metadata必须反映真实Runtime」的可执行形式。
+#[test]
+fn h10_metadata_advertises_only_what_runtime_supports() {
+    let oidc = read("src/services/oidc.rs");
+
+    // 发现文档若声明 introspection / revocation 端点，必须真有实现。
+    for (advertised, implemented) in [
+        ("introspection_endpoint", "fn introspect"),
+        ("revocation_endpoint", "fn revoke_token_endpoint"),
+    ] {
+        if oidc.contains(advertised) {
+            assert!(
+                oidc.contains(implemented),
+                "发现文档声明了 `{advertised}`，但没有对应实现 —— \
+                 内部有类似动作不等于支持该标准端点"
+            );
+        }
+    }
+
+    // 声明的 code_challenge_methods 必须逐个真的被接受。
+    if oidc.contains("\"S256\".to_string()") {
+        assert!(
+            oidc.contains("Some(\"S256\")"),
+            "声明支持 S256 就必须在 authorize 处真的接受它"
+        );
+    }
+    // 反向：不接受 plain，就不得声明 plain。
+    let advertises_plain = oidc.contains("code_challenge_methods_supported")
+        && oidc
+            .split("code_challenge_methods_supported")
+            .nth(1)
+            .map(|tail| tail[..tail.len().min(200)].contains("plain"))
+            .unwrap_or(false);
+    assert!(!advertises_plain, "不接受 plain 就不得在发现文档里声明它");
+}

@@ -35,6 +35,38 @@ pub struct OidcService {
     signing_key: Arc<OidcSigningKey>,
 }
 
+/// 身份 claim 的披露判定。
+///
+/// # 为什么要收成一个类型
+///
+/// ID Token 与 UserInfo 输出的是同一批 claim，因此必须服从同一套披露规则。
+/// 此前两条通路各写各的：UserInfo 按 scope 裁剪，`generate_id_token` 却连
+/// `scope` 参数都没有，无条件放 `email` / `email_verified` /
+/// `preferred_username`。于是只申请 `openid` 的客户端，从 UserInfo 拿不到邮箱，
+/// 从 ID Token 却拿得到 —— 同一台服务器，同一份 claim，两套规则。
+///
+/// 把判定收在这里，两条通路就不可能再分叉：想改规则只有一个地方可改。
+///
+/// 注意它只管**身份属性**。`sub` / `iss` / `aud` / `exp` / `iat` /
+/// `auth_time` / `sid` 是协议骨架，任何 scope 下都必须存在，不归它管。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaimDisclosure {
+    /// `email` scope：放行 `email` 与 `email_verified`。
+    email: bool,
+    /// `profile` scope：放行 `preferred_username`、`updated_at` 等档案属性。
+    profile: bool,
+}
+
+impl ClaimDisclosure {
+    fn from_scope(scope: &str) -> Self {
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        Self {
+            email: scopes.contains(&"email"),
+            profile: scopes.contains(&"profile"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OidcConfiguration {
     pub issuer: String,
@@ -453,9 +485,13 @@ impl OidcService {
         };
 
         // 生成 ID 令牌（如果 scope 包含 openid）。用户在上面已经取过并校验过状态。
+        //
+        // `scope` 必须传下去：它不只决定**发不发** ID Token，还决定里面**放什么**。
+        // 此前只用它判断了前者，于是只申请 `openid` 的客户端照样拿到邮箱与用户名 ——
+        // 而同一台服务器的 UserInfo 是按 scope 裁剪的。同一份 claim 两套披露规则。
         let id_token = if scope.split_whitespace().any(|value| value == "openid") {
             Some(
-                self.generate_id_token(client, &user, nonce, auth_session_ref)
+                self.generate_id_token(client, &user, nonce, auth_session_ref, scope)
                     .await?,
             )
         } else {
@@ -479,12 +515,19 @@ impl OidcService {
     /// 链路都要求 `auth_session_ref`，缺了下游只能编或留空，两者都比失败更糟。
     ///
     /// 影响：升级前签发的刷新令牌没有该字段，首次刷新会失败，用户需重新登录一次。
+    /// 签发 ID Token。
+    ///
+    /// 身份 claim 的披露由 [`ClaimDisclosure`] 判定，与 UserInfo 同一处口径。
+    ///
+    /// `sub`、`iss`、`aud`、`exp`、`iat`、`auth_time`、`sid` 是协议骨架，
+    /// 不受 scope 约束；`email` / `profile` 这类身份属性受约束。
     async fn generate_id_token(
         &self,
         client: &OidcClient,
         user: &User,
         nonce: Option<&str>,
         auth_session_ref: Option<&str>,
+        scope: &str,
     ) -> Result<String> {
         let sid = auth_session_ref
             .map(str::trim)
@@ -494,6 +537,8 @@ impl OidcService {
 
         let now = Utc::now().timestamp();
         let exp = now + client.id_token_lifetime;
+
+        let disclose = ClaimDisclosure::from_scope(scope);
 
         let claims = IdTokenClaims {
             iss: self.issuer(),
@@ -506,10 +551,10 @@ impl OidcService {
             auth_time: user.last_login_at.unwrap_or(now),
             sid,
             nonce: nonce.map(|n| n.to_string()),
-            email: Some(user.email.clone()),
-            email_verified: Some(user.is_email_verified),
+            email: disclose.email.then(|| user.email.clone()),
+            email_verified: disclose.email.then_some(user.is_email_verified),
             name: None, // 需要从用户档案获取
-            preferred_username: Some(user.username.clone()),
+            preferred_username: disclose.profile.then(|| user.username.clone()),
             profile: None,
             picture: None,
         };
@@ -554,20 +599,19 @@ impl OidcService {
 
         // 停用之后，此前签发的 access token 不该还能换出身份。
         let user = self.load_active_user(&token.user_id).await?;
-        let include_email = scopes.contains(&"email");
-        let include_profile = scopes.contains(&"profile");
+        let disclose = ClaimDisclosure::from_scope(&token.scope);
 
         Ok(UserInfoResponse {
             sub: crate::utils::record_id::record_id_key_to_string(
                 user.id.as_ref().ok_or_else(|| anyhow!("User has no id"))?,
             ),
-            email: include_email.then(|| user.email.clone()),
-            email_verified: include_email.then_some(user.is_email_verified),
+            email: disclose.email.then(|| user.email.clone()),
+            email_verified: disclose.email.then_some(user.is_email_verified),
             name: None, // 需要从用户档案获取
-            preferred_username: include_profile.then(|| user.username.clone()),
+            preferred_username: disclose.profile.then(|| user.username.clone()),
             profile: None,
             picture: None,
-            updated_at: include_profile.then_some(user.updated_at),
+            updated_at: disclose.profile.then_some(user.updated_at),
         })
     }
 
@@ -1180,5 +1224,44 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn openid_alone_discloses_no_identity_attributes() {
+        // 这是回归测试：ID Token 曾经无条件放 email 与 preferred_username，
+        // 而 UserInfo 是裁剪的。只申请 openid 的客户端不该拿到任何身份属性。
+        let d = ClaimDisclosure::from_scope("openid");
+        assert!(!d.email);
+        assert!(!d.profile);
+    }
+
+    #[test]
+    fn each_scope_opens_only_its_own_claims() {
+        let d = ClaimDisclosure::from_scope("openid email");
+        assert!(d.email);
+        assert!(!d.profile, "email scope 不得顺带放行档案属性");
+
+        let d = ClaimDisclosure::from_scope("openid profile");
+        assert!(!d.email, "profile scope 不得顺带放行邮箱");
+        assert!(d.profile);
+
+        let d = ClaimDisclosure::from_scope("openid email profile");
+        assert!(d.email);
+        assert!(d.profile);
+    }
+
+    #[test]
+    fn scope_matching_is_exact_and_whitespace_tolerant() {
+        // 子串匹配会让 `emailish` 或 `not-profile` 意外放行。
+        assert!(!ClaimDisclosure::from_scope("openid emailish").email);
+        assert!(!ClaimDisclosure::from_scope("openid xprofile").profile);
+        // scope 是空格分隔的列表，多余空白不应改变判定。
+        let d = ClaimDisclosure::from_scope("  openid   email  ");
+        assert!(d.email);
+        assert!(!d.profile);
+        // 空 scope 什么都不放行。
+        let d = ClaimDisclosure::from_scope("");
+        assert!(!d.email);
+        assert!(!d.profile);
     }
 }

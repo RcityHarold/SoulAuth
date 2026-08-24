@@ -411,6 +411,16 @@ p='$1'.split('.')[1]; p+='='*(-len(p)%4)
 print(json.loads(base64.urlsafe_b64decode(p)).get('$2',''))" 2>/dev/null
 }
 eq "$EXPECT_SID" "$(claim "$ID_TOKEN" sid)" "ID Token 的 sid 等于认证会话主键"
+
+# 这条流程申请的是 scope=openid（见上面的 AUTHZ）。ID Token 曾经无条件放
+# email 与 preferred_username，而同一台服务器的 UserInfo 是按 scope 裁剪的 ——
+# 同一份 claim 两套披露规则。这里把「只申请 openid 就什么身份属性都不给」钉死。
+eq "" "$(claim "$ID_TOKEN" email)"              "scope=openid 的 ID Token 不含 email"
+eq "" "$(claim "$ID_TOKEN" email_verified)"     "scope=openid 的 ID Token 不含 email_verified"
+eq "" "$(claim "$ID_TOKEN" preferred_username)" "scope=openid 的 ID Token 不含 preferred_username"
+# 协议骨架不受 scope 约束，必须始终存在。
+[ -n "$(claim "$ID_TOKEN" sub)" ] && ok "scope=openid 的 ID Token 仍有 sub" ||
+    bad "scope=openid 的 ID Token 仍有 sub" "sub 为空"
 eq 300 "$(( $(claim "$ID_TOKEN" exp) - $(claim "$ID_TOKEN" iat) ))" "ID Token 寿命为 300 秒"
 has 'RS256' "$(python3 -c "
 import base64,json
@@ -1307,9 +1317,17 @@ req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode "client_id=${SC_ID}" --data-urlencode "client_secret=${SC_SECRET}" \
     --data-urlencode "code_verifier=${SV}" > /dev/null
 SUSP_AT="$(jget access_token)"; SUSP_RT="$(jget refresh_token)"
+# 这条流程申请的是 scope=openid+email，与前面 scope=openid 那条构成对照：
+# 申请了才给，没申请不给，且 email scope 不得顺带放行档案属性。
+# 必须在下一个请求之前取 —— jget 读的是最后一次响应。
+SUSP_IDT="$(jget id_token)"
 [ -n "$SUSP_AT" ] && [ -n "$SUSP_RT" ] && ok "停用前换到 OIDC 令牌" ||
     bad "停用前换到 OIDC 令牌" "$(body)"
 eq 200 "$(req GET /api/oidc/userinfo -H "Authorization: Bearer ${SUSP_AT}")" "停用前 userinfo 可用"
+
+[ -n "$(claim "$SUSP_IDT" email)" ] && ok "scope=openid+email 的 ID Token 含 email" ||
+    bad "scope=openid+email 的 ID Token 含 email" "email 为空"
+eq "" "$(claim "$SUSP_IDT" preferred_username)" "email scope 不放行 preferred_username"
 
 eq 200 "$(req PUT "/api/users/users/${SUSP_UID}/status" -H "Authorization: Bearer ${TOK_ADMIN}" \
     -H 'Content-Type: application/json' -d '{"status":"Suspended","reason":"regression"}')" \
