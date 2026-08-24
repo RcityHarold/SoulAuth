@@ -231,13 +231,21 @@ pub async fn admin_exists(db: &Database) -> Result<bool, AuthError> {
     // `role_id` 是 record 类型。经 JSON 绑定传入的 record ID 会退化成字符串，
     // 于是 `role_id = $x` 恒不成立 —— 这个坑在本仓多处都有注释。用
     // `type::record()` 在库内构造，两侧类型一致。
-    let sql = "SELECT VALUE count() FROM user_role \
+    //
+    // 取值走 `serde_json::Value` 而不是直接反序列化成 `i64`：这是本仓既有
+    // count 查询的统一写法（见 `services::audit` 与 `routes::ops`）。
+    let sql = "SELECT count() AS count FROM user_role \
                WHERE role_id = type::record('role', 'admin') GROUP ALL";
-    let counts: Vec<i64> = db
+    let rows: Vec<serde_json::Value> = db
         .query_take0_vec_no_bind("bootstrap_admin_exists", sql)
         .await
         .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
-    Ok(counts.first().copied().unwrap_or(0) > 0)
+    let count = rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(|c| c.as_i64())
+        .unwrap_or(0);
+    Ok(count > 0)
 }
 
 #[cfg(test)]

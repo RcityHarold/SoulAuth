@@ -1143,7 +1143,8 @@ fn generate_random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        constant_time_eq, hash_client_secret, verify_client_secret_hash, OidcService,
+        constant_time_eq, hash_client_secret, verify_client_secret_hash, ClaimDisclosure,
+        OidcService,
     };
     use base64::{engine::general_purpose, Engine as _};
     use sha2::{Digest, Sha256};

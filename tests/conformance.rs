@@ -82,7 +82,7 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
             if let Ok(body) = fs::read_to_string(&path) {
                 let rel = path
                     .strip_prefix(base)
-                    .unwrap_or_else(|_| path.as_path())
+                    .unwrap_or(path.as_path())
                     .to_string_lossy()
                     .replace('\\', "/");
                 out.push((rel, body));
@@ -567,22 +567,70 @@ fn e3_soulauth_does_not_issue_receipts() {
 /// E4 · 消费方不得直接读 SoulAuth 数据库
 ///
 /// 跨仓断言：OS 侧适配器只应取 JWKS 并本地验签，不得建立数据库连接。
-/// 同级目录不存在时跳过——文档仓库/CI 可以独立构建。
+/// 同级目录不存在时跳过——文档仓库 / CI 可以独立构建。
+///
+/// 判据是**依赖声明**而不是源码文本。首版做裸文本搜索，结果被
+/// `jwks_http.rs` 里一句解释依赖选型的注释（"surrealdb 的 protocol-http
+/// feature 带进来的"）判成违规。连不上数据库的充分条件是根本没有数据库
+/// 依赖，查 Cargo.toml 的 `[dependencies]` 段既准确又不受注释影响。
 #[test]
 fn e4_consumers_do_not_read_the_database() {
-    let adapter = root().join("../SoulSeedOS/crates/adapters/soulseed-adapter-soulauth/src");
+    let adapter = root().join("../SoulSeedOS/crates/adapters/soulseed-adapter-soulauth");
     if !adapter.exists() {
         eprintln!("跳过 E4：未找到 OS 适配器（跨仓，非本仓构建前提）");
         return;
     }
-    let mut bodies = Vec::new();
-    walk(&adapter, &adapter, &mut bodies);
-    for (file, body) in bodies {
-        for forbidden in ["surrealdb", "Surreal::", "DATABASE_URL"] {
-            assert!(
-                !body.contains(forbidden),
-                "适配器 {file} 出现 `{forbidden}` —— 消费方不得直连 SoulAuth 数据库"
+
+    let manifest = fs::read_to_string(adapter.join("Cargo.toml")).expect("适配器 Cargo.toml 可读");
+    // 只看 [dependencies] 段，且逐行剥掉 `#` 注释。
+    let deps = manifest
+        .split("[dependencies]")
+        .nth(1)
+        .unwrap_or("")
+        .split("\n[")
+        .next()
+        .unwrap_or("");
+    for line in deps.lines() {
+        let code = match line.find('#') {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        let name = code.split(['=', ' ', '.']).next().unwrap_or("").trim();
+        for db in [
+            "surrealdb",
+            "sqlx",
+            "tokio-postgres",
+            "diesel",
+            "rusqlite",
+            "mysql",
+        ] {
+            assert_ne!(
+                name, db,
+                "适配器声明了数据库依赖 `{db}` —— 消费方不得直连 SoulAuth 数据库"
             );
+        }
+    }
+
+    // 再确认源码里没有真正的连接调用（剥注释后）。
+    let mut bodies = Vec::new();
+    let src = adapter.join("src");
+    walk(&src, &src, &mut bodies);
+    assert!(
+        !bodies.is_empty(),
+        "适配器 src/ 下没有源码 —— 断言失去作用域"
+    );
+    for (file, body) in bodies {
+        for line in body.lines() {
+            let code = match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            };
+            for call in ["Surreal::new", "Surreal::init", "connect("] {
+                assert!(
+                    !code.contains(call),
+                    "适配器 {file} 出现 `{call}` —— 消费方不得直连数据库"
+                );
+            }
         }
     }
 }
@@ -610,8 +658,12 @@ fn e5_public_contract_leaks_no_internal_schema() {
 /// E6 · `canonical_actor_ref` 不得默认暴露给第三方 Client
 ///
 /// 它属于受控 Integration Claim，不是公共身份默认字段。
+///
+/// 当前是**空成立**：还没有 `canonical_actor_ref` 这个 claim。之所以不标
+/// `#[ignore]`，是因为它现在就在起守卫作用 —— Stage 5 有人把这个字段加进
+/// ID Token 而忘了加 Client 级开关时，这条会立刻变红。一个「等你违反才有话说」
+/// 的断言，正是应该常驻的那种。
 #[test]
-#[ignore = "V2 Stage 5 —— 尚无 canonical_actor_ref，该不变式在绑定落地后才可测"]
 fn e6_canonical_actor_ref_is_not_a_default_claim() {
     let oidc = read("src/services/oidc.rs");
     let in_claims = oidc.contains("canonical_actor_ref");
