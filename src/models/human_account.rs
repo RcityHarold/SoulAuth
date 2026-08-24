@@ -24,14 +24,6 @@
 //!
 //! 当前它们仍暂留在 V1 `user` 表上，Stage 2 收口到 Credential Domain。
 
-// Stage 1 建立身份根对象，写路径在 Stage 2 才切过来 —— 在那之前这些类型
-// 没有生产调用方，dead_code 会让 CI 的 `clippy -D warnings` 挂掉。
-//
-// 这个 allow 是**临时**的：Stage 2 接线后必须删掉。留着它等于永久关掉了
-// 「这个类型还有没有人用」这道闸门，而本仓库正是靠 clippy 顶住 dead code 的
-// （rustc 自己对本 crate 的 dead_code 并不总是报警）。
-#![allow(dead_code)]
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;

@@ -19,14 +19,6 @@
 //! GA-03 §3 明确：Canonical Semantic Label 不规定代码标识符。这里的类型名
 //! 与语义标签一致只是因为读起来顺，不是规范要求。
 
-// Stage 1 建立身份根对象，写路径在 Stage 2 才切过来 —— 在那之前这些类型
-// 没有生产调用方，dead_code 会让 CI 的 `clippy -D warnings` 挂掉。
-//
-// 这个 allow 是**临时**的：Stage 2 接线后必须删掉。留着它等于永久关掉了
-// 「这个类型还有没有人用」这道闸门，而本仓库正是靠 clippy 顶住 dead code 的
-// （rustc 自己对本 crate 的 dead_code 并不总是报警）。
-#![allow(dead_code)]
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
@@ -48,14 +40,6 @@ pub enum ActorKind {
     AiActor,
 }
 
-impl ActorKind {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            ActorKind::Human => "human",
-            ActorKind::AiActor => "ai_actor",
-        }
-    }
-}
 
 /// 这个身份通过什么受控来源进入 SoulAuth。
 ///
@@ -74,15 +58,6 @@ pub enum IdentitySource {
     External,
 }
 
-impl IdentitySource {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            IdentitySource::Local => "local",
-            IdentitySource::Soulseed => "soulseed",
-            IdentitySource::External => "external",
-        }
-    }
-}
 
 /// 身份的生命周期状态。
 ///
@@ -186,18 +161,29 @@ mod tests {
     #[test]
     fn wire_values_are_snake_case() {
         // 这是对外契约：改了会让已经落库的记录反序列化失败。
-        assert_eq!(ActorKind::Human.as_str(), "human");
-        assert_eq!(ActorKind::AiActor.as_str(), "ai_actor");
-        assert_eq!(IdentitySource::Local.as_str(), "local");
-        assert_eq!(ActorStatus::Retired.as_str(), "retired");
-
+        // 直接验 serde 而不是 as_str()：落库与出网走的是 serde，
+        // 它才是真正的对外契约。
+        assert_eq!(serde_json::to_string(&ActorKind::Human).unwrap(), "\"human\"");
         assert_eq!(
             serde_json::to_string(&ActorKind::AiActor).unwrap(),
             "\"ai_actor\""
         );
         assert_eq!(
+            serde_json::to_string(&IdentitySource::Local).unwrap(),
+            "\"local\""
+        );
+        assert_eq!(
+            serde_json::to_string(&ActorStatus::Retired).unwrap(),
+            "\"retired\""
+        );
+        // 往返：改了 wire 值会让已经落库的记录读不回来。
+        assert_eq!(
             serde_json::from_str::<ActorKind>("\"ai_actor\"").unwrap(),
             ActorKind::AiActor
+        );
+        assert_eq!(
+            serde_json::from_str::<ActorStatus>("\"suspended\"").unwrap(),
+            ActorStatus::Suspended
         );
     }
 

@@ -2,6 +2,7 @@ pub mod audit;
 pub mod audit_logger;
 pub mod database;
 pub mod auth;
+pub mod identity;
 pub mod auth_cache;
 pub mod email;
 pub mod oauth;

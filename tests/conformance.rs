@@ -1276,3 +1276,69 @@ fn i3_permission_registry_matches_enforcement() {
         enforced_but_unseeded
     );
 }
+
+/// I4 · 身份根建成后必须真的被接线
+///
+/// Stage 1 的三个新模块带着临时的 `#![allow(dead_code)]`：建对象与切写路径
+/// 分两步做，中间那段时间它们没有生产调用方，而 CI 跑 `clippy -D warnings`。
+///
+/// 问题是这个 allow 一旦留下就很难被想起来 —— 它等于永久关掉了「这个类型还
+/// 有没有人用」那道闸门，而本仓库正是靠 clippy 顶住 dead code
+/// （rustc 对本 crate 的 dead_code 并不总报警，实测过）。
+///
+/// 所以这里把两件事绑在一起：**只要还挂着 allow，就必须尚未接线；一旦接线，
+/// allow 就必须删掉。** 两个方向都会红，中间状态不存在。
+#[test]
+fn i4_identity_root_allow_is_removed_once_wired() {
+    let modules = [
+        "src/models/actor_identity.rs",
+        "src/models/human_account.rs",
+        "src/models/identity_binding.rs",
+    ];
+    let still_allowed: Vec<&str> = modules
+        .iter()
+        .copied()
+        .filter(|m| read(m).contains("#![allow(dead_code)]"))
+        .collect();
+
+    // 生产代码（models 之外）是否已经在用这些类型。
+    let wired: Vec<String> = sources()
+        .iter()
+        .filter(|(f, _)| !f.starts_with("models/"))
+        .filter(|(_, b)| {
+            let production = match b.find("#[cfg(test)]") {
+                Some(i) => &b[..i],
+                None => &b[..],
+            };
+            // 必须逐行剥掉注释：这几个词大量出现在讲边界的注释里
+            // （例如 record_id.rs 解释「接口期待 ActorIdentity Reference」），
+            // 裸 contains 会把注释当成接线。
+            production.lines().any(|line| {
+                let code = match line.find("//") {
+                    Some(i) => &line[..i],
+                    None => line,
+                };
+                code.contains("ActorIdentity")
+                    || code.contains("HumanAccount")
+                    || code.contains("IdentityBinding")
+            })
+        })
+        .map(|(f, _)| f.clone())
+        .collect();
+
+    if wired.is_empty() {
+        assert!(
+            !still_allowed.is_empty(),
+            "身份根尚未接线，却已经没有 allow(dead_code) —— \
+             要么 clippy 会红，要么这个断言的前提变了"
+        );
+    } else {
+        assert!(
+            still_allowed.is_empty(),
+            "身份根已在 {:?} 接线，但 {:?} 仍挂着临时的 #![allow(dead_code)] —— \
+             该删了，否则 dead code 闸门一直是关的",
+            wired,
+            still_allowed
+        );
+    }
+}

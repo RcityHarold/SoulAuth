@@ -464,6 +464,48 @@ impl UserManagementService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
+        // 同步到身份根。
+        //
+        // Stage 2 是过渡期，账号状态存在两处：V1 的 `user.account_status`
+        // 与新身份根的 `actor_identity.status`。只改一处的话，停用会在另一条
+        // 通路上完全不生效 —— 而这正是我们早先修过的那类缺陷（状态改了，
+        // 但 refresh token 还在无限换新）。
+        //
+        // 映射：Active → active，其余一律 suspended。V1 的 Inactive / Deleted
+        // 与身份根的 Retired 语义不同（Retired 还带「subject 不得复用」这条
+        // 约束），过渡期不做这个等价，宁可保守。
+        if let Some(actor_id) = users[0].subject_id.clone() {
+            use crate::models::actor_identity::{ActorIdentity, ActorStatus};
+            let actor_address = format!(
+                "actor_identity:{}",
+                crate::utils::record_id::record_id_key_to_string(&actor_id)
+            );
+            match self
+                .db
+                .find_record_by_field::<ActorIdentity>("actor_identity", "id", &actor_address)
+                .await
+            {
+                Ok(Some(actor)) => {
+                    let target = if request.status == crate::models::user::AccountStatus::Active {
+                        ActorStatus::Active
+                    } else {
+                        ActorStatus::Suspended
+                    };
+                    let identity = crate::services::identity::IdentityService::new(self.db.clone());
+                    if let Err(e) = identity.set_status(&actor, target).await {
+                        // 这里不能只记日志就放过：V1 那侧已经写成新状态，
+                        // 身份根还停在旧状态，两处不一致比两处都是旧的更危险。
+                        error!("Failed to sync actor_identity status: {e:?}");
+                        return Err(e);
+                    }
+                }
+                // subject_id 指向 V1 的 subject 表，或身份根已被删除 ——
+                // 都留给 Stage 3 的迁移处理。
+                Ok(None) => {}
+                Err(e) => error!("Failed to load actor for status sync: {e:?}"),
+            }
+        }
+
         // 记录活动
         self.log_user_activity(
             user_id,

@@ -28,14 +28,6 @@
 //! Binding 共享这一个模型，区别只在 [`BindingType`]。GA-01 §18 明确禁止
 //! 长出一个 `CanonicalActorBinding` 第二本体。
 
-// Stage 1 建立身份根对象，写路径在 Stage 2 才切过来 —— 在那之前这些类型
-// 没有生产调用方，dead_code 会让 CI 的 `clippy -D warnings` 挂掉。
-//
-// 这个 allow 是**临时**的：Stage 2 接线后必须删掉。留着它等于永久关掉了
-// 「这个类型还有没有人用」这道闸门，而本仓库正是靠 clippy 顶住 dead code 的
-// （rustc 自己对本 crate 的 dead_code 并不总是报警）。
-#![allow(dead_code)]
-
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use surrealdb::types::RecordId as Thing;
@@ -52,14 +44,6 @@ pub enum BindingType {
     Canonical,
 }
 
-impl BindingType {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            BindingType::Federated => "federated",
-            BindingType::Canonical => "canonical",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
 #[serde(rename_all = "snake_case")]
@@ -70,15 +54,6 @@ pub enum VerificationState {
     Revoked,
 }
 
-impl VerificationState {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            VerificationState::Verified => "verified",
-            VerificationState::Pending => "pending",
-            VerificationState::Revoked => "revoked",
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct IdentityBinding {
@@ -156,7 +131,18 @@ mod tests {
 
     #[test]
     fn wire_values_are_stable() {
-        assert_eq!(BindingType::Canonical.as_str(), "canonical");
-        assert_eq!(VerificationState::Revoked.as_str(), "revoked");
+        // 验 serde：落库走的是它。
+        assert_eq!(
+            serde_json::to_string(&BindingType::Canonical).unwrap(),
+            "\"canonical\""
+        );
+        assert_eq!(
+            serde_json::to_string(&VerificationState::Revoked).unwrap(),
+            "\"revoked\""
+        );
+        assert_eq!(
+            serde_json::from_str::<BindingType>("\"federated\"").unwrap(),
+            BindingType::Federated
+        );
     }
 }

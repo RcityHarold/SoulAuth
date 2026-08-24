@@ -10,8 +10,8 @@ use crate::{
         user::{AuthResponse, CreateUserRequest, User},
     },
     services::{
-        auth_cache::AuthCache, database::Database, email::EmailService, mfa::MfaService,
-        oauth::OAuthService,
+        auth_cache::AuthCache, database::Database, email::EmailService, identity::IdentityService,
+        mfa::MfaService, oauth::OAuthService,
     },
     utils::validation::{validate_email, validate_password, validate_username},
 };
@@ -65,7 +65,6 @@ impl RequestContext {
             user_agent,
         }
     }
-
 }
 
 /// 一次成功签发的会话。
@@ -95,6 +94,12 @@ pub struct AuthService {
     mfa_service: MfaService,
     /// 用于在会话被吊销时立刻同步清掉鉴权缓存。
     auth_cache: Arc<AuthCache>,
+    /// Actor Identity 的创建与解析。
+    ///
+    /// 身份根从 `user` 换成 `actor_identity` 之后，「建一个主体」要同时落
+    /// 两条记录并保证 subject_key 唯一 —— 收口在这里，而不是让每个流程
+    /// 各写一遍。
+    identity: IdentityService,
 }
 
 fn new_thing(table: &str) -> Thing {
@@ -149,6 +154,7 @@ impl AuthService {
         let email_service = EmailService::new(config.clone());
         let oauth_service = OAuthService::new(config.clone())?;
         let mfa_service = MfaService::new(db.clone(), config.clone())?;
+        let identity = IdentityService::new(db.clone());
         Ok(Self {
             db,
             config,
@@ -156,6 +162,7 @@ impl AuthService {
             oauth_service,
             mfa_service,
             auth_cache,
+            identity,
         })
     }
 
@@ -200,7 +207,9 @@ impl AuthService {
     async fn ensure_username_available(&self, username: &str) -> Result<String> {
         let normalized = Self::normalize_username(username);
         if normalized.is_empty() {
-            return Err(AuthError::ValidationError("Username is required".to_string()));
+            return Err(AuthError::ValidationError(
+                "Username is required".to_string(),
+            ));
         }
 
         if self
@@ -289,11 +298,64 @@ impl AuthService {
         self.create_session_with_metadata(user, ctx).await
     }
 
+    /// 补上缺失的 identity_binding。
+    ///
+    /// 过渡期专用：Stage 1 之前建立的账号只有 V1 的 `identity_provider` 关联，
+    /// 没有新的 `identity_binding`。每次这类账号登录时顺手补一条，
+    /// Stage 3 迁移时就不必再扫一遍历史数据。
+    ///
+    /// 失败只记日志：这是回填，不是登录的前置条件 —— 让它挡住登录，
+    /// 等于用一个数据整理动作换来一次拒绝服务。
+    async fn backfill_binding(&self, user: &User, provider: &str, provider_subject: &str) {
+        match self
+            .identity
+            .resolve_binding(provider, provider_subject)
+            .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                let Some(actor_id) = user.subject_id.clone() else {
+                    return;
+                };
+                let actor_address = format!("actor_identity:{}", record_key(&actor_id));
+                match self
+                    .db
+                    .find_record_by_field::<crate::models::actor_identity::ActorIdentity>(
+                        "actor_identity",
+                        "id",
+                        &actor_address,
+                    )
+                    .await
+                {
+                    Ok(Some(actor)) => {
+                        if let Err(e) = self
+                            .identity
+                            .bind_external(&actor, provider, provider_subject)
+                            .await
+                        {
+                            error!("Failed to backfill identity binding: {e:?}");
+                        }
+                    }
+                    // subject_id 指向 V1 的 subject 表（Stage 1 之前的账号），
+                    // 或者干脆没有 —— 这两种都留给 Stage 3 的迁移处理。
+                    Ok(None) => {}
+                    Err(e) => error!("Failed to load actor for binding backfill: {e:?}"),
+                }
+            }
+            Err(e) => error!("Failed to check existing binding: {e:?}"),
+        }
+    }
+
     async fn find_or_create_oauth_user(&self, user_info: OAuthUserInfo) -> Result<User> {
         debug!(
             "Starting find_or_create_oauth_user for provider: {}",
             user_info.provider
         );
+
+        // 下面三条分支都要用到这两个值，而 V1 的 IdentityProvider 构造会把
+        // 它们 move 走，所以先各留一份。
+        let provider = user_info.provider.clone();
+        let provider_subject = user_info.provider_user_id.clone();
 
         // 首先通过 identity_provider 查找用户。
         //
@@ -326,6 +388,13 @@ impl AuthService {
                 .find_record_by_field::<User>("user", "id", &record_key(&identity.user_id))
                 .await?
                 .ok_or(AuthError::UserNotFound)?;
+
+            // 过渡期回填：V1 的 identity_provider 已经有这条关联，但新的
+            // identity_binding 可能还没有（账号建于 Stage 1 之前）。补上，
+            // 让 Stage 3 迁移时不必再扫一遍历史数据。
+            self.backfill_binding(&user, &provider, &provider_subject)
+                .await;
+
             return self.ensure_user_subject(user, SubjectType::Human).await;
         }
 
@@ -350,20 +419,40 @@ impl AuthService {
                 created_at: now_ts,
                 updated_at: now_ts,
             };
-            self.db.create_record("identity_provider", &identity).await?;
-            return self.ensure_user_subject(existing_user, SubjectType::Human).await;
+            self.db
+                .create_record("identity_provider", &identity)
+                .await?;
+            self.backfill_binding(&existing_user, &provider, &provider_subject)
+                .await;
+            return self
+                .ensure_user_subject(existing_user, SubjectType::Human)
+                .await;
         }
 
         // 创建新用户
         let now = Utc::now();
         let id = new_thing("user");
-        let subject_id = self.create_subject(SubjectType::Human).await?;
         let (username, username_normalized) = self
             .generate_unique_username(email.split('@').next().unwrap_or("user"))
             .await?;
+
+        // 身份根先建，并立刻绑定外部身份 —— 社交登录的主体从第一刻起就有
+        // 完整的 identity + binding，不留待日后回填。
+        let human = self
+            .identity
+            .create_human(&email, &username, &username_normalized)
+            .await?;
+        if let Err(e) = self
+            .identity
+            .bind_external(&human.actor, &provider, &provider_subject)
+            .await
+        {
+            error!("Failed to create identity binding for {provider}: {e:?}");
+        }
+
         let user = User {
             id: Some(id.clone()),
-            subject_id: Some(subject_id),
+            subject_id: human.actor.id.clone(),
             email,
             username,
             username_normalized,
@@ -391,7 +480,9 @@ impl AuthService {
             created_at: now_ts,
             updated_at: now_ts,
         };
-        self.db.create_record("identity_provider", &identity).await?;
+        self.db
+            .create_record("identity_provider", &identity)
+            .await?;
 
         Ok(created_user)
     }
@@ -425,19 +516,35 @@ impl AuthService {
         let hashed_password = hash_password_blocking(req.password.clone()).await?;
 
         let now = Utc::now();
-        let (verification_token, verification_expires_at) = if self.config.email_verification_enabled
-        {
-            (
-                Some(Uuid::new_v4().to_string()),
-                Some((now + Duration::hours(VERIFICATION_TOKEN_TTL_HOURS)).timestamp()),
-            )
-        } else {
-            (None, None)
-        };
+        let (verification_token, verification_expires_at) =
+            if self.config.email_verification_enabled {
+                (
+                    Some(Uuid::new_v4().to_string()),
+                    Some((now + Duration::hours(VERIFICATION_TOKEN_TTL_HOURS)).timestamp()),
+                )
+            } else {
+                (None, None)
+            };
+
+        // 身份根：先建 actor_identity + human_account，再建 V1 的 user 行。
+        //
+        // Stage 2 是过渡期，两套并存：新表已经是权威身份根，`user` 仍承载
+        // password 与各处外键（Stage 3 迁完外键、Stage 4 删表）。
+        //
+        // 顺序是刻意的 —— 先建新的。反过来的话，新表因唯一索引冲突失败时
+        // 会留下一个没有身份根的 user 行，而那正是 Stage 3 要迁移的东西。
+        let human = self
+            .identity
+            .create_human(&email, &username, &username_normalized)
+            .await
+            .map_err(translate_unique_violation)?;
 
         let user = User {
             id: Some(new_thing("user")),
-            subject_id: Some(self.create_subject(SubjectType::Human).await?),
+            // V1 的 subject 表已被 actor_identity.actor_kind 取代。这里改指
+            // 新身份根的 id，让两套记录之间有一条可追的线 —— Stage 3 迁移
+            // 外键时要靠它把 user 行对应回 actor。
+            subject_id: human.actor.id.clone(),
             email: email.clone(),
             username,
             username_normalized,
@@ -524,10 +631,28 @@ impl AuthService {
             return Err(AuthError::EmailNotVerified);
         }
 
-        // 检查账户状态
+        // 检查账户状态。
+        //
+        // 这里查两处，因为 Stage 2 是过渡期：`user.account_status` 是 V1 的，
+        // `actor_identity.status` 是新身份根的。Stage 3 迁完外键之后只留后者。
+        //
+        // 两者都要过 —— 任一为不可用即拒。过渡期宁可多拒，不能少拒。
         Self::ensure_account_usable(&user)?;
 
-        let user = self.ensure_user_subject(user, SubjectType::Human).await?;
+        if let Some(human) = self.identity.find_human_by_email(&email).await? {
+            if !human.actor.can_authenticate() {
+                // 身份根说不能认证，就不能认证。它只影响**未来**的资格，
+                // 不改写这个账号过去的认证事实。
+                return Err(AuthError::AccountSuspended);
+            }
+            // 邮箱验证状态同样两处并存：V1 在 `user.is_email_verified`，
+            // 新的在 `human_account.email_verified`。任一未验证即拒 ——
+            // 过渡期宁可多拒。
+            if self.config.email_verification_enabled && !human.account.email_verified {
+                return Err(AuthError::EmailNotVerified);
+            }
+        }
+
         let user_id = record_key(user.id.as_ref().ok_or(AuthError::UserNotFound)?);
 
         // 启用了 MFA 的账号在这里止步，只发一个 5 分钟有效的挑战令牌。
@@ -1000,8 +1125,8 @@ async fn spend_password_verification_time() {
 /// 连不相干的接口一起变慢。和 SMTP 发送同理，挪到阻塞线程池。
 async fn verify_password_blocking(stored_hash: String, password: String) -> Result<()> {
     tokio::task::spawn_blocking(move || {
-        let parsed = PasswordHash::new(&stored_hash)
-            .map_err(|e| AuthError::ServerError(e.to_string()))?;
+        let parsed =
+            PasswordHash::new(&stored_hash).map_err(|e| AuthError::ServerError(e.to_string()))?;
         Argon2::default()
             .verify_password(password.as_bytes(), &parsed)
             .map_err(|_| AuthError::InvalidCredentials)
@@ -1037,9 +1162,13 @@ mod unique_violation_tests {
         // 并发注册撞上唯一索引时，调用方该收到 409 而不是 500。
         let email = AuthError::DatabaseError(
             "Failed to create record: Database index `email_idx` already contains \
-             'a@b.com', with record `user:abc`".to_string(),
+             'a@b.com', with record `user:abc`"
+                .to_string(),
         );
-        assert!(matches!(translate_unique_violation(email), AuthError::EmailExists));
+        assert!(matches!(
+            translate_unique_violation(email),
+            AuthError::EmailExists
+        ));
 
         let username = AuthError::DatabaseError(
             "Database index `username_idx` already contains 'alice'".to_string(),
