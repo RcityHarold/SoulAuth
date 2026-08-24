@@ -1220,3 +1220,59 @@ fn i2_no_implicit_cross_namespace_cast() {
         "I2: 命名空间不匹配时不得回退尝试其它命名空间",
     );
 }
+
+/// I3 · 权限注册表不得声明运行时不校验的权限
+///
+/// 法源: GA-07 §21「文档写了但 Runtime 不存在 → BLOCK；Runtime 有而注册表
+/// 不声明 → Contract Drift」与 §23「能改变 Public Behavior 的权限不能靠
+/// 『内部实现』逃避 Canonical Contract」。
+///
+/// 反向同样成立：注册表里可授予、但运行时零效果的权限，是注册表在说谎 ——
+/// 管理员授予 `users.delete` 会合理地以为自己开了什么，实际什么也没开。
+///
+/// 种子权限集合与代码常量集合必须**双向相等**。
+#[test]
+fn i3_permission_registry_matches_enforcement() {
+    let perm_src = read("src/models/permission.rs");
+    let mut in_code: Vec<String> = Vec::new();
+    let mut rest = perm_src.as_str();
+    while let Some(at) = rest.find("auth_local!(\"") {
+        let tail = &rest[at + "auth_local!(\"".len()..];
+        if let Some(end) = tail.find('"') {
+            let name = &tail[..end];
+            // NAMESPACE 常量是 auth_local!("")，不是一条权限。
+            if !name.is_empty() {
+                in_code.push(format!("soulauth:{name}"));
+            }
+            rest = &tail[end..];
+        } else {
+            break;
+        }
+    }
+    in_code.sort();
+    in_code.dedup();
+    assert!(!in_code.is_empty(), "找不到任何权限常量 —— 断言失去作用域");
+
+    let mut in_seed: Vec<String> = seed()
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("name: \"")?.split('"').next())
+        .filter(|n| n.starts_with("soulauth:"))
+        .map(str::to_string)
+        .collect();
+    in_seed.sort();
+    in_seed.dedup();
+
+    let seeded_but_dead: Vec<_> = in_seed.iter().filter(|p| !in_code.contains(p)).collect();
+    assert!(
+        seeded_but_dead.is_empty(),
+        "种子里可授予但代码从不校验的权限（授予它们零效果）:\n  {:?}",
+        seeded_but_dead
+    );
+
+    let enforced_but_unseeded: Vec<_> = in_code.iter().filter(|p| !in_seed.contains(p)).collect();
+    assert!(
+        enforced_but_unseeded.is_empty(),
+        "代码校验但种子未播种的权限（会导致永远拒绝）:\n  {:?}",
+        enforced_but_unseeded
+    );
+}

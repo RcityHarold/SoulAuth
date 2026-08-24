@@ -25,17 +25,6 @@ UPSERT permission:users_write CONTENT {
     updated_at: 0
 };
 
-UPSERT permission:users_delete CONTENT {
-    name: "soulauth:users.delete",
-    display_name: "删除用户",
-    description: "删除用户账户",
-    resource: "users",
-    action: "delete",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
 -- 角色管理权限
 UPSERT permission:roles_read CONTENT {
     name: "soulauth:roles.read",
@@ -93,17 +82,6 @@ UPSERT permission:permissions_write CONTENT {
     updated_at: 0
 };
 
-UPSERT permission:permissions_delete CONTENT {
-    name: "soulauth:permissions.delete",
-    display_name: "删除权限",
-    description: "删除权限",
-    resource: "permissions",
-    action: "delete",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
 -- 安全管理权限
 UPSERT permission:security_read CONTENT {
     name: "soulauth:security.read",
@@ -140,50 +118,8 @@ UPSERT permission:audit_read CONTENT {
 };
 
 -- 用户档案管理权限
-UPSERT permission:profile_read CONTENT {
-    name: "soulauth:profile.read",
-    display_name: "查看用户档案",
-    description: "查看用户档案信息",
-    resource: "profile",
-    action: "read",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
-UPSERT permission:profile_write CONTENT {
-    name: "soulauth:profile.write",
-    display_name: "管理用户档案",
-    description: "创建和编辑用户档案",
-    resource: "profile",
-    action: "write",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
 
 -- 用户偏好设置权限
-UPSERT permission:preferences_read CONTENT {
-    name: "soulauth:preferences.read",
-    display_name: "查看用户偏好",
-    description: "查看用户偏好设置",
-    resource: "preferences",
-    action: "read",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
-UPSERT permission:preferences_write CONTENT {
-    name: "soulauth:preferences.write",
-    display_name: "管理用户偏好",
-    description: "创建和编辑用户偏好设置",
-    resource: "preferences",
-    action: "write",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
 
 -- 创建系统角色
 -- 系统管理员角色
@@ -272,13 +208,6 @@ UPSERT role_permission:admin__users_write CONTENT {
     granted_by: user:system
 };
 
-UPSERT role_permission:admin__users_delete CONTENT {
-    role_id: role:admin,
-    permission_id: permission:users_delete,
-    granted_at: 0,
-    granted_by: user:system
-};
-
 UPSERT role_permission:admin__roles_read CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_read,
@@ -314,13 +243,6 @@ UPSERT role_permission:admin__permissions_write CONTENT {
     granted_by: user:system
 };
 
-UPSERT role_permission:admin__permissions_delete CONTENT {
-    role_id: role:admin,
-    permission_id: permission:permissions_delete,
-    granted_at: 0,
-    granted_by: user:system
-};
-
 UPSERT role_permission:admin__security_read CONTENT {
     role_id: role:admin,
     permission_id: permission:security_read,
@@ -342,34 +264,6 @@ UPSERT role_permission:admin__audit_read CONTENT {
     granted_by: user:system
 };
 
-UPSERT role_permission:admin__profile_read CONTENT {
-    role_id: role:admin,
-    permission_id: permission:profile_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__profile_write CONTENT {
-    role_id: role:admin,
-    permission_id: permission:profile_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__preferences_read CONTENT {
-    role_id: role:admin,
-    permission_id: permission:preferences_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__preferences_write CONTENT {
-    role_id: role:admin,
-    permission_id: permission:preferences_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
 -- 为user_manager角色分配用户管理权限
 UPSERT role_permission:user_manager__users_read CONTENT {
     role_id: role:user_manager,
@@ -381,41 +275,6 @@ UPSERT role_permission:user_manager__users_read CONTENT {
 UPSERT role_permission:user_manager__users_write CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__users_delete CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:users_delete,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__profile_read CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:profile_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__profile_write CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:profile_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__preferences_read CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:preferences_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__preferences_write CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:preferences_write,
     granted_at: 0,
     granted_by: user:system
 };
