@@ -471,7 +471,7 @@ impl RBACService {
     /// 操作者的账号，记一个真实用户 ID 反而是伪造归因，所以 `assigned_by` 落在
     /// `user:system` 上 —— 与部署文档里那段手工 SQL 用的是同一个约定。
     pub async fn assign_role_as_system(&self, user_id: &str, role_name: &str) -> Result<(), AuthError> {
-        let system = crate::utils::record_id::user_record_id("system");
+        let system = crate::utils::record_id::user_record_id("system")?;
         self.assign_role(user_id, role_name, &system, "system").await
     }
 
@@ -490,7 +490,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
 
         // 检查用户是否已经有此角色
         let check_query = "SELECT * FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
@@ -551,7 +551,7 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
 
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         self.db.client

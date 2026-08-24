@@ -642,34 +642,48 @@ impl AuthService {
     }
 
     pub async fn verify_email(&self, token: String, ctx: &RequestContext) -> Result<IssuedSession> {
-        let user = self
+        // 与重置令牌同样的道理：先原子消费，再做有副作用的事。
+        //
+        // 原先是「读 → 判 is_email_verified → 写整条 user」。顺序重放确实会被
+        // 那个判定挡住，但**并发**重放不会：两个请求都读到 false，都通过，
+        // 而这个函数末尾会签发会话 —— 于是一枚验证令牌换出两个会话。
+        //
+        // 条件更新一次完成「校验 + 清令牌 + 置已验证」，令牌置空后重放不可能
+        // 再命中。过期判定也一并放进库里：`verification_token_expires_at` 是
+        // number（Unix 秒），与传入的整数同类型比较，不触发 SurrealDB
+        // 的按类型序比较问题。
+        let now_ts = Utc::now().timestamp();
+        let mut claimed = self
             .db
-            .find_record_by_field::<User>("user", "verification_token", &token)
-            .await?
-            .ok_or(AuthError::InvalidToken)?;
-
-        if user.is_email_verified {
+            .raw_query(
+                "claim_verification_token",
+                "UPDATE user SET is_email_verified = true, verification_token = NONE, \
+                 verification_token_expires_at = NONE, updated_at = $now \
+                 WHERE verification_token = $token AND is_email_verified = false \
+                 AND verification_token_expires_at != NONE \
+                 AND verification_token_expires_at > $now \
+                 RETURN VALUE id",
+                serde_json::json!({ "token": &token, "now": now_ts }),
+            )
+            .await?;
+        let claimed_ids: Vec<Thing> = claimed.take(0)?;
+        if claimed_ids.len() != 1 {
+            // 令牌不存在、已被使用、已过期 —— 对外同一个答复。
             return Err(AuthError::InvalidToken);
         }
+        let user_thing = claimed_ids.into_iter().next().expect("已断言恰好一条");
 
-        // 验证令牌以前永不过期，现在超时即作废。
-        if let Some(expires_at) = user.verification_token_expires_at {
-            if expires_at < Utc::now().timestamp() {
-                return Err(AuthError::InvalidToken);
-            }
-        }
-
-        let mut updated_user = user.clone();
-        updated_user.is_email_verified = true;
-        updated_user.verification_token = None;
-        updated_user.verification_token_expires_at = None;
-        updated_user.updated_at = Utc::now().timestamp();
-
-        let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
+        // 抢占成功后再读回，用于建立会话。
+        //
+        // `find_record_by_field` 对 `field == "id"` 有专门分支：它会把
+        // `table:key` 还原成 `RecordId` 再用原生 bind，绕开了「RecordId 经
+        // JSON 绑定退化成字符串导致恒不匹配」那个坑。所以这里直接传地址字符串
+        // 即可，不需要另造一个 by-id 辅助。
         let verified_user = self
             .db
-            .update_record("user", &record_address(user_thing), &updated_user)
-            .await?;
+            .find_record_by_field::<User>("user", "id", &record_address(&user_thing))
+            .await?
+            .ok_or(AuthError::UserNotFound)?;
 
         let verified_user = self.touch_last_login(verified_user, ctx).await?;
         self.create_session_with_metadata(verified_user, ctx).await
@@ -844,15 +858,42 @@ impl AuthService {
     pub async fn reset_password(&self, token: String, new_password: String) -> Result<String> {
         validate_password(&new_password, self.config.password_min_length)?;
 
+        // 先**原子抢占**这枚令牌，再做任何有副作用的事。
+        //
+        // 原先是「读 → 判 used → 改密码 → 标记 used」，有两个问题：
+        //
+        // 一是并发。两个请求都在判定处读到 used = false，都通过，都改密码 ——
+        // 后落地的那个赢。持有重置令牌的攻击者与本人竞速即可让自己的密码生效。
+        //
+        // 二是顺序。密码写在前、令牌消费在后，中间崩溃就留下「密码已改、令牌
+        // 仍可用」的部分效果。
+        //
+        // 把消费提到最前并交给数据库做条件更新，两个问题一起消失：抢到才继续，
+        // 没抢到说明已被消费。`RETURN VALUE` 让调用方能判断自己是不是赢家 ——
+        // 与授权码、刷新令牌用的是同一套写法。
+        let mut claimed = self
+            .db
+            .raw_query(
+                "claim_password_reset_token",
+                "UPDATE password_reset_token SET used = true \
+                 WHERE token = $token AND used = false AND expires_at > $now \
+                 RETURN VALUE token",
+                serde_json::json!({ "token": &token, "now": Utc::now() }),
+            )
+            .await?;
+        let claimed_tokens: Vec<String> = claimed.take(0)?;
+        if claimed_tokens.len() != 1 {
+            // 不存在、已被消费、已过期 —— 对外一律同一个答复，
+            // 否则「令牌存不存在」与「是不是已经用过」就成了两条可区分的信道。
+            return Err(AuthError::InvalidToken);
+        }
+
+        // 抢占成功后才去读它，拿邮箱。此时 used 已经是 true，重放不可能再走到这里。
         let reset_token = self
             .db
             .find_record_by_field::<PasswordResetToken>("password_reset_token", "token", &token)
             .await?
             .ok_or(AuthError::InvalidToken)?;
-
-        if reset_token.used || reset_token.expires_at < Utc::now() {
-            return Err(AuthError::InvalidToken);
-        }
 
         let mut user = self
             .db
@@ -873,16 +914,7 @@ impl AuthService {
             .update_record("user", &record_address(&user_thing), &user)
             .await?;
 
-        let mut updated_token = reset_token.clone();
-        updated_token.used = true;
-        let token_thing = reset_token.id.as_ref().ok_or(AuthError::InvalidToken)?;
-        self.db
-            .update_record(
-                "password_reset_token",
-                &record_address(token_thing),
-                &updated_token,
-            )
-            .await?;
+        // 这枚令牌在函数开头就已经被原子消费掉了，这里不需要再标记一次。
 
         // 同一邮箱名下可能还有别的未使用令牌（例如攻击者抢先申请、或用户连点了
         // 几次"忘记密码"）。密码既然已经改了，剩下那些一律作废。

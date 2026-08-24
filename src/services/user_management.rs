@@ -46,7 +46,7 @@ impl UserManagementService {
         request: CreateUserProfileRequest,
         ctx: &RequestContext,
     ) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
         
         // 检查用户是否存在
         let mut response = self.db.client
@@ -129,7 +129,7 @@ impl UserManagementService {
     }
 
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
         
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -243,7 +243,7 @@ impl UserManagementService {
         request: CreateUserPreferencesRequest,
         ctx: &RequestContext,
     ) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
         
         // 检查偏好是否已存在
         let existing_prefs = self.get_user_preferences(user_id).await;
@@ -323,7 +323,7 @@ impl UserManagementService {
     }
 
     pub async fn get_user_preferences(&self, user_id: &str) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
         
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -428,7 +428,7 @@ impl UserManagementService {
         updated_by: &User,
         ctx: &RequestContext,
     ) -> Result<AccountStatusResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
         
         // 检查用户是否存在
         let mut response = self.db.client

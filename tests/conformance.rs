@@ -1077,7 +1077,8 @@ fn h10_metadata_advertises_only_what_runtime_supports() {
         && oidc
             .split("code_challenge_methods_supported")
             .nth(1)
-            .map(|tail| tail[..tail.len().min(200)].contains("plain"))
+            // 同样按字符取窗口：源码含中文，按字节切可能落在多字节字符中间。
+            .map(|tail| tail.chars().take(200).collect::<String>().contains("plain"))
             .unwrap_or(false);
     assert!(!advertises_plain, "不接受 plain 就不得在发现文档里声明它");
 }
@@ -1131,5 +1132,91 @@ fn h12_bootstrap_gate_is_single_use_and_not_an_oracle() {
     assert!(
         bootstrap.contains("constant_time_eq"),
         "引导令牌比对必须是常量时间"
+    );
+}
+
+// ═════════════════════ I. 终检文档（GA-01～07）补充的不变式 ═════════════════════
+// 法源: 03-终检文档 / Global Audit，Chinese Internal Master v1.0 SEMANTIC FROZEN
+
+/// I1 · 一次性凭据必须原子消费
+///
+/// 法源: GA-06 §19「Successful Consumption → Future Successful Reuse Is
+/// Forbidden，且必须 survive retry / replication / recovery」
+/// 与 §20「Stale Replica 不能重新接受已经消费的 Artifact」。
+///
+/// 判据是**消费必须由数据库的条件更新完成**，而不是应用侧「读 → 判 → 写」。
+/// 后者在并发下两个请求都能通过判定；GA-06 点名的四类凭据全部适用。
+#[test]
+fn i1_one_time_artifacts_are_claimed_atomically() {
+    let all: String = sources().iter().map(|(_, b)| b.clone()).collect();
+
+    // 每一类一次性凭据都必须能找到一条「条件更新 + RETURN VALUE」的抢占语句。
+    let claims = [
+        ("授权码", "UPDATE oidc_authorization_code SET used = true"),
+        ("刷新令牌", "UPDATE oidc_refresh_token SET used = true"),
+        (
+            "密码重置令牌",
+            "UPDATE password_reset_token SET used = true",
+        ),
+        ("邮箱验证令牌", "UPDATE user SET is_email_verified = true"),
+    ];
+    for (label, stmt) in claims {
+        // 同一条 UPDATE 前缀可能出现多次且用途不同：密码重置既有「抢占这一枚」，
+        // 也有「批量作废同邮箱的其余令牌」，后者本就不需要 RETURN VALUE。
+        // 所以判据是「**存在**一条同时带 WHERE 与 RETURN VALUE 的」，
+        // 而不是「第一条就得是」。
+        let mut from = 0usize;
+        let mut found_claim = false;
+        let mut occurrences = 0usize;
+        while let Some(rel) = all[from..].find(stmt) {
+            let at = from + rel;
+            occurrences += 1;
+            // 不能直接 `&all[at..at + 400]`：源码里有中文，按字节切会落在多字节
+            // 字符中间而 panic。按字符取窗口。
+            let tail: String = all[at..].chars().take(400).collect();
+            if tail.contains("WHERE") && tail.contains("RETURN VALUE") {
+                found_claim = true;
+                break;
+            }
+            from = at + stmt.len();
+        }
+        assert!(occurrences > 0, "{label}：找不到任何 `{stmt}`");
+        assert!(
+            found_claim,
+            "{label}：{occurrences} 处 `{stmt}` 中没有一条同时带 WHERE 与 RETURN VALUE"
+        );
+    }
+}
+
+/// I2 · 跨命名空间不得隐式转换
+///
+/// 法源: GA-04 §41「Cross-namespace Implicit Cast → prohibited」、
+/// §42「Identifier Shape 不能用来猜 Namespace」、
+/// §43「Namespace Mismatch 禁止 Implicit Fallback」。
+///
+/// 三条分别对应：不得静默把外部命名空间的值当本命名空间用；不得按字符串
+/// 形状猜它属于哪个命名空间；不匹配时不得挨个回退尝试。
+#[test]
+fn i2_no_implicit_cross_namespace_cast() {
+    let record_id = read("src/utils/record_id.rs");
+
+    // §41：构造 user 引用时必须能拒绝外部命名空间的值。
+    assert!(
+        record_id.contains("ForeignNamespace"),
+        "user_record_id 必须能拒绝带其它表前缀的值，而不是静默包装成 user:⟨client:abc⟩"
+    );
+    assert!(
+        record_id.contains("fn user_record_id") && record_id.contains("-> Result<RecordId"),
+        "user_record_id 必须返回 Result —— 静默成功会把命名空间用错伪装成资源不存在"
+    );
+
+    // §43：拒绝之后不得回退到别的命名空间再试一次。
+    assert_absent(
+        hits_any(&[
+            "client_record_id(",
+            "try_as_client",
+            "or_else_lookup_client",
+        ]),
+        "I2: 命名空间不匹配时不得回退尝试其它命名空间",
     );
 }

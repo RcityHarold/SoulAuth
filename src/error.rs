@@ -166,6 +166,18 @@ impl axum::response::IntoResponse for AuthError {
     }
 }
 
+/// 命名空间用错时归为 `InvalidUserId`（400）。
+///
+/// 不新增错误变体：调用方送来一个属于别的命名空间的标识符，本质上就是
+/// 「这个用户引用无效」。对外沿用既有文案，不透露那个前缀属于哪个命名空间 ——
+/// GA-04 §43 允许为防枚举而保持 generic。
+impl From<crate::utils::record_id::ForeignNamespace> for AuthError {
+    fn from(e: crate::utils::record_id::ForeignNamespace) -> Self {
+        tracing::debug!("namespace mismatch: {e}");
+        AuthError::InvalidUserId
+    }
+}
+
 pub type Result<T> = std::result::Result<T, AuthError>;
 
 // 为了兼容，添加 AppError 别名
