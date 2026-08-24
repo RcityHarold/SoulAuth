@@ -35,6 +35,16 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      # 架构一致性读数。已成立的不变式随 `cargo test` 一起跑（上一步已覆盖）；
+      # 这一步单独把**尚未成立**的那些跑出来，只报告不阻断 —— 它们按定义就是红的，
+      # 拿它当门禁等于让 CI 长期红，那样很快就没人看了。
+      #
+      # 每完成一个 V2 Stage，删掉 tests/conformance.rs 里对应的 #[ignore]，
+      # 那条就转由上一步的 `cargo test` 硬性把守。
+      - name: architecture conformance (剩余工作量)
+        continue-on-error: true
+        run: cargo test --test conformance -- --ignored --test-threads=1
+
   integration:
     name: integration suite
     runs-on: ubuntu-latest
