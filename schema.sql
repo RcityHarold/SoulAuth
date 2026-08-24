@@ -1,13 +1,134 @@
--- Rust Auth System Database Schema
+-- SoulAuth Database Schema
 -- 运行此文件以创建所有必需的数据库表和索引
 
--- 主体表
+-- ═══════════════════════════════════════════════════════════════════
+-- Actor Identity Domain
+-- ═══════════════════════════════════════════════════════════════════
+--
+-- 身份根是 `actor_identity`，不是 `user`。
+--
+-- Human 与 AIActor 都是一等身份主体，通过同一套 Actor Identity Contract
+-- 进入系统；它们可以拥有不同的 Credential、Authentication Method 与
+-- Lifecycle，但没有哪一个需要伪装成另一个才能被认证。
+--
+-- 五个对象永远不能重新合并（GA-01 §4，GA-07 §13）：
+--
+--   ActorIdentity    谁？
+--   HumanAccount     Human 怎样管理自己的登录账户？
+--   IdentityBinding  外部某个身份如何证明与该 Actor 是同一主体？
+--   Credential       Actor 用什么证明自己？        （Stage 2 收口）
+--   Client           哪个软件正在请求身份能力？     （见 oidc_client）
+
+-- 身份根。回答「谁是这个可以被认证的主体」，仅此而已。
+DEFINE TABLE actor_identity SCHEMAFULL;
+
+-- 对外稳定的 Authentication Subject。
+--
+-- OIDC `sub` 建立在它之上。Email、Username、Display Name 的修改，Credential
+-- 的轮换，MFA 的增减，经由不同 Client 进入 —— 这些都不得改变它（GA-04 §7）。
+--
+-- 它与 record id 是**两个命名空间**。实现上可以取同一个值，但那是实现选择，
+-- 不建立语义等同（GA-04 §5）：文档不得声称 `Resource ID = Stable Subject`。
+DEFINE FIELD subject_key ON actor_identity TYPE string;
+
+-- `human` | `ai_actor`
+--
+-- 第一阶段只承认这两类。Organization、Device、Application 要进入同一套
+-- Actor Identity Contract，必须经过正式架构裁决，而不是因为加一个 enum
+-- 变体很容易就加上（GA-01 §4）。
+DEFINE FIELD actor_kind ON actor_identity TYPE string;
+
+-- `local` | `soulseed` | `external`
+--
+-- 这个身份通过什么受控来源进入 SoulAuth。它不替代 IdentityBinding，
+-- 也不意味着一个 Actor 只能有一条外部身份关系（GA-01 §4）。
+DEFINE FIELD identity_source ON actor_identity TYPE string DEFAULT "local";
+
+-- Soulseed 模式下绑定 SoulseedAGI 已经成立的 Canonical Actor。
+--
+-- 它只是一条受控引用：证明绑定关系，**不赋予** SoulAuth 定义或修改
+-- Mind / SubjectIntent / Memory 的能力（GA-01 §11，GA-07 §9）。
+-- 也不得默认暴露给第三方 OIDC Client —— 属受控 Integration Claim。
+DEFINE FIELD canonical_actor_ref ON actor_identity TYPE option<string>;
+
+-- `active` | `suspended` | `retired`
+--
+-- Retired 可以停止认证，但其 subject_key **不得**被重新分配给另一个 Actor：
+-- 否则历史 Claims、Audit 与外部记录里的同一个 Subject，会在不同时间指向
+-- 不同主体（GA-04 §12，06 §7）。
+DEFINE FIELD status ON actor_identity TYPE string DEFAULT "active";
+
+DEFINE FIELD created_at ON actor_identity TYPE number;
+DEFINE FIELD updated_at ON actor_identity TYPE number;
+
+DEFINE INDEX actor_subject_idx ON actor_identity COLUMNS subject_key UNIQUE;
+DEFINE INDEX actor_kind_idx ON actor_identity COLUMNS actor_kind;
+-- Canonical 绑定必须唯一：两个 ActorIdentity 绑到同一个 Canonical Actor，
+-- 等于在 SoulAuth 里把一个主体分裂成两个。
+DEFINE INDEX actor_canonical_ref_idx ON actor_identity COLUMNS canonical_actor_ref UNIQUE;
+
+-- Human-specific account extension。**不是身份根。**
+--
+-- Human 修改 Email 不意味着 ActorIdentity 发生变化。AIActor 不需要为了
+-- 拥有身份而伪造 Email / Username（GA-01 §4，GA-07 §13）。
+--
+-- Password 不在这里：它属于 Credential Domain。当前仍暂留在 `user` 表上，
+-- Stage 2 收口。
+DEFINE TABLE human_account SCHEMAFULL;
+DEFINE FIELD actor_identity_id ON human_account TYPE record<actor_identity>;
+DEFINE FIELD email ON human_account TYPE string;
+DEFINE FIELD username ON human_account TYPE string;
+DEFINE FIELD username_normalized ON human_account TYPE string;
+DEFINE FIELD email_verified ON human_account TYPE bool DEFAULT false;
+DEFINE FIELD created_at ON human_account TYPE number;
+DEFINE FIELD updated_at ON human_account TYPE number;
+
+DEFINE INDEX human_account_email_idx ON human_account COLUMNS email UNIQUE;
+DEFINE INDEX human_account_username_idx ON human_account COLUMNS username_normalized UNIQUE;
+-- 一个 Human ActorIdentity 至多一个账户。
+DEFINE INDEX human_account_actor_idx ON human_account COLUMNS actor_identity_id UNIQUE;
+
+-- 外部身份来源与本地 ActorIdentity 之间**经过验证的**对应关系。
+--
+-- 它是独立关系对象，不是 ActorIdentity 里的一个外部 ID 字段。
+-- Google、GitHub、企业 IdP 与 Soulseed Canonical Actor 共享同一抽象 ——
+-- 不需要为「机器人账号」另造一套（GA-01 §4，GA-07 §9）。
+--
+-- 关键边界：Binding 建立关系，但**不创造上游主体**。Google Identity 由
+-- Google 定义，Canonical AIActor 由 SoulseedAGI 定义。
+--
+-- 也不等于 Credential：外部 IdP 里 Human 用的密码不会因此成为 SoulAuth 的
+-- Actor Credential（GA-05 §4）。
+DEFINE TABLE identity_binding SCHEMAFULL;
+DEFINE FIELD actor_identity_id ON identity_binding TYPE record<actor_identity>;
+DEFINE FIELD provider ON identity_binding TYPE string;
+DEFINE FIELD provider_subject ON identity_binding TYPE string;
+-- `federated` | `canonical` —— 前者是外部 IdP，后者是 Soulseed Canonical Actor。
+DEFINE FIELD binding_type ON identity_binding TYPE string DEFAULT "federated";
+-- `verified` | `pending` | `revoked`
+DEFINE FIELD verification_state ON identity_binding TYPE string DEFAULT "verified";
+DEFINE FIELD bound_at ON identity_binding TYPE number;
+DEFINE FIELD revoked_at ON identity_binding TYPE option<number>;
+
+-- (provider, provider_subject) 必须联合唯一。
+--
+-- 只按 subject 唯一是一个真实的跨 provider 账号接管：数字 id 为 4001 的
+-- GitHub 账号会匹配上 sub 为字符串 "4001" 的 Google 用户。
+DEFINE INDEX identity_binding_provider_subject_idx
+    ON identity_binding COLUMNS provider, provider_subject UNIQUE;
+DEFINE INDEX identity_binding_actor_idx ON identity_binding COLUMNS actor_identity_id;
+
+-- ═══════════════════════════════════════════════════════════════════
+-- 以下为 V1 遗留，Stage 2/3 逐步迁出
+-- ═══════════════════════════════════════════════════════════════════
+
+-- 主体表（V1）。已被 actor_identity.actor_kind 取代，Stage 4 删除。
 DEFINE TABLE subject SCHEMAFULL;
 DEFINE FIELD subject_type ON subject TYPE string;
 DEFINE FIELD created_at ON subject TYPE number;
 DEFINE FIELD updated_at ON subject TYPE number;
 
--- 用户表
+-- 用户表（V1）
 DEFINE TABLE user SCHEMAFULL;
 DEFINE FIELD subject_id ON user TYPE option<record<subject>>;
 DEFINE FIELD email ON user TYPE string;

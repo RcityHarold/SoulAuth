@@ -1,3 +1,9 @@
+// ── Actor Identity Domain（V2 身份根）────────────────────────────
+pub mod actor_identity;
+pub mod human_account;
+pub mod identity_binding;
+
+// ── V1 遗留，Stage 2/3 逐步迁出 ─────────────────────────────────
 pub mod user;
 pub mod subject;
 pub mod session;
