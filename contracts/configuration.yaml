@@ -1,0 +1,198 @@
+# SoulAuth Configuration Registry
+#
+# 法位：Machine Contract Authority。
+#
+# GA-07 §21 双向约束：文档写了但 Runtime 不存在 → BLOCK；Runtime 存在且会
+# 实质改变 Supported Public Behavior 但注册表不声明 → Contract Drift。
+#
+# 唯一配置来源是**进程环境变量**（启动时读工作目录下的 .env）。
+# 当前 Release 不支持配置文件、远程配置或运行期重载。
+#
+# 生成依据：src/config.rs + src/main.rs（RUST_LOG 直读）
+
+registry: soulauth-configuration
+version: 1
+
+sources:
+  - environment            # 唯一来源
+reload: none               # 变更需重启进程
+
+groups:
+  - id: required
+    note: "必填。缺任一项进程在启动时退出并指名道姓。"
+    keys:
+      - name: JWT_SECRET
+        required: true
+        description: "会话令牌签名密钥，至少 32 字符。"
+      - name: APP_URL
+        required: true
+        description: "公开地址，**不是**监听地址。决定 OIDC issuer、外发邮件链接前缀、会话 cookie 是否带 Secure，以及是否触发生产闸门。"
+      - name: SMTP_HOST
+        required: true
+        description: "即使关闭邮箱验证也必填 —— 密码重置要发信。"
+      - name: SMTP_FROM
+        required: true
+        description: "发件人地址。"
+  - id: production_gate
+    note: "APP_URL 非环回地址时**强制**。两个默认值都会悄悄摧毁已签发的凭证，所以宁可拒绝启动。"
+    keys:
+      - name: OIDC_RSA_PRIVATE_KEY_PATH
+        required: conditional
+        default: "(空)"
+        description: "RS256 签名密钥路径。APP_URL 非环回时与 _PEM 二选一必填。"
+      - name: OIDC_RSA_PRIVATE_KEY_PEM
+        required: conditional
+        default: "(空)"
+        description: "同上，内联 PEM（\\\\n 会被还原）。不配则每次启动换一把新密钥，此前签发的 ID Token 全部验不过，副本之间也互不认账。"
+      - name: MFA_SECRET_ENCRYPTION_KEY
+        required: conditional
+        default: "(空)"
+        description: "TOTP 密钥的加密密钥。APP_URL 非环回时必填。不配则从 JWT_SECRET 派生 —— 轮换 JWT_SECRET 会让所有已存 TOTP 密钥解不开。"
+  - id: service
+    keys:
+      - name: BIND_ADDR
+        required: false
+        default: "0.0.0.0:8080"
+        description: "监听地址。"
+      - name: JWT_EXPIRATION
+        required: false
+        default: "86400"
+        description: "会话与 access token 寿命（秒）。"
+      - name: PASSWORD_MIN_LENGTH
+        required: false
+        default: "12"
+        description: "密码最小长度。策略另要求四类字符中的三类。"
+      - name: AUTH_SESSION_CACHE_TTL_SECONDS
+        required: false
+        default: "5"
+        description: "会话校验缓存（秒）。0 = 每个请求都回库。只约束**不经过 SoulAuth** 的吊销的陈旧窗口。"
+      - name: CORS_ALLOWED_ORIGINS
+        required: false
+        default: "(空)"
+        description: "逗号分隔。留空只允许 APP_URL 自身。"
+      - name: TRUST_PROXY_HEADERS
+        required: false
+        default: "false"
+        description: "只有确实在受控反向代理之后才置 true。SoulAuth 可被直连时置 true，等于让客户端伪造 X-Forwarded-For 绕开 IP 限流与锁定。"
+  - id: database
+    keys:
+      - name: DATABASE_URL
+        required: false
+        default: "127.0.0.1:8000"
+        description: "加 https:// 前缀走 TLS。明文指向非环回地址会在启动时告警。"
+      - name: DATABASE_USER
+        required: false
+        default: "root"
+        description: "生产上应使用限定在 ns/db 内的专用账号。"
+      - name: DATABASE_PASS
+        required: false
+        default: "root"
+      - name: DATABASE_NAMESPACE
+        required: false
+        default: "auth"
+        description: "必须与 schema 导入目标一致。"
+      - name: DATABASE_NAME
+        required: false
+        default: "main"
+        description: "必须与 schema 导入目标一致。"
+      - name: DATABASE_CONNECTION_TIMEOUT
+        required: false
+        default: "30"
+        description: "秒。"
+  - id: lockout
+    note: "三个数值项都拒绝 0。"
+    keys:
+      - name: LOCKOUT_MAX_ATTEMPTS
+        required: false
+        default: "5"
+        description: "锁定前的失败次数。必须 ≥1。"
+      - name: LOCKOUT_DURATION_MINUTES
+        required: false
+        default: "15"
+        description: "锁定时长。必须 ≥1。"
+      - name: LOCKOUT_RESET_WINDOW_MINUTES
+        required: false
+        default: "60"
+        description: "多久没有新失败就清零计数。"
+      - name: LOCKOUT_USER_ENABLED
+        required: false
+        default: "true"
+        description: "账号维度。关掉会失去对**分布式**攻击单账号的防护。"
+      - name: LOCKOUT_IP_ENABLED
+        required: false
+        default: "true"
+        description: "IP 维度。关掉会失去对**撞库**的防护。"
+  - id: bootstrap
+    keys:
+      - name: SOULAUTH_BOOTSTRAP_TOKEN
+        required: false
+        default: "(未设置)"
+        description: "首个管理员的引导令牌。不设置=随机生成并打印到日志；设为具体值=用它；设为**空串**=关闭这条路径。系统里一旦存在管理员，端点永久拒绝。"
+  - id: email
+    keys:
+      - name: SMTP_PORT
+        required: false
+        default: "587"
+      - name: SMTP_USERNAME
+        required: false
+        default: "(空)"
+      - name: SMTP_PASSWORD
+        required: false
+        default: "(空)"
+      - name: SMTP_INSECURE
+        required: false
+        default: "false"
+        description: "true 走明文 SMTP，仅用于本地 sink。"
+      - name: EMAIL_VERIFICATION_ENABLED
+        required: false
+        default: "false"
+      - name: LOGIN_PAGE_URL
+        required: false
+        default: "{APP_URL}/login"
+        description: "/api/oidc/authorize 把未登录用户送去哪。"
+      - name: VERIFY_EMAIL_PAGE_URL
+        required: false
+        default: "由 APP_URL 推导"
+        description: "验证链接落点。"
+  - id: federation
+    note: "全部可选。一个 provider 都不配时，对应端点返回 501。"
+    keys:
+      - name: GOOGLE_CLIENT_ID
+        required: false
+        default: "(空)"
+      - name: GOOGLE_CLIENT_SECRET
+        required: false
+        default: "(空)"
+      - name: GITHUB_CLIENT_ID
+        required: false
+        default: "(空)"
+      - name: GITHUB_CLIENT_SECRET
+        required: false
+        default: "(空)"
+      - name: OAUTH_REDIRECT_URL
+        required: false
+        default: "(空)"
+        description: "配了任一 provider 就必填。"
+      - name: GOOGLE_OAUTH_BASE_URL
+        required: false
+        default: "(空)"
+        description: "端点根地址覆盖。"
+      - name: GITHUB_OAUTH_BASE_URL
+        required: false
+        default: "(空)"
+        description: "供 GitHub Enterprise。明文只允许指向环回地址。"
+  - id: outbound_proxy
+    keys:
+      - name: PROXY_ENABLED
+        required: false
+        default: "false"
+      - name: PROXY_URL
+        required: false
+        default: "(空)"
+        description: "**只影响 OAuth 的 HTTP 请求** —— SMTP 走裸 TCP，不认这个设置。"
+  - id: observability
+    keys:
+      - name: RUST_LOG
+        required: false
+        default: "soulauth=debug,tower_http=info"
+        description: "标准 tracing-subscriber EnvFilter 语法。由 main.rs 直接读取，不经 Config。"

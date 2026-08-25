@@ -1502,3 +1502,246 @@ fn i6_surrealvalue_enums_do_not_also_derive_default() {
          编译、clippy 与断言 serde 往返的单测都发现不了",
     );
 }
+
+// ═════════════════════ J. Machine Contract 层 ═════════════════════
+// 法源: GA-07 §16-24（Machine Contract Authority），
+//       V3 Engineering Alignment Notes 23 §8 / 27 §2 / 29 §1
+
+/// J1 · Permission Registry 与 Runtime 一致
+///
+/// GA-07 §22 把权限的两层职责分开：Meaning 归 27｜Administration，
+/// Exact Name 归 Permission Registry。注册表一旦与 Runtime 漂开，
+/// 「Guide 不得自创权限名」这条纪律就失去了参照物。
+///
+/// I3 已经守住「种子 ↔ 代码」，这里守「注册表 ↔ 代码」。
+#[test]
+fn j1_permission_registry_matches_runtime() {
+    let registry = read("contracts/permissions.yaml");
+    let perm_src = read("src/models/permission.rs");
+
+    let mut in_code: Vec<String> = Vec::new();
+    let mut rest = perm_src.as_str();
+    while let Some(at) = rest.find("auth_local!(\"") {
+        let tail = &rest[at + "auth_local!(\"".len()..];
+        let Some(end) = tail.find('"') else { break };
+        let name = &tail[..end];
+        if !name.is_empty() {
+            in_code.push(format!("soulauth:{name}"));
+        }
+        rest = &tail[end..];
+    }
+    in_code.sort();
+    in_code.dedup();
+    assert!(!in_code.is_empty(), "找不到权限常量 —— 断言失去作用域");
+
+    for p in &in_code {
+        assert!(
+            registry.contains(&format!("name: {p}")),
+            "Runtime 校验 `{p}`，但 Permission Registry 没有声明它"
+        );
+    }
+
+    // 反向：注册表不得声明 Runtime 不校验的权限（授予了却零效果）。
+    for line in registry.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix("- name: soulauth:") {
+            let full = format!("soulauth:{name}");
+            assert!(
+                in_code.contains(&full),
+                "Permission Registry 声明了 `{full}`，但 Runtime 从不校验它"
+            );
+        }
+    }
+}
+
+/// J2 · Configuration Registry 与 Runtime 一致
+///
+/// GA-07 §21 双向：文档写了但 Runtime 不存在 → BLOCK；Runtime 存在且会实质
+/// 改变 Supported Public Behavior 但注册表不声明 → Contract Drift。
+#[test]
+fn j2_configuration_registry_matches_runtime() {
+    let registry = read("contracts/configuration.yaml");
+    let cfg = read("src/config.rs");
+    let main = read("src/main.rs");
+
+    // Runtime 读取的每一个环境变量都必须在注册表里。
+    //
+    // 只认「配置读取辅助函数 + 裸 env::var」这两种形态 —— 源码里其它大写
+    // 字符串（错误文案、SQL 关键字）不是配置项。
+    let mut in_runtime: Vec<String> = Vec::new();
+    for src in [&cfg, &main] {
+        let production = match src.find("#[cfg(test)]") {
+            Some(i) => &src[..i],
+            None => &src[..],
+        };
+        for helper in [
+            "required(\"",
+            "optional(\"",
+            "optional_raw(\"",
+            "parse_bool(\"",
+            "parse_with_default(\"",
+            "env::var(\"",
+        ] {
+            let mut from = 0usize;
+            while let Some(rel) = production[from..].find(helper) {
+                let at = from + rel + helper.len();
+                let Some(end) = production[at..].find('"') else {
+                    break;
+                };
+                let name = &production[at..at + end];
+                if name.len() > 3
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+                {
+                    in_runtime.push(name.to_string());
+                }
+                from = at + end;
+            }
+        }
+    }
+    in_runtime.sort();
+    in_runtime.dedup();
+    assert!(
+        in_runtime.len() > 30,
+        "只解析出 {} 个环境变量，远少于预期 —— 解析逻辑可能失效了",
+        in_runtime.len()
+    );
+
+    for name in &in_runtime {
+        assert!(
+            registry.contains(&format!("name: {name}\n")),
+            "Runtime 读取 `{name}`，但 Configuration Registry 没有声明它"
+        );
+    }
+}
+
+/// J3 · Registry 不得含未填充的占位符
+///
+/// 法源: V3 30｜Project Status §29 —— Public Matrix 中任何 blank / TBD /
+/// `<EXACT>` / Pending 都必须**阻止** Release Status publication。
+///
+/// Machine Contract 是 Public Claim 的依据，同一条纪律适用。
+#[test]
+fn j3_registries_have_no_placeholders() {
+    for f in ["contracts/permissions.yaml", "contracts/configuration.yaml"] {
+        let body = read(f);
+        for (n, line) in body.lines().enumerate() {
+            let code = match line.find('#') {
+                Some(i) => &line[..i],
+                None => line,
+            };
+            for ph in ["<EXACT", "TBD", "TODO", "PENDING", "FIXME"] {
+                assert!(
+                    !code.to_uppercase().contains(ph),
+                    "{f}:{} 含占位符 `{ph}` —— Registry 是 Public Claim 的依据，\
+                     未填充项必须阻止发布",
+                    n + 1
+                );
+            }
+        }
+    }
+}
+
+/// J4 · OpenAPI 与 Runtime 路由表一致
+///
+/// 法源: GA-07 §17「OpenAPI 的最终法位」与 §25「Machine Contract ≠ Runtime
+/// Reality」—— 两者必须对齐，但对齐要靠证据而不是靠承诺。
+///
+/// 这条断言双向：Runtime 有而契约没声明是 Contract Drift；契约声明而 Runtime
+/// 没有是凭空承诺，后者更危险（消费方会照着调）。
+#[test]
+fn j4_openapi_matches_the_route_table() {
+    let spec = read("contracts/openapi.yaml");
+    let main = read("src/main.rs");
+
+    // main.rs 里直接挂的路由（例如 /health）。
+    for m in main.match_indices(".route(\"") {
+        let tail = &main[m.0 + ".route(\"".len()..];
+        let Some(end) = tail.find('"') else { continue };
+        let path = &tail[..end];
+        if !path.starts_with('/') {
+            continue;
+        }
+        assert!(
+            spec.contains(&format!("\n  {path}:")),
+            "Runtime 挂载了 `{path}`，但 OpenAPI 没有声明它"
+        );
+    }
+
+    // 反向：契约里的每个 operationId 都要能在源码里找到同名 handler。
+    let sources = sources();
+    let mut checked = 0usize;
+    for line in spec.lines() {
+        let Some(op) = line.trim().strip_prefix("operationId: ") else {
+            continue;
+        };
+        // operationId 是 `<module>_<handler>`，但两边都可能含下划线
+        // （user_management_list_users、oidc_client_list_clients），按第一个
+        // 下划线切会切错。改为：找一个 routes/ 下的文件，它的模块名是 op 的
+        // 前缀，且文件里有以剩余部分命名的 handler。
+        let found = sources.iter().any(|(f, b)| {
+            let Some(module) = f
+                .strip_prefix("routes/")
+                .and_then(|x| x.strip_suffix(".rs"))
+            else {
+                return false;
+            };
+            let Some(handler) = op.strip_prefix(&format!("{module}_")) else {
+                return false;
+            };
+            b.contains(&format!("fn {handler}("))
+        }) || op
+            .strip_prefix("main_")
+            .is_some_and(|h| read("src/main.rs").contains(&format!("fn {h}(")));
+        assert!(
+            found,
+            "OpenAPI 声明了 operationId `{op}`，但源码里没有这个 handler"
+        );
+        checked += 1;
+    }
+    assert!(
+        checked > 50,
+        "只校验了 {checked} 个 operation —— 解析可能失效了"
+    );
+}
+
+/// J5 · Standards Registry 不得声明未实现的端点
+///
+/// 法源: V3 22 三条纪律 ——
+///   Internal Revocation Semantics  ≠ RFC 7009 Support
+///   Internal / Online Token Lookup ≠ RFC 7662 Introspection
+///   SoulAuth issues Access Tokens  ≠ RFC 9068 Conformance
+///
+/// 「内部有类似动作」不构成对某个标准端点的支持。
+#[test]
+fn j5_standards_registry_does_not_overclaim() {
+    let registry = read("contracts/standards.yaml");
+    let oidc = read("src/services/oidc.rs");
+
+    // 三个高风险规范：声明 implemented: true 就必须能找到对应实现。
+    for (spec_id, marker, what) in [
+        ("rfc7009", "fn revoke_token_endpoint", "/revoke 端点"),
+        ("rfc7662", "fn introspect", "/introspect 端点"),
+    ] {
+        let Some(at) = registry.find(&format!("id: {spec_id}")) else {
+            continue;
+        };
+        let block: String = registry[at..].chars().take(400).collect();
+        let claims_implemented = block.lines().any(|l| l.trim() == "implemented: true");
+        if claims_implemented {
+            assert!(
+                oidc.contains(marker),
+                "Standards Registry 声明 {spec_id} implemented，但找不到 {what}"
+            );
+        }
+    }
+
+    // certified 必须全部为 false —— 当前不存在任何已完成的认证。
+    // 改成 true 需要真实的认证文件作为 Evidence，不能靠自我声明。
+    assert!(
+        !registry.contains("certified: true"),
+        "Standards Registry 出现 certified: true —— 认证需要 Standards \
+         Organization 的正式流程作为 Evidence，不能自我声明"
+    );
+}

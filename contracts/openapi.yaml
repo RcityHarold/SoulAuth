@@ -1,0 +1,738 @@
+# SoulAuth Published OpenAPI Contract
+#
+# 法位：Machine Contract Authority。
+#
+# GA-07 §17-19 与 §50：Human Reference 与 Guide 都不得自行创造 Endpoint、
+# Field、Config Key、Permission、Wire Enum 或 Token Representation。
+# 这里是它们的**唯一**来源。
+#
+# 生成依据：src/main.rs 的 axum 路由表 + src/routes/**。
+# 由 tests/conformance.rs::j4 断言与 Runtime 一致 —— 手工增删端点会让它变红。
+#
+# 当前范围：路径、方法、认证要求、所需权限。
+# **请求/响应 schema 尚未冻结**，因此本文件不声明 requestBody 与 response
+# schema —— 按 23 §3-4，Serialization Contract 与 Error Envelope 需要先由
+# 工程侧冻结，不能由契约文件反向发明。
+openapi: 3.1.0
+info:
+  title: SoulAuth
+  version: "0.1.0"
+  description: >-
+    Actor-native identity and authentication infrastructure.
+    Endpoint surface only; payload schemas are not yet frozen.
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+
+servers:
+  - url: "{APP_URL}"
+    description: >-
+      公开地址，由 APP_URL 配置。它同时是 OIDC issuer —— 二者必须逐字一致。
+    variables:
+      APP_URL:
+        default: http://localhost:8080
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >-
+        会话令牌，来自 POST /api/auth/login。
+        OIDC 协议端点不用它：/authorize 认浏览器会话 cookie，
+        /token 认客户端凭据。
+
+tags:
+  - name: Actors & Profiles
+  - name: Administration
+  - name: Audit
+  - name: Authentication
+  - name: Bootstrap
+  - name: Health
+  - name: OIDC
+  - name: OIDC Clients
+  - name: Operations
+  - name: Security
+
+paths:
+  /.well-known/openid-configuration:
+    get:
+      tags: [OIDC]
+      operationId: oidc_openid_configuration
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/audit/activity-summary:
+    get:
+      tags: [Audit]
+      operationId: audit_get_activity_summary
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:audit.read]
+      responses:
+        "200":
+          description: OK
+  /api/audit/dashboard:
+    get:
+      tags: [Audit]
+      operationId: audit_get_audit_dashboard
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:audit.read]
+      responses:
+        "200":
+          description: OK
+  /api/audit/security-metrics:
+    get:
+      tags: [Audit]
+      operationId: audit_get_security_metrics
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:security.read]
+      responses:
+        "200":
+          description: OK
+  /api/audit/security-report:
+    get:
+      tags: [Audit]
+      operationId: audit_generate_security_report
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:audit.read]
+      responses:
+        "200":
+          description: OK
+  /api/audit/system-health:
+    get:
+      tags: [Audit]
+      operationId: audit_get_system_health
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:security.read]
+      responses:
+        "200":
+          description: OK
+  /api/auth/admin/login:
+    post:
+      tags: [Authentication]
+      operationId: auth_admin_login
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/callback/github:
+    get:
+      tags: [Authentication]
+      operationId: auth_github_callback
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/callback/google:
+    get:
+      tags: [Authentication]
+      operationId: auth_google_callback
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/initialize-password:
+    post:
+      tags: [Authentication]
+      operationId: auth_initialize_password
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/login:
+    post:
+      tags: [Authentication]
+      operationId: auth_login
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/login/github:
+    get:
+      tags: [Authentication]
+      operationId: auth_github_login
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/login/google:
+    get:
+      tags: [Authentication]
+      operationId: auth_google_login
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/logout:
+    post:
+      tags: [Authentication]
+      operationId: auth_logout
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/logout-all:
+    post:
+      tags: [Authentication]
+      operationId: auth_logout_all
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/me:
+    get:
+      tags: [Authentication]
+      operationId: auth_get_current_user
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/mfa/disable:
+    post:
+      tags: [Authentication]
+      operationId: auth_mfa_disable
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/mfa/enable:
+    post:
+      tags: [Authentication]
+      operationId: auth_mfa_enable
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/mfa/login-verify:
+    post:
+      tags: [Authentication]
+      operationId: auth_mfa_login_verify
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/mfa/setup:
+    post:
+      tags: [Authentication]
+      operationId: auth_mfa_setup
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/mfa/status:
+    get:
+      tags: [Authentication]
+      operationId: auth_mfa_status
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/register:
+    post:
+      tags: [Authentication]
+      operationId: auth_register
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/request-password-reset:
+    post:
+      tags: [Authentication]
+      operationId: auth_request_password_reset
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/resend-verification:
+    post:
+      tags: [Authentication]
+      operationId: auth_resend_verification
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/reset-password:
+    post:
+      tags: [Authentication]
+      operationId: auth_reset_password
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/sessions:
+    get:
+      tags: [Authentication]
+      operationId: auth_get_sessions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/auth/verify-email/:token:
+    get:
+      tags: [Authentication]
+      operationId: auth_verify_email
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/bootstrap/admin:
+    post:
+      tags: [Bootstrap]
+      operationId: bootstrap_bootstrap_admin
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/.well-known/openid-configuration:
+    get:
+      tags: [OIDC]
+      operationId: oidc_openid_configuration
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/authorize:
+    get:
+      tags: [OIDC]
+      operationId: oidc_authorize
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/clients:
+    get:
+      tags: [OIDC Clients]
+      operationId: oidc_client_list_clients
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.read]
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [OIDC Clients]
+      operationId: oidc_client_create_client
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.write]
+      responses:
+        "200":
+          description: OK
+  /api/oidc/clients/:client_id:
+    delete:
+      tags: [OIDC Clients]
+      operationId: oidc_client_disable_client
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.write]
+      responses:
+        "200":
+          description: OK
+    get:
+      tags: [OIDC Clients]
+      operationId: oidc_client_get_client
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.read]
+      responses:
+        "200":
+          description: OK
+    put:
+      tags: [OIDC Clients]
+      operationId: oidc_client_update_client
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.write]
+      responses:
+        "200":
+          description: OK
+  /api/oidc/clients/:client_id/regenerate-secret:
+    post:
+      tags: [OIDC Clients]
+      operationId: oidc_client_regenerate_secret
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:oidc_clients.write]
+      responses:
+        "200":
+          description: OK
+  /api/oidc/jwks:
+    get:
+      tags: [OIDC]
+      operationId: oidc_jwks
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/logout:
+    get:
+      tags: [OIDC]
+      operationId: oidc_logout
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/token:
+    post:
+      tags: [OIDC]
+      operationId: oidc_token
+      security: []
+      responses:
+        "200":
+          description: OK
+  /api/oidc/userinfo:
+    get:
+      tags: [OIDC]
+      operationId: oidc_userinfo
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/ops/memberships/overview:
+    get:
+      tags: [Operations]
+      operationId: ops_get_membership_overview
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.read]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/check/permission/:permission_name:
+    get:
+      tags: [Administration]
+      operationId: rbac_check_permission
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/rbac/check/role/:role_name:
+    get:
+      tags: [Administration]
+      operationId: rbac_check_role
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/rbac/permissions:
+    get:
+      tags: [Administration]
+      operationId: rbac_list_permissions
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:permissions.read]
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Administration]
+      operationId: rbac_create_permission
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:permissions.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/permissions/:permission_name:
+    get:
+      tags: [Administration]
+      operationId: rbac_get_permission
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:permissions.read]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/roles:
+    get:
+      tags: [Administration]
+      operationId: rbac_list_roles
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.read]
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Administration]
+      operationId: rbac_create_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/roles/:role_name:
+    delete:
+      tags: [Administration]
+      operationId: rbac_delete_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.delete]
+      responses:
+        "200":
+          description: OK
+    get:
+      tags: [Administration]
+      operationId: rbac_get_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.read]
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Administration]
+      operationId: rbac_update_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/roles/:role_name/permissions:
+    get:
+      tags: [Administration]
+      operationId: rbac_get_role_permissions
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.read]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/roles/:role_name/permissions/assign:
+    post:
+      tags: [Administration]
+      operationId: rbac_assign_permission_to_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:permissions.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/roles/:role_name/permissions/remove:
+    post:
+      tags: [Administration]
+      operationId: rbac_remove_permission_from_role
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:permissions.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/users/:user_id/permissions:
+    get:
+      tags: [Administration]
+      operationId: rbac_get_user_permissions
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/rbac/users/:user_id/roles:
+    get:
+      tags: [Administration]
+      operationId: rbac_get_user_roles
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/rbac/users/:user_id/roles/assign:
+    post:
+      tags: [Administration]
+      operationId: rbac_assign_role_to_user
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.write]
+      responses:
+        "200":
+          description: OK
+  /api/rbac/users/:user_id/roles/remove:
+    post:
+      tags: [Administration]
+      operationId: rbac_remove_role_from_user
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:roles.write]
+      responses:
+        "200":
+          description: OK
+  /api/security/lockout:
+    get:
+      tags: [Security]
+      operationId: security_get_lockout_status
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:security.read]
+      responses:
+        "200":
+          description: OK
+  /api/security/unlock:
+    post:
+      tags: [Security]
+      operationId: security_unlock
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:security.write]
+      responses:
+        "200":
+          description: OK
+  /api/users/activity-log:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_activity_log
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/users/preferences:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Actors & Profiles]
+      operationId: user_management_create_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/users/profile:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Actors & Profiles]
+      operationId: user_management_create_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+  /api/users/users:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_list_users
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.read]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_by_id
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.read]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id/activity-log:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_activity_log_by_id
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:audit.read]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id/membership:
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_membership
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.write]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id/preferences:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_preferences_by_id
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.read]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id/profile:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_profile_by_id
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.read]
+      responses:
+        "200":
+          description: OK
+  /api/users/users/:user_id/status:
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_account_status
+      security:
+        - bearerAuth: []
+      x-required-permissions: [soulauth:users.write]
+      responses:
+        "200":
+          description: OK
+  /health:
+    get:
+      tags: [Health]
+      operationId: main_health
+      security: []
+      responses:
+        "200":
+          description: OK
