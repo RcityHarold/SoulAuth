@@ -34,7 +34,7 @@ use surrealdb::types::RecordId as Thing;
 use surrealdb_types::SurrealValue;
 
 /// 这条绑定连接的是哪一类外部身份。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum BindingType {
     /// 外部 IdP：Google、GitHub、企业 IdP。
@@ -44,8 +44,16 @@ pub enum BindingType {
     Canonical,
 }
 
+impl BindingType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            BindingType::Federated => "federated",
+            BindingType::Canonical => "canonical",
+        }
+    }
+}
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum VerificationState {
     #[default]
@@ -54,6 +62,24 @@ pub enum VerificationState {
     Revoked,
 }
 
+impl VerificationState {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VerificationState::Verified => "verified",
+            VerificationState::Pending => "pending",
+            VerificationState::Revoked => "revoked",
+        }
+    }
+
+    /// 未知取值归入 `Pending`（fail-closed）：读不懂就不放行解析。
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "verified" => VerificationState::Verified,
+            "revoked" => VerificationState::Revoked,
+            _ => VerificationState::Pending,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
 pub struct IdentityBinding {
@@ -70,8 +96,9 @@ pub struct IdentityBinding {
     /// `"4001"` 的 Google 用户，并拿到那个用户的会话。
     pub provider_subject: String,
 
-    pub binding_type: BindingType,
-    pub verification_state: VerificationState,
+    /// 落库形态是字符串，与 schema 的 `TYPE string` 对齐。
+    pub binding_type: String,
+    pub verification_state: String,
     pub bound_at: i64,
 
     /// 绑定被撤销的时间。
@@ -92,8 +119,8 @@ impl IdentityBinding {
             actor_identity_id,
             provider: provider.into(),
             provider_subject: provider_subject.into(),
-            binding_type: BindingType::Federated,
-            verification_state: VerificationState::Verified,
+            binding_type: BindingType::Federated.as_str().to_string(),
+            verification_state: VerificationState::Verified.as_str().to_string(),
             bound_at: Utc::now().timestamp(),
             revoked_at: None,
         }
@@ -101,7 +128,8 @@ impl IdentityBinding {
 
     /// 这条绑定当前是否可用于解析身份。
     pub fn is_active(&self) -> bool {
-        self.revoked_at.is_none() && self.verification_state == VerificationState::Verified
+        self.revoked_at.is_none()
+            && VerificationState::parse(&self.verification_state) == VerificationState::Verified
     }
 }
 
@@ -125,24 +153,27 @@ mod tests {
     #[test]
     fn pending_binding_does_not_resolve_either() {
         let mut b = IdentityBinding::new_federated(actor(), "github", "4001");
-        b.verification_state = VerificationState::Pending;
+        b.verification_state = VerificationState::Pending.as_str().to_string();
         assert!(!b.is_active(), "未验证的绑定不得用于解析身份");
     }
 
     #[test]
     fn wire_values_are_stable() {
         // 验 serde：落库走的是它。
+        // 落库走的是 as_str()，不是 serde —— schema 上这两列是 TYPE string，
+        // 而 SurrealValue derive 会把枚举编码成 `{ Variant: {} }`，与之冲突。
+        // 集成测试第一次跑就撞上了这个（actor_kind 报
+        // "Expected `string` but found `{ Human: {} }`"）。
+        assert_eq!(BindingType::Canonical.as_str(), "canonical");
+        assert_eq!(VerificationState::Revoked.as_str(), "revoked");
         assert_eq!(
-            serde_json::to_string(&BindingType::Canonical).unwrap(),
-            "\"canonical\""
+            VerificationState::parse("verified"),
+            VerificationState::Verified
         );
+        // 未知取值 fail-closed。
         assert_eq!(
-            serde_json::to_string(&VerificationState::Revoked).unwrap(),
-            "\"revoked\""
-        );
-        assert_eq!(
-            serde_json::from_str::<BindingType>("\"federated\"").unwrap(),
-            BindingType::Federated
+            VerificationState::parse("garbage"),
+            VerificationState::Pending
         );
     }
 }

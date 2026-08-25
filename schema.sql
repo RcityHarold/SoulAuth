@@ -130,7 +130,16 @@ DEFINE FIELD updated_at ON subject TYPE number;
 
 -- 用户表（V1）
 DEFINE TABLE user SCHEMAFULL;
-DEFINE FIELD subject_id ON user TYPE option<record<subject>>;
+-- 指向身份根。
+--
+-- 字段名还叫 subject_id 是历史遗留（V1 指向 subject 表），Stage 4 拆掉
+-- user 表时一并消失，现在改名只会制造一次纯噪声的 diff。
+--
+-- 这一处是步骤 3 批量迁移外键时**漏掉的第 12 处** —— 它写的是
+-- `record<subject>` 而不是 `record<user>`，不匹配替换模式。集成测试
+-- 以「Expected `none | record<subject>` but found `actor_identity:...`」
+-- 抓到了它。
+DEFINE FIELD subject_id ON user TYPE option<record<actor_identity>>;
 DEFINE FIELD email ON user TYPE string;
 DEFINE FIELD username ON user TYPE string;
 DEFINE FIELD username_normalized ON user TYPE string;

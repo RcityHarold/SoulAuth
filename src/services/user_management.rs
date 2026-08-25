@@ -51,7 +51,12 @@ impl UserManagementService {
         
         // 检查用户是否存在
         let mut response = self.db.client
-            .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
+            // `user_thing` 自 Stage 3 起是**身份根**引用，不能拿它去 user 表查 ——
+            // 那必然查不到，于是建资料返回 404。存在性判定改查 actor_identity。
+            // `SELECT VALUE id` 而不是 `SELECT *`：整行里有 record 类型字段，
+            // 用 serde_json::Value 接会报「Expected any, got record」。
+            // 这里只需要判断有没有这一行，取 id 就够。
+            .query("SELECT VALUE id FROM actor_identity WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
             .and_then(|response| response.check())
@@ -60,12 +65,14 @@ impl UserManagementService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let users: Vec<User> = response.take(0).map_err(|e| {
-            error!("Failed to parse user: {}", e);
+        // 只判存在。取 RecordId 而不是整行：actor_identity 既没有 User 的
+        // email / password 字段，整行里的 record 类型也接不进 serde_json::Value。
+        let actors: Vec<surrealdb::types::RecordId> = response.take(0).map_err(|e| {
+            error!("Failed to parse actor identity: {}", e);
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        if users.is_empty() {
+        if actors.is_empty() {
             return Err(AuthError::NotFound("User not found".to_string()));
         }
 

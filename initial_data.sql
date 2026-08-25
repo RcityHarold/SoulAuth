@@ -172,23 +172,25 @@ UPSERT role:user CONTENT {
     updated_at: 0
 };
 
--- 为系统用户创建记录（用于权限分配的授权者）
+-- 系统哨兵身份（权限分配的授权者）。
+--
+-- 它是一个真实存在的 actor_identity 记录，不是悬空引用：SurrealDB 在
+-- SCHEMAFULL 表上会具体化被引用的记录，写一个不存在的 id 会以
+-- 「Expected `string` but found `NONE`」失败 —— 集成测试第一次跑就撞上了。
+--
+-- 它不代表任何人。系统发起的授予没有人类操作者，记一个真实管理员反而是
+-- 伪造归因，所以用这条专门的哨兵。它 status 为 retired：既保留标识符，
+-- 又保证它永远不能通过 can_authenticate()。
+--
 -- 注意：UPSERT ... CONTENT 会整条替换记录，而 DEFAULT 只在创建时生效。
 -- 因此凡是 TYPE 非 option 的字段都必须在这里显式写出，
 -- 否则第二次导入时该字段变成 NONE，直接撞类型校验。
 UPSERT actor_identity:system CONTENT {
-    email: "system@internal",
-    username: "system",
-    username_normalized: "system",
-    password: NONE,
-    verified: true,
-    verification_token: NONE,
-    verification_token_expires_at: NONE,
-    account_status: "Active",
-    membership_level: "FREE",
-    membership_expiry: NONE,
-    last_login_at: NONE,
-    last_login_ip: NONE,
+    subject_key: "system",
+    actor_kind: "human",
+    identity_source: "local",
+    canonical_actor_ref: NONE,
+    status: "retired",
     created_at: 0,
     updated_at: 0
 };

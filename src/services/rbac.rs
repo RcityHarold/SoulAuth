@@ -476,9 +476,15 @@ impl RBACService {
     /// 操作者的账号，记一个真实用户 ID 反而是伪造归因，所以 `assigned_by` 落在
     /// `user:system` 上 —— 与部署文档里那段手工 SQL 用的是同一个约定。
     pub async fn assign_role_as_system(&self, user_id: &str, role_name: &str) -> Result<(), AuthError> {
-        // 哨兵引用。外键类型已是 record<actor_identity>，所以这里也得是
-        // `actor_identity:system` —— 它并不真的存在，SurrealDB 也不做外键
-        // 存在性校验，但类型必须对得上，否则 SCHEMAFULL 会拒写。
+        // 哨兵引用 `actor_identity:system`。
+        //
+        // 它是种子数据里一条**真实存在**的记录，不是悬空引用 —— 我最初以为
+        // 「类型对上即可、记录不必存在」，集成测试当场证否：SurrealDB 在
+        // SCHEMAFULL 表上会具体化被引用的记录，缺字段就以
+        // 「Expected `string` but found `NONE`」拒绝整条导入。
+        //
+        // 那条哨兵的 status 是 retired：既占住标识符，又永远过不了
+        // can_authenticate()。
         //
         // 用哨兵而不是某个真实管理员：这次授予没有人类操作者，记一个真实 id
         // 反而是伪造归因。种子数据里的 granted_by 用的是同一个约定。
@@ -743,8 +749,14 @@ impl RBACService {
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
         let permission_id = permission.id.ok_or_else(|| AuthError::DatabaseError("Permission ID not found".to_string()))?;
-        let granted_by_thing = granted_by.id.as_ref()
+        // `granted_by` 是外键，Stage 3 起指身份根。漏改这一处会让整条
+        // role_permission 写入以 500 失败 —— 集成测试「给角色授权限」抓到了。
+        let granted_by_id = granted_by.id.as_ref()
             .ok_or_else(|| AuthError::DatabaseError("Granted by user ID not found".to_string()))?;
+        let granted_by_thing = self
+            .db
+            .actor_ref_of_user(&crate::utils::record_id::record_id_key_to_string(granted_by_id))
+            .await?;
 
         // 检查是否已经分配
         let check_query = "SELECT * FROM role_permission WHERE role_id = $role_id AND permission_id = $permission_id";
@@ -773,7 +785,7 @@ impl RBACService {
             role_id,
             permission_id,
             granted_at: Utc::now().timestamp(),
-            granted_by: granted_by_thing.clone(),
+            granted_by: granted_by_thing,
         };
 
         let query = "CREATE role_permission CONTENT $role_permission";

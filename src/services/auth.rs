@@ -794,13 +794,20 @@ impl AuthService {
             .db
             .raw_query(
                 "claim_verification_token",
-                "UPDATE user SET is_email_verified = true, verification_token = NONE, \
+                // 列名是 `verified`，不是 `is_email_verified` —— 后者是 Rust
+                // 侧的字段名，靠 `#[surreal(rename)]` 映射过来。写裸 SQL 时
+                // 必须用库里的真实列名，否则整条语句失败（伪造 token 也返回
+                // 500，因为 SQL 根本没执行成功）。
+                "UPDATE user SET verified = true, verification_token = NONE, \
                  verification_token_expires_at = NONE, updated_at = $now \
-                 WHERE verification_token = $token AND is_email_verified = false \
+                 WHERE verification_token = $token_value AND verified = false \
                  AND verification_token_expires_at != NONE \
                  AND verification_token_expires_at > $now \
                  RETURN VALUE id",
-                serde_json::json!({ "token": &token, "now": now_ts }),
+                // 绑定名不能叫 `token`：SurrealDB 里 `$token` 是**保留变量**，
+                // 设置它会以「'token' is a protected variable and cannot be set」
+                // 整条语句失败 —— 于是伪造 token 也返回 500，因为 SQL 根本没跑成。
+                serde_json::json!({ "token_value": &token, "now": now_ts }),
             )
             .await?;
         let claimed_ids: Vec<Thing> = claimed.take(0)?;
@@ -1012,10 +1019,17 @@ impl AuthService {
             .db
             .raw_query(
                 "claim_password_reset_token",
+                // 过期判定用库内的 `time::now()`，不传绑定值。
+                //
+                // `expires_at` 是 `datetime` 列，而经 JSON 绑定传进去的
+                // `Utc::now()` 会变成字符串 —— SurrealDB 里 datetime 与字符串
+                // 按**类型序**比较而非值序，条件因此不成立。这个坑在
+                // rate_limiter.rs 的注释里已经记过一次。
                 "UPDATE password_reset_token SET used = true \
-                 WHERE token = $token AND used = false AND expires_at > $now \
+                 WHERE token = $token_value AND used = false AND expires_at > time::now() \
                  RETURN VALUE token",
-                serde_json::json!({ "token": &token, "now": Utc::now() }),
+                // 同上：`$token` 是 SurrealDB 保留变量。
+                serde_json::json!({ "token_value": &token }),
             )
             .await?;
         let claimed_tokens: Vec<String> = claimed.take(0)?;

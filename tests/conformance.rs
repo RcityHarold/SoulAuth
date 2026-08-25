@@ -1158,7 +1158,9 @@ fn i1_one_time_artifacts_are_claimed_atomically() {
             "密码重置令牌",
             "UPDATE password_reset_token SET used = true",
         ),
-        ("邮箱验证令牌", "UPDATE user SET is_email_verified = true"),
+        // 列名是 `verified`，不是 Rust 侧的 `is_email_verified`（那个靠
+        // `#[surreal(rename)]` 映射）。裸 SQL 用错列名会让整条语句失败。
+        ("邮箱验证令牌", "UPDATE user SET verified = true"),
     ];
     for (label, stmt) in claims {
         // 同一条 UPDATE 前缀可能出现多次且用途不同：密码重置既有「抢占这一枚」，
@@ -1356,10 +1358,17 @@ fn i4_identity_root_allow_is_removed_once_wired() {
 #[test]
 fn i5_foreign_keys_point_at_the_identity_root() {
     // ① schema 侧：外键类型全部迁完。
+    //
+    // 同时查 `record<user>` 与 `record<subject>`：步骤 3 批量替换时只匹配了
+    // 前者，于是 `user.subject_id` 那处（写的是 `option<record<subject>>`）
+    // 漏网，直到集成测试报
+    // 「Expected `none | record<subject>` but found `actor_identity:...`」
+    // 才暴露。判据必须覆盖**所有**指向旧身份表的外键，而不是某一种写法。
     let schema_sql = schema();
     let leftovers: Vec<&str> = schema_sql
         .lines()
-        .filter(|l| l.contains("record<user>"))
+        .filter(|l| l.trim_start().starts_with("DEFINE FIELD"))
+        .filter(|l| l.contains("record<user>") || l.contains("record<subject>"))
         .collect();
     assert!(
         leftovers.is_empty(),
@@ -1397,5 +1406,102 @@ fn i5_foreign_keys_point_at_the_identity_root() {
         bad,
         "I5: 外键已指向 actor_identity，这些查询仍按 user 记录匹配 —— \
          它们能编译、能运行，只是一行也匹配不到",
+    );
+}
+
+/// I6 · `SurrealValue` 枚举不得同时 derive `Default`
+///
+/// SurrealDB 的 `SurrealValue` derive 对 unit-only 枚举编码成字符串 —— 仓库里
+/// `LockoutType`、`MfaMethod`、`ActivityCategory` 都这么用，与 schema 的
+/// `TYPE string` 对得上，一直工作正常。
+///
+/// 但同时 derive `Default`（配 `#[default]` 属性）会让它改走 struct-like 编码，
+/// 产出 `{ Human: {} }`，数据库随即以
+/// 「Expected `string` but found `{ Human: {} }`」拒绝整条写入。
+///
+/// 这个失败模式有三重伪装：编译通过、clippy 通过、单测也通过 —— 只要单测
+/// 断言的是 `serde_json` 往返（serde 与 SurrealValue 是两条不同的序列化路径）。
+/// Stage 1 的三个新模型全部踩中，直到集成测试第一次跑才暴露。
+///
+/// 需要默认值时，把字段落成 `String`，枚举只在应用层用，两侧靠
+/// `as_str()` / `parse()` 转换 —— 这也是 `models::user::AccountStatus` 的做法。
+#[test]
+fn i6_surrealvalue_enums_do_not_also_derive_default() {
+    let mut bad = Vec::new();
+    for (file, body) in sources() {
+        if !file.starts_with("models/") {
+            continue;
+        }
+        let lines: Vec<&str> = body.lines().collect();
+        for (i, line) in lines.iter().enumerate() {
+            if !line.contains("derive(") || !line.contains("SurrealValue") {
+                continue;
+            }
+            if !line.contains("Default") {
+                continue;
+            }
+            // 只管枚举：结构体的 Default 不走这条编码路径。
+            let mut j = i + 1;
+            while j < lines.len() && lines[j].trim_start().starts_with('#') {
+                j += 1;
+            }
+            let Some(decl) = lines.get(j) else { continue };
+            let Some(rest) = decl.trim_start().strip_prefix("pub enum ") else {
+                continue;
+            };
+            let Some(name) = rest.split_whitespace().next() else {
+                continue;
+            };
+            let name = name.trim_end_matches('{').trim();
+
+            // 光有这个 derive 组合还不致命 —— `AccountStatus` 就是这样，但它
+            // 落库的字段是 `String`（`user.account_status: String`），枚举只在
+            // 应用层用。真正会炸的是**直接拿它当结构体字段类型**。
+            // 还要区分**落库结构体**与 API DTO：`UserResponse` 这类只走 serde
+            // 到 JSON，用枚举完全合法。判据是结构体带不带 `id: Option<Thing>`
+            // —— 有它才是落库记录。
+            let mut used_in_persisted = None;
+            let mut current_struct: Option<&str> = None;
+            let mut struct_body = String::new();
+            for l in body.lines() {
+                let t = l.trim();
+                if let Some(rest) = t.strip_prefix("pub struct ") {
+                    // 上一个结构体收尾判定
+                    if let Some(sname) = current_struct {
+                        if struct_body.contains("id: Option<Thing>")
+                            && struct_body.contains(&format!(": {name},"))
+                        {
+                            used_in_persisted = Some(sname.to_string());
+                        }
+                    }
+                    current_struct = rest.split_whitespace().next();
+                    struct_body.clear();
+                    continue;
+                }
+                let code = match l.find("//") {
+                    Some(k) => &l[..k],
+                    None => l,
+                };
+                struct_body.push_str(code);
+                struct_body.push('\n');
+            }
+            if let Some(sname) = current_struct {
+                if struct_body.contains("id: Option<Thing>")
+                    && struct_body.contains(&format!(": {name},"))
+                {
+                    used_in_persisted = Some(sname.to_string());
+                }
+            }
+
+            if let Some(sname) = used_in_persisted {
+                bad.push(format!("{file}:{}  {name}（落库于 {sname}）", i + 1));
+            }
+        }
+    }
+    assert_absent(
+        bad,
+        "I6: 这些枚举同时 derive 了 SurrealValue 与 Default。落库时会编码成 \
+         `{ Variant: {} }` 而不是字符串，数据库以 `Expected string` 拒写 —— \
+         编译、clippy 与断言 serde 往返的单测都发现不了",
     );
 }

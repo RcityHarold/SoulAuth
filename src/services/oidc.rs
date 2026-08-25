@@ -711,13 +711,27 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Client not found"))
     }
 
+    /// 由**身份根**引用取回 user 行。
+    ///
+    /// 授权码与令牌里的 `user_id` 自 Stage 3 起存的是 actor ref，所以这里按
+    /// `subject_id` 反查。按 `user.id` 查会一行也找不到 —— 授权码签发成功、
+    /// 兑换却返回 400，集成测试抓到的正是这个。
+    ///
+    /// 兼容旧值：Stage 3 之前签发、仍在有效期内的授权码与刷新令牌里存的是
+    /// user id。两种都试，直到那批令牌自然过期。
     async fn get_user_by_id(&self, user_id: &str) -> Result<User> {
+        // 传进来的可能是 actor ref（Stage 3 起的新令牌）或 user id（旧令牌），
+        // 两种前缀都要能剥掉。
+        let key = crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id));
         let users: Vec<User> = self
             .db
             .query_take0_vec(
-                "oidc_get_user_by_id",
-                "SELECT * FROM user WHERE id = type::record('user', $user_key) LIMIT 1",
-                serde_json::json!({ "user_key": normalize_user_id(user_id) }),
+                "oidc_get_user_by_actor_ref",
+                "SELECT * FROM user \
+                 WHERE subject_id = type::record('actor_identity', $user_key) \
+                    OR id = type::record('user', $user_key) \
+                 LIMIT 1",
+                serde_json::json!({ "user_key": key }),
             )
             .await?;
 
@@ -856,7 +870,7 @@ impl OidcService {
                 token: $access_token_value,
                 token_type: $token_type,
                 client_id: $client_id,
-                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
+                user_id: type::record('actor_identity', $user_key),
                 scope: $scope,
                 expires_at: $expires_at,
                 created_at: $created_at
@@ -871,7 +885,7 @@ impl OidcService {
                     "access_token_value": token.token,
                     "token_type": token.token_type,
                     "client_id": token.client_id,
-                    "user_key": normalize_user_id(&token.user_id),
+                    "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
                     "scope": token.scope,
                     "expires_at": token.expires_at,
                     "created_at": token.created_at,
@@ -934,7 +948,7 @@ impl OidcService {
             CREATE oidc_refresh_token CONTENT {
                 token: $refresh_token_value,
                 client_id: $client_id,
-                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
+                user_id: type::record('actor_identity', $user_key),
                 access_token: $access_token,
                 scope: $scope,
                 auth_session_ref: $auth_session_ref ?? NONE,
@@ -951,7 +965,7 @@ impl OidcService {
                 serde_json::json!({
                     "refresh_token_value": token.token,
                     "client_id": token.client_id,
-                    "user_key": normalize_user_id(&token.user_id),
+                    "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
                     "access_token": token.access_token,
                     "auth_session_ref": token.auth_session_ref,
                     "scope": token.scope,

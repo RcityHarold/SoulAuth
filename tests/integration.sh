@@ -223,7 +223,9 @@ start_app() {
         BIND_ADDR="127.0.0.1:${APP_PORT}" \
         RUST_LOG=soulauth=warn \
         exec ./target/debug/soulauth
-    ) > "$WORK/app.log" 2>&1 &
+    # 追加而不是覆盖：测试全程会多次 restart_app，用 `>` 的话前面组的错误
+    # 会被后面的重启冲掉 —— 排查时看到"日志无错误"是假象，实际是日志没了。
+    ) >> "$WORK/app.log" 2>&1 &
     APP_PID=$!
     disown "$APP_PID" 2>/dev/null   # 免得 kill -9 时 shell 打一行 "Killed ..." 混进输出
     wait_for "${APP}/api/oidc/jwks" "SoulAuth" || { cat "$WORK/app.log"; exit 2; }
@@ -452,10 +454,16 @@ eq 200 "$(exchange "$CODE" "$VERIFIER")" "授权码兑换成功"
 ID_TOKEN="$(jget id_token)"; REFRESH="$(jget refresh_token)"
 
 claim() {
+    # 键缺失与 JSON null 都算「没有这个 claim」。
+    #
+    # `.get(k, '')` 只处理前者：不带 email scope 时 `email` 是 Rust 的
+    # `Option::None`，序列化成 JSON null，`.get()` 取到 None 打印成字符串
+    # "None" —— 断言「不含 email」于是拿到 "None" 而非空串，误报失败。
     python3 -c "
 import base64,json
 p='$1'.split('.')[1]; p+='='*(-len(p)%4)
-print(json.loads(base64.urlsafe_b64decode(p)).get('$2',''))" 2>/dev/null
+v=json.loads(base64.urlsafe_b64decode(p)).get('$2')
+print('' if v is None else v)" 2>/dev/null
 }
 eq "$EXPECT_SID" "$(claim "$ID_TOKEN" sid)" "ID Token 的 sid 等于认证会话主键"
 

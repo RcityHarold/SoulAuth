@@ -32,7 +32,7 @@ use surrealdb_types::SurrealValue;
 ///
 /// wire 值是 snake_case（`human` / `ai_actor`）。GA-03 §3 提醒过：语义标签
 /// 写作 `AIActor` 不等于 wire 必须是 `AIActor`。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorKind {
     #[default]
@@ -40,13 +40,21 @@ pub enum ActorKind {
     AiActor,
 }
 
+impl ActorKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ActorKind::Human => "human",
+            ActorKind::AiActor => "ai_actor",
+        }
+    }
+}
 
 /// 这个身份通过什么受控来源进入 SoulAuth。
 ///
 /// 它**不替代** [`super::identity_binding::IdentityBinding`]，也不意味着一个
 /// Actor 只能拥有一条外部身份关系：provenance 说的是「怎么来的」，
 /// binding 说的是「和外部哪个主体是同一个」。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum IdentitySource {
     /// SoulAuth 自己的身份域（Standalone 默认）。
@@ -58,6 +66,15 @@ pub enum IdentitySource {
     External,
 }
 
+impl IdentitySource {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            IdentitySource::Local => "local",
+            IdentitySource::Soulseed => "soulseed",
+            IdentitySource::External => "external",
+        }
+    }
+}
 
 /// 身份的生命周期状态。
 ///
@@ -68,7 +85,7 @@ pub enum IdentitySource {
 /// 2. Suspension **不改写**历史身份事实 —— 过去发生的 Authentication 与
 ///    Attribution 不会因为现在被暂停就变得不曾发生。
 /// 3. Retirement **不允许** subject 复用 —— 见 [`ActorIdentity::subject_key`]。
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, SurrealValue, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ActorStatus {
     #[default]
@@ -92,6 +109,18 @@ impl ActorStatus {
     pub fn can_authenticate(&self) -> bool {
         matches!(self, ActorStatus::Active)
     }
+
+    /// 未知取值归入 `Suspended`（fail-closed）。
+    ///
+    /// 读不懂的状态一律当作不可认证。反过来（未知即 Active）会让一个拼错的
+    /// 状态值悄悄放行。
+    pub fn parse(raw: &str) -> Self {
+        match raw {
+            "active" => ActorStatus::Active,
+            "retired" => ActorStatus::Retired,
+            _ => ActorStatus::Suspended,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, SurrealValue)]
@@ -112,8 +141,10 @@ pub struct ActorIdentity {
     /// 与「是否保留该 Actor 的个人数据」是两回事。
     pub subject_key: String,
 
-    pub actor_kind: ActorKind,
-    pub identity_source: IdentitySource,
+    /// 落库形态是字符串，与 schema 的 `TYPE string` 对齐。
+    /// 用 [`ActorKind::parse`] 解回枚举。
+    pub actor_kind: String,
+    pub identity_source: String,
 
     /// Soulseed 模式下引用 SoulseedAGI 已成立的 Canonical Actor。
     ///
@@ -123,7 +154,7 @@ pub struct ActorIdentity {
     /// 不得默认暴露给第三方 OIDC Client：属受控 Integration Claim。
     pub canonical_actor_ref: Option<String>,
 
-    pub status: ActorStatus,
+    pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -139,10 +170,10 @@ impl ActorIdentity {
         Self {
             id: None,
             subject_key: subject_key.into(),
-            actor_kind,
-            identity_source: IdentitySource::Local,
+            actor_kind: actor_kind.as_str().to_string(),
+            identity_source: IdentitySource::Local.as_str().to_string(),
             canonical_actor_ref: None,
-            status: ActorStatus::Active,
+            status: ActorStatus::Active.as_str().to_string(),
             created_at: now,
             updated_at: now,
         }
@@ -150,7 +181,7 @@ impl ActorIdentity {
 
     /// 这个身份现在还能不能建立新的认证。
     pub fn can_authenticate(&self) -> bool {
-        self.status.can_authenticate()
+        ActorStatus::parse(&self.status).can_authenticate()
     }
 }
 
@@ -159,32 +190,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn wire_values_are_snake_case() {
-        // 这是对外契约：改了会让已经落库的记录反序列化失败。
-        // 直接验 serde 而不是 as_str()：落库与出网走的是 serde，
-        // 它才是真正的对外契约。
-        assert_eq!(serde_json::to_string(&ActorKind::Human).unwrap(), "\"human\"");
-        assert_eq!(
-            serde_json::to_string(&ActorKind::AiActor).unwrap(),
-            "\"ai_actor\""
-        );
-        assert_eq!(
-            serde_json::to_string(&IdentitySource::Local).unwrap(),
-            "\"local\""
-        );
-        assert_eq!(
-            serde_json::to_string(&ActorStatus::Retired).unwrap(),
-            "\"retired\""
-        );
-        // 往返：改了 wire 值会让已经落库的记录读不回来。
-        assert_eq!(
-            serde_json::from_str::<ActorKind>("\"ai_actor\"").unwrap(),
-            ActorKind::AiActor
-        );
-        assert_eq!(
-            serde_json::from_str::<ActorStatus>("\"suspended\"").unwrap(),
-            ActorStatus::Suspended
-        );
+    fn wire_values_match_what_the_schema_expects() {
+        // **落库走 as_str()，不是 serde。**
+        //
+        // 这三列在 schema 上是 `TYPE string`，而 `SurrealValue` derive 会把
+        // 枚举编码成 `{ Human: {} }`。首版这些字段直接用枚举类型并 derive 了
+        // SurrealValue，单测断言的却是 serde_json 往返 —— 两者都"通过"，
+        // 而真正落库时数据库报
+        //   Expected `string` but found `{ Human: {} }`
+        // 集成测试第一次跑就撞上了。断言必须验真正的落库路径。
+        assert_eq!(ActorKind::Human.as_str(), "human");
+        assert_eq!(ActorKind::AiActor.as_str(), "ai_actor");
+        assert_eq!(IdentitySource::Local.as_str(), "local");
+        assert_eq!(ActorStatus::Retired.as_str(), "retired");
+
+        // 往返：改了取值会让已经落库的记录读不回来。
+        assert_eq!(ActorStatus::parse("suspended"), ActorStatus::Suspended);
+    }
+
+    #[test]
+    fn unknown_values_fail_closed() {
+        // 读不懂的状态一律当作不可认证；读不懂的主体类别一律当作人类
+        // （要走人类那套完整认证要求，而不是更宽松的机器路径）。
+        // 读不懂的状态一律当作不可认证。反过来（未知即 Active）会让一个
+        // 拼错的状态值悄悄放行。
+        assert!(!ActorStatus::parse("garbage").can_authenticate());
+        assert!(!ActorStatus::parse("").can_authenticate());
     }
 
     #[test]
@@ -201,7 +232,7 @@ mod tests {
         // 这是 Actor-native 的核心判据：建一个非人主体不需要任何
         // Human Account 材料 —— 没有 email，没有 username，没有密码。
         let agent = ActorIdentity::new_local("agent-7f3a", ActorKind::AiActor);
-        assert_eq!(agent.actor_kind, ActorKind::AiActor);
+        assert_eq!(agent.actor_kind, "ai_actor");
         assert!(agent.can_authenticate());
     }
 

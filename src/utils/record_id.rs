@@ -55,6 +55,34 @@ pub fn normalize_user_id(value: &str) -> String {
     }
 }
 
+/// 把身份根引用归一成裸 record key。
+///
+/// 接受 `abc`、`actor_identity:abc`、`actor_identity:⟨abc⟩`。
+///
+/// 需要它是因为存进 OIDC 授权码 / 令牌的 `user_id` 现在是 actor 记录引用，
+/// 读回来经 `type::string()` 会带上 `actor_identity:` 前缀。用
+/// [`normalize_user_id`] 剥不掉它 —— 那个只认 `user:` —— 于是后续查询
+/// 拿一个带前缀的串去构造 record id，一行也匹配不到。
+///
+/// 症状很有迷惑性：授权码签发成功、兑换返回 400 "User not found"，
+/// 看起来像 PKCE 或客户端认证出了问题。
+pub fn normalize_actor_id(value: &str) -> String {
+    let mut normalized = normalize_record_id_key(value);
+
+    loop {
+        let next = match normalized.strip_prefix("actor_identity:") {
+            Some(key) => normalize_record_id_key(key),
+            None => normalize_record_id_key(&normalized),
+        };
+
+        if next == normalized {
+            return next;
+        }
+
+        normalized = next;
+    }
+}
+
 /// 一个值是否带着**别的表**的前缀。
 ///
 /// 判据是「冒号左边像一个表名」：全小写字母 / 数字 / 下划线，且非空。
