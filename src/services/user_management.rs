@@ -46,7 +46,8 @@ impl UserManagementService {
         request: CreateUserProfileRequest,
         ctx: &RequestContext,
     ) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
         
         // 检查用户是否存在
         let mut response = self.db.client
@@ -129,7 +130,8 @@ impl UserManagementService {
     }
 
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
         
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -185,7 +187,7 @@ impl UserManagementService {
                 website = $website ?? website,
                 location = $location ?? location,
                 updated_at = $updated_at
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
         "#;
 
         let bindings = serde_json::json!({
@@ -243,7 +245,8 @@ impl UserManagementService {
         request: CreateUserPreferencesRequest,
         ctx: &RequestContext,
     ) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
         
         // 检查偏好是否已存在
         let existing_prefs = self.get_user_preferences(user_id).await;
@@ -323,7 +326,8 @@ impl UserManagementService {
     }
 
     pub async fn get_user_preferences(&self, user_id: &str) -> Result<UserPreferencesResponse, AuthError> {
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
         
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
         let mut response = self.db.client
@@ -369,7 +373,7 @@ impl UserManagementService {
                 date_format = $date_format ?? date_format,
                 time_format = $time_format ?? time_format,
                 updated_at = $updated_at
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
         "#;
 
         let bindings = serde_json::json!({
@@ -580,7 +584,7 @@ impl UserManagementService {
         let limit = request.limit.unwrap_or(50).clamp(1, 200);
         let offset = (page - 1).saturating_mul(limit);
 
-        let mut where_clauses = vec!["user_id = type::record('user', $user_key)".to_string()];
+        let mut where_clauses = vec!["user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]".to_string()];
         if request.category.is_some() {
             where_clauses.push("category = $category".to_string());
         }

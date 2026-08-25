@@ -460,9 +460,14 @@ impl RBACService {
 
     // 用户角色分配
     pub async fn assign_role_to_user(&self, user_id: &str, role_name: &str, assigned_by: &User) -> Result<(), AuthError> {
-        let assigned_by_thing = assigned_by.id.as_ref()
+        // `assigned_by` 也是外键，同样指身份根。
+        let assigned_by_id = assigned_by.id.as_ref()
             .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
-        self.assign_role(user_id, role_name, assigned_by_thing, &assigned_by.email).await
+        let assigned_by_thing = self
+            .db
+            .actor_ref_of_user(&crate::utils::record_id::record_id_key_to_string(assigned_by_id))
+            .await?;
+        self.assign_role(user_id, role_name, &assigned_by_thing, &assigned_by.email).await
     }
 
     /// 由系统自身发起的角色授予（没有人类操作者）。
@@ -471,7 +476,13 @@ impl RBACService {
     /// 操作者的账号，记一个真实用户 ID 反而是伪造归因，所以 `assigned_by` 落在
     /// `user:system` 上 —— 与部署文档里那段手工 SQL 用的是同一个约定。
     pub async fn assign_role_as_system(&self, user_id: &str, role_name: &str) -> Result<(), AuthError> {
-        let system = crate::utils::record_id::user_record_id("system")?;
+        // 哨兵引用。外键类型已是 record<actor_identity>，所以这里也得是
+        // `actor_identity:system` —— 它并不真的存在，SurrealDB 也不做外键
+        // 存在性校验，但类型必须对得上，否则 SCHEMAFULL 会拒写。
+        //
+        // 用哨兵而不是某个真实管理员：这次授予没有人类操作者，记一个真实 id
+        // 反而是伪造归因。种子数据里的 granted_by 用的是同一个约定。
+        let system = surrealdb::types::RecordId::new("actor_identity", "system");
         self.assign_role(user_id, role_name, &system, "system").await
     }
 
@@ -490,7 +501,8 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // 角色分配挂在**身份根**上，不是 user 行（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
 
         // 检查用户是否已经有此角色
         let check_query = "SELECT * FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
@@ -551,7 +563,8 @@ impl RBACService {
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
         let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id)?;
+        // 与写入侧同源：写的是 actor ref，删的时候按 user ref 找就一条也删不掉。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
 
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
         self.db.client
@@ -584,7 +597,7 @@ impl RBACService {
         let query = r#"
             SELECT string::replace(type::string(role_id), 'role:', '') as role_id, assigned_at
             FROM user_role
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
         "#;
 
         let mut response = self.db.client
@@ -823,7 +836,7 @@ impl RBACService {
             WHERE role_id IN (
                 SELECT VALUE role_id
                 FROM user_role
-                WHERE user_id = type::record('user', $user_key)
+                WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
             )
               AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
@@ -866,7 +879,7 @@ impl RBACService {
         let query = r#"
             SELECT count() as count
             FROM user_role
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
               AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
@@ -913,7 +926,7 @@ impl RBACService {
                 WHERE role_id IN (
                     SELECT VALUE role_id
                     FROM user_role
-                    WHERE user_id = type::record('user', $user_key)
+                    WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
                 )
             )
         "#;

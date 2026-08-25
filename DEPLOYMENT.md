@@ -614,10 +614,10 @@ export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
    # ② 在数据库里把 admin 角色授予该账号
    curl -u "$DATABASE_USER:$DATABASE_PASS" \
      -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
-     --data "LET \$u = (SELECT VALUE id FROM user WHERE email = 'admin@your-domain.com')[0];
+     --data "LET \$a = (SELECT VALUE subject_id FROM user WHERE email = 'admin@your-domain.com')[0];
              CREATE user_role CONTENT {
-               user_id: \$u, role_id: role:admin,
-               assigned_at: 0, assigned_by: user:system
+               user_id: \$a, role_id: role:admin,
+               assigned_at: 0, assigned_by: actor_identity:system
              };" \
      "http://$DATABASE_URL/sql"
 

@@ -102,11 +102,15 @@ impl AuditLogger {
 }
 
 async fn write_event(db: &Database, event: AuditEvent) -> crate::error::Result<()> {
-    // user_id 是 `option<record<user>>`：没有对应用户时写 NONE。
+    // user_id 是 `option<record<actor_identity>>`：没有对应主体时写 NONE。
+    //
+    // 审计归因到**身份根**而不是 user 行 —— 这也是 GA-06 要求的方向：
+    // 归因主体要跨 user 行的生命周期保持稳定。传进来的仍是 user id，
+    // 所以这里用子查询把它解析成 actor ref，与会话查询同一种写法。
     let sql = if event.user_id.is_some() {
         r#"
             CREATE user_activity CONTENT {
-                user_id: type::record('user', $user_key),
+                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 action: $action,
                 category: $category,
                 ip_address: $ip_address,

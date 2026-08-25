@@ -153,14 +153,14 @@ DEFINE INDEX username_idx ON user COLUMNS username_normalized UNIQUE;
 DEFINE TABLE identity_provider SCHEMAFULL;
 DEFINE FIELD provider ON identity_provider TYPE string;
 DEFINE FIELD provider_user_id ON identity_provider TYPE string;
-DEFINE FIELD user_id ON identity_provider TYPE record<user>;
+DEFINE FIELD user_id ON identity_provider TYPE record<actor_identity>;
 DEFINE FIELD created_at ON identity_provider TYPE number;
 DEFINE FIELD updated_at ON identity_provider TYPE number;
 DEFINE INDEX provider_idx ON identity_provider COLUMNS provider, provider_user_id UNIQUE;
 
 -- 会话表
 DEFINE TABLE session SCHEMAFULL;
-DEFINE FIELD user_id ON session TYPE record<user>;
+DEFINE FIELD user_id ON session TYPE record<actor_identity>;
 DEFINE FIELD token ON session TYPE string;
 DEFINE FIELD expires_at ON session TYPE number;
 DEFINE FIELD created_at ON session TYPE number;
@@ -234,10 +234,10 @@ DEFINE INDEX permission_resource_action_idx ON permission COLUMNS resource, acti
 
 -- 用户角色关联表
 DEFINE TABLE user_role SCHEMAFULL;
-DEFINE FIELD user_id ON user_role TYPE record<user>;
+DEFINE FIELD user_id ON user_role TYPE record<actor_identity>;
 DEFINE FIELD role_id ON user_role TYPE record<role>;
 DEFINE FIELD assigned_at ON user_role TYPE number;
-DEFINE FIELD assigned_by ON user_role TYPE record<user>;
+DEFINE FIELD assigned_by ON user_role TYPE record<actor_identity>;
 DEFINE INDEX user_role_unique_idx ON user_role COLUMNS user_id, role_id UNIQUE;
 DEFINE INDEX user_role_user_idx ON user_role COLUMNS user_id;
 DEFINE INDEX user_role_role_idx ON user_role COLUMNS role_id;
@@ -247,14 +247,14 @@ DEFINE TABLE role_permission SCHEMAFULL;
 DEFINE FIELD role_id ON role_permission TYPE record<role>;
 DEFINE FIELD permission_id ON role_permission TYPE record<permission>;
 DEFINE FIELD granted_at ON role_permission TYPE number;
-DEFINE FIELD granted_by ON role_permission TYPE record<user>;
+DEFINE FIELD granted_by ON role_permission TYPE record<actor_identity>;
 DEFINE INDEX role_permission_unique_idx ON role_permission COLUMNS role_id, permission_id UNIQUE;
 DEFINE INDEX role_permission_role_idx ON role_permission COLUMNS role_id;
 DEFINE INDEX role_permission_permission_idx ON role_permission COLUMNS permission_id;
 
 -- 用户档案表
 DEFINE TABLE user_profile SCHEMAFULL;
-DEFINE FIELD user_id ON user_profile TYPE record<user>;
+DEFINE FIELD user_id ON user_profile TYPE record<actor_identity>;
 DEFINE FIELD first_name ON user_profile TYPE option<string>;
 DEFINE FIELD last_name ON user_profile TYPE option<string>;
 DEFINE FIELD display_name ON user_profile TYPE option<string>;
@@ -272,7 +272,7 @@ DEFINE INDEX user_profile_user_idx ON user_profile COLUMNS user_id UNIQUE;
 
 -- 用户偏好表
 DEFINE TABLE user_preferences SCHEMAFULL;
-DEFINE FIELD user_id ON user_preferences TYPE record<user>;
+DEFINE FIELD user_id ON user_preferences TYPE record<actor_identity>;
 DEFINE FIELD theme ON user_preferences TYPE string DEFAULT "light";
 DEFINE FIELD language ON user_preferences TYPE string DEFAULT "en";
 DEFINE FIELD email_notifications ON user_preferences TYPE bool DEFAULT true;
@@ -290,7 +290,7 @@ DEFINE INDEX user_preferences_user_idx ON user_preferences COLUMNS user_id UNIQU
 -- 用户活动日志表
 DEFINE TABLE user_activity SCHEMAFULL;
 -- 登录失败、限流触发这类事件未必对应一个已存在的用户，故为可选。
-DEFINE FIELD user_id ON user_activity TYPE option<record<user>>;
+DEFINE FIELD user_id ON user_activity TYPE option<record<actor_identity>>;
 DEFINE FIELD action ON user_activity TYPE string;
 DEFINE FIELD category ON user_activity TYPE string;
 DEFINE FIELD ip_address ON user_activity TYPE string;
@@ -335,7 +335,7 @@ DEFINE INDEX oidc_client_id_idx ON oidc_client COLUMNS client_id UNIQUE;
 DEFINE TABLE oidc_authorization_code SCHEMAFULL;
 DEFINE FIELD code ON oidc_authorization_code TYPE string;
 DEFINE FIELD client_id ON oidc_authorization_code TYPE string;
-DEFINE FIELD user_id ON oidc_authorization_code TYPE record<user>;
+DEFINE FIELD user_id ON oidc_authorization_code TYPE record<actor_identity>;
 DEFINE FIELD redirect_uri ON oidc_authorization_code TYPE string;
 DEFINE FIELD scope ON oidc_authorization_code TYPE string;
 DEFINE FIELD state ON oidc_authorization_code TYPE option<string>;
@@ -355,7 +355,7 @@ DEFINE TABLE oidc_access_token SCHEMAFULL;
 DEFINE FIELD token ON oidc_access_token TYPE string;
 DEFINE FIELD token_type ON oidc_access_token TYPE string DEFAULT "Bearer";
 DEFINE FIELD client_id ON oidc_access_token TYPE string;
-DEFINE FIELD user_id ON oidc_access_token TYPE record<user>;
+DEFINE FIELD user_id ON oidc_access_token TYPE record<actor_identity>;
 DEFINE FIELD scope ON oidc_access_token TYPE string;
 DEFINE FIELD expires_at ON oidc_access_token TYPE number;
 DEFINE FIELD created_at ON oidc_access_token TYPE number;
@@ -366,7 +366,7 @@ DEFINE INDEX oidc_access_token_expiry_idx ON oidc_access_token COLUMNS expires_a
 DEFINE TABLE oidc_refresh_token SCHEMAFULL;
 DEFINE FIELD token ON oidc_refresh_token TYPE string;
 DEFINE FIELD client_id ON oidc_refresh_token TYPE string;
-DEFINE FIELD user_id ON oidc_refresh_token TYPE record<user>;
+DEFINE FIELD user_id ON oidc_refresh_token TYPE record<actor_identity>;
 DEFINE FIELD access_token ON oidc_refresh_token TYPE string; -- 关联的访问令牌
 DEFINE FIELD scope ON oidc_refresh_token TYPE string;
 -- 同上：刷新也会签 ID Token，sid 必须能继续传递。

@@ -745,7 +745,34 @@ impl Database {
         Ok(())
     }
 
+    /// 把一个 user id 解析成它的**身份根** record id。
+    ///
+    /// Stage 3 把外键从 `user` 迁到 `actor_identity` 之后，凡是要写这些外键
+    /// 的地方都需要 actor ref，而多数调用方手里只有 user id。这条解析收口在
+    /// 这里，不散到各个服务里各写一遍。
+    ///
+    /// `user.subject_id` 自 Stage 2 起指向身份根，所以只需一次查表。取不到
+    /// 说明这个 user 行还没挂上身份根 —— 那是数据完整性问题，不是「找不到」。
+    pub async fn actor_ref_of_user(&self, user_id: &str) -> Result<RecordId> {
+        let refs: Vec<RecordId> = self
+            .query_take0_vec(
+                "actor_ref_of_user",
+                "SELECT VALUE subject_id FROM type::record('user', $user_key)",
+                serde_json::json!({
+                    "user_key": crate::utils::record_id::normalize_user_id(user_id),
+                }),
+            )
+            .await?;
+        refs.into_iter().next().ok_or_else(|| {
+            AuthError::DatabaseError(format!("user {user_id} 没有关联的 actor_identity"))
+        })
+    }
+
     /// 删除某用户的全部会话（全端登出、改密后强制下线）。
+    ///
+    /// 会话自 Stage 3 起归属**身份根**而不是 user 行，但四个调用方手里拿到的
+    /// 都还是 user id。与其让每处各查一次 actor，不如在这里做一次子查询 ——
+    /// 改动收口在一处，调用方签名不动。
     ///
     /// 必须用 `type::record(table, id)` 两参形式：单参形式会把
     /// `"user:e81b4aa8-05f6-..."` 在第一个连字符处截断成 `user:e81b4aa8`，
@@ -753,7 +780,8 @@ impl Database {
     pub async fn delete_sessions_by_user_id(&self, user_id: &str) -> Result<()> {
         self.raw_query(
             "delete_sessions_by_user_id",
-            "DELETE session WHERE user_id = type::record('user', $user_key)",
+            "DELETE session WHERE user_id = \
+             (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
             serde_json::json!({
                 "user_key": crate::utils::record_id::normalize_user_id(user_id),
             }),
@@ -776,7 +804,8 @@ impl Database {
             .raw_query(
                 "get_sessions_by_user_id",
                 "SELECT * FROM session \
-                 WHERE user_id = type::record('user', $user_key) AND expires_at > $now \
+                 WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0] \
+                 AND expires_at > $now \
                  ORDER BY created_at DESC LIMIT 200",
                 serde_json::json!({
                     "user_key": crate::utils::record_id::normalize_user_id(user_id),

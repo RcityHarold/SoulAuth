@@ -747,7 +747,7 @@ impl OidcService {
             CREATE oidc_authorization_code CONTENT {
                 code: $code,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
+                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 redirect_uri: $redirect_uri,
                 scope: $scope,
                 -- `Option::None` 经 JSON 绑定会变成 NULL，而 `option<string>` 列
@@ -856,7 +856,7 @@ impl OidcService {
                 token: $access_token_value,
                 token_type: $token_type,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
+                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 scope: $scope,
                 expires_at: $expires_at,
                 created_at: $created_at
@@ -934,7 +934,7 @@ impl OidcService {
             CREATE oidc_refresh_token CONTENT {
                 token: $refresh_token_value,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
+                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 access_token: $access_token,
                 scope: $scope,
                 auth_session_ref: $auth_session_ref ?? NONE,
@@ -1033,14 +1033,14 @@ impl OidcService {
         self.db
             .raw_query(
                 "oidc_revoke_access_tokens_for_client",
-                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id = type::record('user', $user_key)",
+                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_refresh_tokens_for_client",
-                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id = type::record('user', $user_key)",
+                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
                 bindings,
             )
             .await?;
@@ -1055,14 +1055,14 @@ impl OidcService {
         self.db
             .raw_query(
                 "oidc_revoke_all_access_tokens",
-                "DELETE oidc_access_token WHERE user_id = type::record('user', $user_key)",
+                "DELETE oidc_access_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_all_refresh_tokens",
-                "DELETE oidc_refresh_token WHERE user_id = type::record('user', $user_key)",
+                "DELETE oidc_refresh_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
                 bindings,
             )
             .await?;

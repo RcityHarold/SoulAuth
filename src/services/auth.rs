@@ -6,7 +6,7 @@ use crate::{
         mfa::MfaMethod,
         password_reset::PasswordResetToken,
         session::{Session, SessionInfo},
-        subject::{Subject, SubjectType},
+        subject::SubjectType,
         user::{AuthResponse, CreateUserRequest, User},
     },
     services::{
@@ -170,28 +170,26 @@ impl AuthService {
         &self.mfa_service
     }
 
-    async fn create_subject(&self, subject_type: SubjectType) -> Result<Thing> {
-        let now = Utc::now().timestamp();
-        let subject_id = Thing::new("subject", Uuid::new_v4().to_string());
-        let subject = Subject {
-            id: Some(subject_id.clone()),
-            subject_type: subject_type.as_str().to_string(),
-            created_at: now,
-            updated_at: now,
-        };
 
-        self.db.create_record("subject", &subject).await?;
-        Ok(subject_id)
-    }
-
-    async fn ensure_user_subject(&self, user: User, subject_type: SubjectType) -> Result<User> {
+    /// 确保这个 user 行挂着身份根。
+    ///
+    /// Stage 2 之前它写的是 V1 的 `subject` 表；现在改建 `actor_identity`，
+    /// 因为 `user.subject_id` 是 Stage 3 把外键迁到身份根时唯一可追的线 ——
+    /// 让它继续指向 `subject` 等于在制造下一批要迁移的数据。
+    ///
+    /// 老账号第一次登录时在这里补上。
+    async fn ensure_user_subject(&self, user: User) -> Result<User> {
         if user.subject_id.is_some() {
             return Ok(user);
         }
 
-        let subject_id = self.create_subject(subject_type).await?;
+        let human = self
+            .identity
+            .create_human(&user.email, &user.username, &user.username_normalized)
+            .await?;
+
         let mut updated_user = user.clone();
-        updated_user.subject_id = Some(subject_id);
+        updated_user.subject_id = human.actor.id.clone();
         updated_user.updated_at = Utc::now().timestamp();
 
         let user_thing = user.id.as_ref().ok_or(AuthError::UserNotFound)?;
@@ -395,7 +393,7 @@ impl AuthService {
             self.backfill_binding(&user, &provider, &provider_subject)
                 .await;
 
-            return self.ensure_user_subject(user, SubjectType::Human).await;
+            return self.ensure_user_subject(user).await;
         }
 
         let email = validate_email(&user_info.email)?;
@@ -411,11 +409,11 @@ impl AuthService {
                 id: new_thing("identity_provider"),
                 provider: user_info.provider,
                 provider_user_id: user_info.provider_user_id,
+                // 外键指身份根（Stage 3）。
                 user_id: existing_user
-                    .id
-                    .as_ref()
-                    .ok_or(AuthError::UserNotFound)?
-                    .clone(),
+                    .subject_id
+                    .clone()
+                    .ok_or(AuthError::UserNotFound)?,
                 created_at: now_ts,
                 updated_at: now_ts,
             };
@@ -425,7 +423,7 @@ impl AuthService {
             self.backfill_binding(&existing_user, &provider, &provider_subject)
                 .await;
             return self
-                .ensure_user_subject(existing_user, SubjectType::Human)
+                .ensure_user_subject(existing_user)
                 .await;
         }
 
@@ -476,7 +474,13 @@ impl AuthService {
             id: new_thing("identity_provider"),
             provider: user_info.provider,
             provider_user_id: user_info.provider_user_id,
-            user_id: id,
+            // 外键指身份根（Stage 3）。这条记录与上面刚建的 identity_binding
+            // 表达同一件事 —— V1 的 identity_provider 会在 Stage 4 一并删掉。
+            user_id: human
+                .actor
+                .id
+                .clone()
+                .ok_or(AuthError::UserNotFound)?,
             created_at: now_ts,
             updated_at: now_ts,
         };
@@ -745,9 +749,17 @@ impl AuthService {
         )
         .map_err(|e| AuthError::TokenError(e.to_string()))?;
 
+        // 会话归属**身份根**，不是 user 行。
+        //
+        // `claims.sub` 仍然是 user id：那是对外的令牌契约，改它会让所有在途
+        // 令牌失效，属于 Stage 3 之后的事。这里改的是存储侧的归属关系。
+        let actor_ref = user.subject_id.clone().ok_or_else(|| {
+            AuthError::DatabaseError(format!("user {} 没有关联的 actor_identity", user.email))
+        })?;
+
         let session = Session {
             id: Some(session_id),
-            user_id: user_thing,
+            user_id: actor_ref,
             token: token.clone(),
             expires_at: exp.timestamp(),
             created_at: now.timestamp(),

@@ -213,6 +213,14 @@ where
 ///
 /// 取代原来"由中间件往 extension 里塞 `User`"的写法 —— 那个中间件从未被挂载，
 /// 导致所有依赖它的路由在运行时直接 500。
+/// 已认证的调用方。
+///
+/// # 为什么还叫 `AuthedUser`
+///
+/// 身份根已经是 `actor_identity`，但这个类型名暂时不动 —— 69 处消费点里
+/// 绝大多数只调 `.id()`，改名会制造一次纯噪声的大 diff，而 GA-03 §3 明确
+/// 「Canonical Semantic Label 不规定代码标识符」。Stage 4 拆掉 `user` 表时
+/// 一并改名，那时改动才有实际内容。
 pub struct AuthedUser(pub User);
 
 impl AuthedUser {
@@ -225,6 +233,7 @@ impl AuthedUser {
         let rid = self.0.id.as_ref().ok_or(AuthError::UserNotFound)?;
         Ok(crate::utils::record_id::record_id_key_to_string(rid))
     }
+
 }
 
 #[async_trait]

@@ -258,8 +258,11 @@ user_id_of() {
 }
 
 grant_admin() {
-    sql "CREATE user_role CONTENT { user_id: type::record('user','$1'), role_id: role:admin,
-         assigned_at: 0, assigned_by: user:system }" > /dev/null
+    # 角色分配挂在身份根上（Stage 3 起 user_role.user_id 是 record<actor_identity>），
+    # 所以这里要先由 user 行取出它的 subject_id。
+    sql "CREATE user_role CONTENT {
+           user_id: (SELECT VALUE subject_id FROM type::record('user','$1'))[0],
+           role_id: role:admin, assigned_at: 0, assigned_by: actor_identity:system }" > /dev/null
 }
 
 # ───────────────────────────── 前置检查 ─────────────────────────────

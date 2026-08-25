@@ -1342,3 +1342,60 @@ fn i4_identity_root_allow_is_removed_once_wired() {
         );
     }
 }
+
+/// I5 · 外键一律指向身份根，读写两侧同源
+///
+/// Stage 3 把 11 处 `record<user>` 外键迁到了 `actor_identity`。这类迁移有一个
+/// 编译器完全看不见的失败模式：**写入侧改了、读取侧没改**。两边都是合法 SQL、
+/// 都能编译、都能跑，只是再也匹配不到任何行 —— 于是全端登出变成空操作，
+/// 令牌吊销静默失效。本仓库已经出过一次这种缺陷（停用后 refresh token 照常
+/// 换新），所以这里静态挡住。
+///
+/// 判据有两条：schema 里不得残留 `record<user>`；SQL 里凡是拿 `user_id`
+/// 与 `type::record('user', ...)` 比较的，一律视为漏改。
+#[test]
+fn i5_foreign_keys_point_at_the_identity_root() {
+    // ① schema 侧：外键类型全部迁完。
+    let schema_sql = schema();
+    let leftovers: Vec<&str> = schema_sql
+        .lines()
+        .filter(|l| l.contains("record<user>"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "schema 仍有指向 user 表的外键:\n  {}",
+        leftovers.join("\n  ")
+    );
+
+    // ② 代码侧：不得再有 `user_id = type::record('user', ...)` 这种比较。
+    //
+    // 查 `user` 表本身是合法的（例如 `SELECT * FROM user WHERE id = ...`），
+    // 所以只匹配 user_id 与 user 记录相比的形状。
+    let mut bad = Vec::new();
+    for (file, body) in sources() {
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        for (n, line) in production.lines().enumerate() {
+            let code = match line.find("//") {
+                Some(i) => &line[..i],
+                None => line,
+            };
+            // `(SELECT VALUE subject_id FROM type::record('user', ...))[0]` 是
+            // **正确**的写法：它把 user id 解析成 actor ref。里面自然含有
+            // `type::record('user'`，所以必须先把这种形状排除，否则整条迁移
+            // 都会被判成违规。
+            let already_resolved = code.contains("subject_id FROM");
+            if code.contains("user_id") && code.contains("type::record('user'") && !already_resolved
+            {
+                bad.push(format!("{file}:{}", n + 1));
+            }
+        }
+    }
+    assert_absent(
+        bad,
+        "I5: 外键已指向 actor_identity，这些查询仍按 user 记录匹配 —— \
+         它们能编译、能运行，只是一行也匹配不到",
+    );
+}

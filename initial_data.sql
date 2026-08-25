@@ -176,7 +176,7 @@ UPSERT role:user CONTENT {
 -- 注意：UPSERT ... CONTENT 会整条替换记录，而 DEFAULT 只在创建时生效。
 -- 因此凡是 TYPE 非 option 的字段都必须在这里显式写出，
 -- 否则第二次导入时该字段变成 NONE，直接撞类型校验。
-UPSERT user:system CONTENT {
+UPSERT actor_identity:system CONTENT {
     email: "system@internal",
     username: "system",
     username_normalized: "system",
@@ -198,70 +198,70 @@ UPSERT role_permission:admin__users_read CONTENT {
     role_id: role:admin,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__users_write CONTENT {
     role_id: role:admin,
     permission_id: permission:users_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_read CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_write CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_delete CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_delete,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__permissions_read CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__permissions_write CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__security_read CONTENT {
     role_id: role:admin,
     permission_id: permission:security_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__security_write CONTENT {
     role_id: role:admin,
     permission_id: permission:security_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__audit_read CONTENT {
     role_id: role:admin,
     permission_id: permission:audit_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为user_manager角色分配用户管理权限
@@ -269,14 +269,14 @@ UPSERT role_permission:user_manager__users_read CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:user_manager__users_write CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为security_manager角色分配安全管理权限
@@ -284,21 +284,21 @@ UPSERT role_permission:security_manager__security_read CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:security_manager__security_write CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:security_manager__users_read CONTENT {
     role_id: role:security_manager,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为auditor角色分配审计权限
@@ -306,7 +306,7 @@ UPSERT role_permission:auditor__audit_read CONTENT {
     role_id: role:auditor,
     permission_id: permission:audit_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- ===============================
@@ -342,12 +342,12 @@ UPSERT role_permission:admin__oidc_clients_read CONTENT {
     role_id: role:admin,
     permission_id: permission:oidc_clients_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__oidc_clients_write CONTENT {
     role_id: role:admin,
     permission_id: permission:oidc_clients_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
