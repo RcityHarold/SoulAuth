@@ -381,11 +381,19 @@ impl AuthService {
             .await?;
 
         if let Some(identity) = identities.into_iter().next() {
-            let user = self
+            // `identity.user_id` 自 Stage 3 起是**身份根**引用，不是 user 行 id。
+            // 按 `user.id` 查必然找不到 —— 第二次社交登录于是报 UserNotFound
+            // 并返回 404，看起来像「账号丢了」，实际是查错了字段。
+            let users: Vec<User> = self
                 .db
-                .find_record_by_field::<User>("user", "id", &record_key(&identity.user_id))
-                .await?
-                .ok_or(AuthError::UserNotFound)?;
+                .query_take0_vec(
+                    "find_user_by_actor_ref",
+                    "SELECT * FROM user WHERE subject_id = type::record('actor_identity', $key) \
+                     LIMIT 1",
+                    serde_json::json!({ "key": record_key(&identity.user_id) }),
+                )
+                .await?;
+            let user = users.into_iter().next().ok_or(AuthError::UserNotFound)?;
 
             // 过渡期回填：V1 的 identity_provider 已经有这条关联，但新的
             // identity_binding 可能还没有（账号建于 Stage 1 之前）。补上，

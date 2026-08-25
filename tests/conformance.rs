@@ -170,7 +170,6 @@ fn assert_absent(found: Vec<String>, rule: &str) {
 /// 身份根只回答「谁」。email / username / 邮箱验证状态属于 Human Account，
 /// 是 Human-specific Extension，不是身份本体。
 #[test]
-#[ignore = "V2 Stage 1 —— user 一张表同时是登录主体/Profile/商业状态/权限载体"]
 fn a1_actor_identity_is_not_account() {
     assert!(
         table_exists("actor_identity"),
@@ -242,7 +241,6 @@ fn a4_actor_identity_is_not_binding() {
 /// 判据不是「枚举里有没有这个变体」，而是**有没有任何代码路径真的构造它**。
 /// 一个只存在于自身定义处的变体，是声明，不是能力。
 #[test]
-#[ignore = "V2 Stage 1/2 —— SubjectType::Agent 六个创建点全写死 Human，从未被构造"]
 fn a5_ai_actor_is_first_class() {
     let sources = sources();
     let kind_def = sources
@@ -851,7 +849,6 @@ fn g3_error_contract_is_stable() {
 /// 给另一个 Actor」。否则历史 Claims、Audit 与外部记录里的同一个 Subject，
 /// 会在不同时间指向不同主体。这是标识符完整性规则，不是数据保留策略。
 #[test]
-#[ignore = "V2 Stage 1 —— 无 subject_key，也无退役后禁止复用的约束"]
 fn h1_retired_subject_is_not_reusable() {
     assert!(
         field_exists(identity_root(), "subject_key"),

@@ -1041,20 +1041,24 @@ impl OidcService {
     ) -> Result<()> {
         let bindings = serde_json::json!({
             "client_id": client_id,
-            "user_key": normalize_user_id(user_id),
+            // 调用方可能传 user id（路由层从 session 拿的），也可能传 actor ref
+            // （复用检测从存储的令牌读回的）。两种前缀都剥掉成裸 key，
+            // 由 SQL 那边同时按两种解释匹配 —— 在 Rust 侧猜是哪一种不可靠，
+            // 猜错的后果是令牌族没被吊销，而那是个安全缺陷。
+            "user_key": crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id)),
         });
 
         self.db
             .raw_query(
                 "oidc_revoke_access_tokens_for_client",
-                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
+                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_refresh_tokens_for_client",
-                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
+                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings,
             )
             .await?;
@@ -1064,19 +1068,21 @@ impl OidcService {
 
     /// 吊销某用户在**所有**客户端上的令牌（全局登出）。
     pub async fn revoke_all_tokens_for_user(&self, user_id: &str) -> Result<()> {
-        let bindings = serde_json::json!({ "user_key": normalize_user_id(user_id) });
+        let bindings = serde_json::json!({
+            "user_key": crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id)),
+        });
 
         self.db
             .raw_query(
                 "oidc_revoke_all_access_tokens",
-                "DELETE oidc_access_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
+                "DELETE oidc_access_token WHERE user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_all_refresh_tokens",
-                "DELETE oidc_refresh_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]",
+                "DELETE oidc_refresh_token WHERE user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings,
             )
             .await?;

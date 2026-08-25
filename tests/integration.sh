@@ -980,13 +980,13 @@ eq 403 "$(req GET "/api/rbac/permissions/soulauth:users.read" -H "Authorization:
 eq 403 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"role_name":"admin"}')" \
     "无 roles.write 不能给自己授 admin（提权面）"
-eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:admin GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:admin GROUP ALL")" \
     "越权尝试没有留下任何授权记录"
 
 # 管理员授角色，且要落库、可查、可撤
 eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员给用户授角色"
-eq 1 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
+eq 1 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:user GROUP ALL")" \
     "授权确实落库"
 req GET "/api/rbac/users/${PLAIN_UID}/roles" -H "Authorization: Bearer ${TOK_A}" > /dev/null
 has 'user' "$(body)" "角色列表里能查到"
@@ -1000,7 +1000,7 @@ eq 403 "$(req GET "/api/rbac/users/${ADMIN_UID}/roles" -H "Authorization: Bearer
 
 eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/remove" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员撤销角色"
-eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:user GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
 
 group "20. 限流跨副本合账"
@@ -1411,11 +1411,11 @@ AFTER_CODE="$(susp_code)"
 eq "" "$AFTER_CODE" "停用后浏览器 cookie 换不到新授权码"
 
 # 停用同时要把已发凭证一并作废，而不是只改字段等下次校验
-eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 session 行被清空"
-eq 0 "$(sql_count "SELECT count() FROM oidc_refresh_token WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM oidc_refresh_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 OIDC 刷新令牌被吊销"
-eq 0 "$(sql_count "SELECT count() FROM oidc_access_token WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM oidc_access_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 OIDC 访问令牌被吊销"
 
 # 被停用的账号也不该还能走密码重置（且必须与"账号不存在"同样静默，不能成为枚举信道）
@@ -1481,13 +1481,17 @@ eq 1 "$(link_count google 4100)" "Google 侧的关联未被改写"
 
 # 最直接的判据：这次登录建出来的会话属于谁
 # 最直接的判据：这次 GitHub 登录建出来的会话，到底挂在谁名下。
+#
+# 会话自 Stage 3 起挂在**身份根**上（session.user_id 是 record<actor_identity>），
+# 所以要先由 user 行取出它的 subject_id —— 直接按 type::record('user',...) 查
+# 会一条也数不到，看起来像顶号防护失效，实际是查错了表。
 # 用 type::record + count 这套本文件里到处在用的写法，不用 record 链接穿透
 # （`SELECT VALUE user_id.email` 在这里取不到值）。
 GH_UID="$(user_id_of collide-github@test.local)"
 GOOGLE_UID="$(user_id_of collide-google@test.local)"
-eq 1 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${GH_UID}') GROUP ALL")" \
+eq 1 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${GH_UID}'))[0] GROUP ALL")" \
     "GitHub 登录建立的会话挂在 GitHub 那个账号名下"
-eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${GOOGLE_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${GOOGLE_UID}'))[0] GROUP ALL")" \
     "Google 那个账号没有因为 GitHub 登录而多出会话（顶号的判据）"
 
 kill -9 "$MOCK_PID" 2>/dev/null; MOCK_PID=""
@@ -1511,12 +1515,13 @@ SESS_UID="$(user_id_of sesslist@test.local)"
 # 再登录两次，凑够多条会话
 login_token sesslist@test.local "CorrectHorse42!" > /dev/null
 login_token sesslist@test.local "CorrectHorse42!" > /dev/null
-TOTAL_SESS="$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${SESS_UID}') GROUP ALL")"
+TOTAL_SESS="$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SESS_UID}'))[0] GROUP ALL")"
 [ "$TOTAL_SESS" -ge 3 ] && ok "库中已有 ${TOTAL_SESS} 条会话" || bad "库中已有多条会话" "只有 ${TOTAL_SESS} 条"
 
 # 把当前令牌以外的全部改成早已过期
 sql "UPDATE session SET expires_at = 1000 \
-     WHERE user_id = type::record('user','${SESS_UID}') AND token != '${SESS_TOKEN}'" > /dev/null
+     WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SESS_UID}'))[0] \
+       AND token != '${SESS_TOKEN}'" > /dev/null
 
 eq 200 "$(req GET /api/auth/sessions -H "Authorization: Bearer ${SESS_TOKEN}")" "GET /api/auth/sessions"
 LISTED="$(python3 -c "
@@ -1626,7 +1631,7 @@ restart_app
 NOW_TS="$(date +%s)"
 CLEAN_UID="$(user_id_of sesslist@test.local)"
 sql "CREATE session CONTENT {
-       user_id: type::record('user','${CLEAN_UID}'),
+       user_id: (SELECT VALUE subject_id FROM type::record('user','${CLEAN_UID}'))[0],
        token: 'stale-token-for-cleanup-regression',
        expires_at: 1000, created_at: 1000,
        user_agent: 'itest', ip_address: '127.0.0.1'
