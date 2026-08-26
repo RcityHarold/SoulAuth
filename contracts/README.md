@@ -27,12 +27,32 @@ GA-07 的核心约束是：**Meaning flows down. Evidence flows up.**
 | 文件 | 冻结什么 | 守卫 |
 |---|---|---|
 | `permissions.yaml` | 12 个权限常量 + 5 个内置角色 + 每个权限在**哪些 handler 上被真正检查** | `tests/conformance.rs::j1` |
-| `configuration.yaml` | 42 个环境变量：类型、默认值、必填性、生产环境闸门 | `::j2` |
-| `openapi.yaml` | 64 条路径 / 75 个 operation，与 axum 路由表逐条对齐 | `::j4` |
+| `configuration.yaml` | 42 个环境变量：类型、默认值、必填性、生产环境闸门 | `tests/conformance.rs::j2` |
+| `openapi.yaml` | 64 条路径 / 75 个 operation + **Error Envelope**，与 axum 路由表逐条对齐 | `::j4` `::j7` |
 | `standards.yaml` | 13 份外部规范各自的 implemented / supported / certified 状态 | `::j5` |
 
-外加 `::j3`：任何注册表里出现空白、`TBD`、`<EXACT>`、`Pending` 都直接让测试变红。
-依据是 V3 30 §29 —— 未填充的占位符**阻断**发布，而不是「发布后再补」。
+外加三条横向守卫：
+
+- `::j3` —— 任何注册表里出现空白、`TBD`、`<EXACT>`、`Pending` 都直接让测试变红。
+  依据是 V3 30 §29：未填充的占位符**阻断**发布，而不是「发布后再补」。
+- `::j6` —— 全站只能有一种错误形状。它防的是一个真实存在过的缺口：
+  `/api/rbac/*` 与 `/api/ops/*` 的 handler 曾返回 `Result<T, StatusCode>`，
+  于是「权限不足」在那 14 个端点上是**空响应体**，在其余端点上是 JSON。
+  四种形状并存时，API Reference 物理上写不出来。
+- `::j7` —— 对外 URL 不得出现重复路径段。`/api/users/users/:user_id` 这类
+  路径（nest 前缀与路由自身撞车的产物）会让读者第一眼认为文档写错了；
+  发布前改零成本，发布后改是 breaking change。
+
+### Error Envelope
+
+全站错误统一为 `{"error": <稳定机器码>, "message": <人话>}`，个别错误另带
+**已在契约里声明**的补充字段（`missing_permission` 带 `required_permission`，
+`account_locked` 带 `locked_until_seconds`）。
+
+按 `error` 分支，永远不要按 `message` 的文案分支 —— 码进契约，文案不进。
+
+唯一例外是 OIDC 协议端点：形状由 RFC 6749 §5.2 规定为
+`{"error", "error_description"}`，不能与上面统一。契约里单列为 `OAuthError`。
 
 ## 六个状态词
 

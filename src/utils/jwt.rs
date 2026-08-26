@@ -83,8 +83,11 @@ pub async fn verify_session_active(db: &Database, token: &str) -> Result<()> {
     let rows: Vec<serde_json::Value> = db
         .query_take0_vec(
             "verify_session_active",
-            "SELECT count() AS count FROM session WHERE token = $session_token AND expires_at > $now GROUP ALL",
-            json!({ "session_token": token, "now": Utc::now().timestamp() }),
+            "SELECT count() AS count FROM session WHERE token_hash = $session_token_hash AND expires_at > $now GROUP ALL",
+            json!({
+                "session_token_hash": crate::utils::crypto::hash_bearer(token),
+                "now": Utc::now().timestamp()
+            }),
         )
         .await?;
 
@@ -110,11 +113,7 @@ pub async fn decode_and_verify_token(db: &Database, token: &str) -> Result<Claim
 }
 
 /// 签发 MFA 两步登录用的短期临时令牌。
-pub fn create_mfa_challenge_token(
-    user_id: &str,
-    email: &str,
-    jwt_secret: &str,
-) -> Result<String> {
+pub fn create_mfa_challenge_token(user_id: &str, email: &str, jwt_secret: &str) -> Result<String> {
     let now = Utc::now().timestamp();
     let claims = MfaChallengeClaims {
         sub: user_id.to_string(),
@@ -156,9 +155,7 @@ fn db_from_parts(parts: &Parts) -> Result<Arc<Database>> {
         .extensions
         .get::<Arc<Database>>()
         .cloned()
-        .ok_or_else(|| {
-            AuthError::ServerError("Database extension is not configured".to_string())
-        })
+        .ok_or_else(|| AuthError::ServerError("Database extension is not configured".to_string()))
 }
 
 fn cache_from_parts(parts: &Parts) -> Option<Arc<AuthCache>> {
@@ -233,7 +230,6 @@ impl AuthedUser {
         let rid = self.0.id.as_ref().ok_or(AuthError::UserNotFound)?;
         Ok(crate::utils::record_id::record_id_key_to_string(rid))
     }
-
 }
 
 #[async_trait]

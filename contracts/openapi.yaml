@@ -9,10 +9,13 @@
 # 生成依据：src/main.rs 的 axum 路由表 + src/routes/**。
 # 由 tests/conformance.rs::j4 断言与 Runtime 一致 —— 手工增删端点会让它变红。
 #
-# 当前范围：路径、方法、认证要求、所需权限。
-# **请求/响应 schema 尚未冻结**，因此本文件不声明 requestBody 与 response
-# schema —— 按 23 §3-4，Serialization Contract 与 Error Envelope 需要先由
-# 工程侧冻结，不能由契约文件反向发明。
+# 当前范围：路径、方法、认证要求、所需权限、**Error Envelope**。
+#
+# 成功响应的 schema 仍未冻结（23 §3-4：Serialization Contract 必须由工程侧
+# 先冻结，不能由契约文件反向发明），因此这里不声明 requestBody 与 2xx schema。
+#
+# Error Envelope 现在可以声明了：全站错误已收口成同一形状，由
+# tests/conformance.rs::g3（码是稳定字面量）与 ::j6（没有第二种形状）守住。
 openapi: 3.1.0
 info:
   title: SoulAuth
@@ -33,6 +36,66 @@ servers:
         default: http://localhost:8080
 
 components:
+  schemas:
+    Error:
+      type: object
+      required: [error, message]
+      additionalProperties: true
+      description: >-
+        全站统一的错误信封。`error` 是**稳定的机器可读码**，按它分支；
+        `message` 是人话，措辞随时可能改进，不要拿它做判断。
+        个别错误另带已文档化的补充字段（见 additionalProperties 说明）。
+      properties:
+        error:
+          type: string
+          description: 稳定错误码，snake_case。
+          enum:
+            - internal_error
+            - invalid_credentials
+            - email_not_verified
+            - invalid_token
+            - user_not_found
+            - email_exists
+            - username_exists
+            - oauth_error
+            - password_already_set
+            - invalid_user_id
+            - not_found
+            - validation_error
+            - permission_denied
+            - insufficient_permissions
+            - missing_permission
+            - account_suspended
+            - account_inactive
+            - account_deleted
+            - account_locked
+            - forbidden
+            - bad_request
+            - not_configured
+            - unauthorized
+            - service_unavailable
+        message:
+          type: string
+          description: 面向人的说明。不进契约。
+        required_permission:
+          type: string
+          description: 仅 `missing_permission` 携带 —— 缺的是哪一条权限。
+        locked_until_seconds:
+          type: integer
+          description: 仅 `account_locked` 携带 —— 距解锁还有多少秒。
+
+    OAuthError:
+      type: object
+      required: [error]
+      description: >-
+        **仅** OIDC 协议端点（/api/oidc/token 等）使用，形状由 RFC 6749 §5.2
+        规定，不能与上面的 Error 统一。
+      properties:
+        error:
+          type: string
+        error_description:
+          type: string
+
   securitySchemes:
     bearerAuth:
       type: http
@@ -63,6 +126,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/audit/activity-summary:
     get:
       tags: [Audit]
@@ -73,6 +137,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/audit/dashboard:
     get:
       tags: [Audit]
@@ -83,6 +148,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/audit/security-metrics:
     get:
       tags: [Audit]
@@ -93,6 +159,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/audit/security-report:
     get:
       tags: [Audit]
@@ -103,6 +170,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/audit/system-health:
     get:
       tags: [Audit]
@@ -113,6 +181,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/admin/login:
     post:
       tags: [Authentication]
@@ -121,6 +190,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/callback/github:
     get:
       tags: [Authentication]
@@ -129,6 +199,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/callback/google:
     get:
       tags: [Authentication]
@@ -137,6 +208,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/initialize-password:
     post:
       tags: [Authentication]
@@ -146,6 +218,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/login:
     post:
       tags: [Authentication]
@@ -154,6 +227,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/login/github:
     get:
       tags: [Authentication]
@@ -162,6 +236,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/login/google:
     get:
       tags: [Authentication]
@@ -170,6 +245,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/logout:
     post:
       tags: [Authentication]
@@ -179,6 +255,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/logout-all:
     post:
       tags: [Authentication]
@@ -188,6 +265,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/me:
     get:
       tags: [Authentication]
@@ -197,6 +275,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/mfa/disable:
     post:
       tags: [Authentication]
@@ -206,6 +285,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/mfa/enable:
     post:
       tags: [Authentication]
@@ -215,6 +295,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/mfa/login-verify:
     post:
       tags: [Authentication]
@@ -223,6 +304,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/mfa/setup:
     post:
       tags: [Authentication]
@@ -232,6 +314,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/mfa/status:
     get:
       tags: [Authentication]
@@ -241,6 +324,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/register:
     post:
       tags: [Authentication]
@@ -249,6 +333,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/request-password-reset:
     post:
       tags: [Authentication]
@@ -257,6 +342,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/resend-verification:
     post:
       tags: [Authentication]
@@ -265,6 +351,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/reset-password:
     post:
       tags: [Authentication]
@@ -273,6 +360,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/sessions:
     get:
       tags: [Authentication]
@@ -282,6 +370,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/auth/verify-email/:token:
     get:
       tags: [Authentication]
@@ -291,6 +380,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/bootstrap/admin:
     post:
       tags: [Bootstrap]
@@ -299,6 +389,69 @@ paths:
       responses:
         "200":
           description: OK
+
+  /api/me/activity-log:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_activity_log
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+
+  /api/me/preferences:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Actors & Profiles]
+      operationId: user_management_create_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_preferences
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+
+  /api/me/profile:
+    get:
+      tags: [Actors & Profiles]
+      operationId: user_management_get_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    post:
+      tags: [Actors & Profiles]
+      operationId: user_management_create_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+    put:
+      tags: [Actors & Profiles]
+      operationId: user_management_update_user_profile
+      security:
+        - bearerAuth: []
+      responses:
+        "200":
+          description: OK
+
   /api/oidc/.well-known/openid-configuration:
     get:
       tags: [OIDC]
@@ -307,6 +460,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/authorize:
     get:
       tags: [OIDC]
@@ -316,6 +470,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/clients:
     get:
       tags: [OIDC Clients]
@@ -335,6 +490,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/clients/:client_id:
     delete:
       tags: [OIDC Clients]
@@ -363,6 +519,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/clients/:client_id/regenerate-secret:
     post:
       tags: [OIDC Clients]
@@ -373,6 +530,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/jwks:
     get:
       tags: [OIDC]
@@ -381,6 +539,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/logout:
     get:
       tags: [OIDC]
@@ -390,6 +549,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/token:
     post:
       tags: [OIDC]
@@ -398,6 +558,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/oidc/userinfo:
     get:
       tags: [OIDC]
@@ -407,6 +568,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/ops/memberships/overview:
     get:
       tags: [Operations]
@@ -417,6 +579,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/check/permission/:permission_name:
     get:
       tags: [Administration]
@@ -426,6 +589,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/check/role/:role_name:
     get:
       tags: [Administration]
@@ -435,6 +599,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/permissions:
     get:
       tags: [Administration]
@@ -454,6 +619,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/permissions/:permission_name:
     get:
       tags: [Administration]
@@ -464,6 +630,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/roles:
     get:
       tags: [Administration]
@@ -483,6 +650,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/roles/:role_name:
     delete:
       tags: [Administration]
@@ -511,6 +679,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/roles/:role_name/permissions:
     get:
       tags: [Administration]
@@ -521,6 +690,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/roles/:role_name/permissions/assign:
     post:
       tags: [Administration]
@@ -531,6 +701,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/roles/:role_name/permissions/remove:
     post:
       tags: [Administration]
@@ -541,6 +712,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/users/:user_id/permissions:
     get:
       tags: [Administration]
@@ -550,6 +722,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/users/:user_id/roles:
     get:
       tags: [Administration]
@@ -559,6 +732,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/users/:user_id/roles/assign:
     post:
       tags: [Administration]
@@ -569,6 +743,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/rbac/users/:user_id/roles/remove:
     post:
       tags: [Administration]
@@ -579,6 +754,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/security/lockout:
     get:
       tags: [Security]
@@ -589,6 +765,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /api/security/unlock:
     post:
       tags: [Security]
@@ -599,66 +776,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/activity-log:
-    get:
-      tags: [Actors & Profiles]
-      operationId: user_management_get_user_activity_log
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-  /api/users/preferences:
-    get:
-      tags: [Actors & Profiles]
-      operationId: user_management_get_user_preferences
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-    post:
-      tags: [Actors & Profiles]
-      operationId: user_management_create_user_preferences
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-    put:
-      tags: [Actors & Profiles]
-      operationId: user_management_update_user_preferences
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-  /api/users/profile:
-    get:
-      tags: [Actors & Profiles]
-      operationId: user_management_get_user_profile
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-    post:
-      tags: [Actors & Profiles]
-      operationId: user_management_create_user_profile
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-    put:
-      tags: [Actors & Profiles]
-      operationId: user_management_update_user_profile
-      security:
-        - bearerAuth: []
-      responses:
-        "200":
-          description: OK
-  /api/users/users:
+
+  /api/users:
     get:
       tags: [Actors & Profiles]
       operationId: user_management_list_users
@@ -668,7 +787,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id:
+
+  /api/users/:user_id:
     get:
       tags: [Actors & Profiles]
       operationId: user_management_get_user_by_id
@@ -678,7 +798,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id/activity-log:
+
+  /api/users/:user_id/activity-log:
     get:
       tags: [Actors & Profiles]
       operationId: user_management_get_user_activity_log_by_id
@@ -688,7 +809,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id/membership:
+
+  /api/users/:user_id/membership:
     put:
       tags: [Actors & Profiles]
       operationId: user_management_update_user_membership
@@ -698,7 +820,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id/preferences:
+
+  /api/users/:user_id/preferences:
     get:
       tags: [Actors & Profiles]
       operationId: user_management_get_user_preferences_by_id
@@ -708,7 +831,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id/profile:
+
+  /api/users/:user_id/profile:
     get:
       tags: [Actors & Profiles]
       operationId: user_management_get_user_profile_by_id
@@ -718,7 +842,8 @@ paths:
       responses:
         "200":
           description: OK
-  /api/users/users/:user_id/status:
+
+  /api/users/:user_id/status:
     put:
       tags: [Actors & Profiles]
       operationId: user_management_update_user_account_status
@@ -728,6 +853,7 @@ paths:
       responses:
         "200":
           description: OK
+
   /health:
     get:
       tags: [Health]

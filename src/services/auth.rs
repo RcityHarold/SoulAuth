@@ -170,7 +170,6 @@ impl AuthService {
         &self.mfa_service
     }
 
-
     /// 确保这个 user 行挂着身份根。
     ///
     /// Stage 2 之前它写的是 V1 的 `subject` 表；现在改建 `actor_identity`，
@@ -430,9 +429,7 @@ impl AuthService {
                 .await?;
             self.backfill_binding(&existing_user, &provider, &provider_subject)
                 .await;
-            return self
-                .ensure_user_subject(existing_user)
-                .await;
+            return self.ensure_user_subject(existing_user).await;
         }
 
         // 创建新用户
@@ -466,7 +463,7 @@ impl AuthService {
             created_at: now.timestamp(),
             updated_at: now.timestamp(),
             is_email_verified: true, // OAuth 邮箱已验证
-            verification_token: None,
+            verification_token_hash: None,
             verification_token_expires_at: None,
             account_status: crate::models::user::AccountStatus::Active.to_string(),
             membership_level: "FREE".to_string(),
@@ -484,11 +481,7 @@ impl AuthService {
             provider_user_id: user_info.provider_user_id,
             // 外键指身份根（Stage 3）。这条记录与上面刚建的 identity_binding
             // 表达同一件事 —— V1 的 identity_provider 会在 Stage 4 一并删掉。
-            user_id: human
-                .actor
-                .id
-                .clone()
-                .ok_or(AuthError::UserNotFound)?,
+            user_id: human.actor.id.clone().ok_or(AuthError::UserNotFound)?,
             created_at: now_ts,
             updated_at: now_ts,
         };
@@ -564,7 +557,9 @@ impl AuthService {
             created_at: now.timestamp(),
             updated_at: now.timestamp(),
             is_email_verified: !self.config.email_verification_enabled,
-            verification_token: verification_token.clone(),
+            verification_token_hash: verification_token
+                .as_deref()
+                .map(crate::utils::crypto::hash_bearer),
             verification_token_expires_at: verification_expires_at,
             account_status: crate::models::user::AccountStatus::Active.to_string(),
             membership_level: "FREE".to_string(),
@@ -768,7 +763,7 @@ impl AuthService {
         let session = Session {
             id: Some(session_id),
             user_id: actor_ref,
-            token: token.clone(),
+            token_hash: crate::utils::crypto::hash_bearer(&token),
             expires_at: exp.timestamp(),
             created_at: now.timestamp(),
             user_agent: ctx.user_agent.clone(),
@@ -806,16 +801,16 @@ impl AuthService {
                 // 侧的字段名，靠 `#[surreal(rename)]` 映射过来。写裸 SQL 时
                 // 必须用库里的真实列名，否则整条语句失败（伪造 token 也返回
                 // 500，因为 SQL 根本没执行成功）。
-                "UPDATE user SET verified = true, verification_token = NONE, \
+                "UPDATE user SET verified = true, verification_token_hash = NONE, \
                  verification_token_expires_at = NONE, updated_at = $now \
-                 WHERE verification_token = $token_value AND verified = false \
+                 WHERE verification_token_hash = $token_hash AND verified = false \
                  AND verification_token_expires_at != NONE \
                  AND verification_token_expires_at > $now \
                  RETURN VALUE id",
                 // 绑定名不能叫 `token`：SurrealDB 里 `$token` 是**保留变量**，
                 // 设置它会以「'token' is a protected variable and cannot be set」
                 // 整条语句失败 —— 于是伪造 token 也返回 500，因为 SQL 根本没跑成。
-                serde_json::json!({ "token_value": &token, "now": now_ts }),
+                serde_json::json!({ "token_hash": crate::utils::crypto::hash_bearer(&token), "now": now_ts }),
             )
             .await?;
         let claimed_ids: Vec<Thing> = claimed.take(0)?;
@@ -898,7 +893,7 @@ impl AuthService {
         let token_record = PasswordResetToken {
             id: Some(new_thing("password_reset_token")),
             email: email.clone(),
-            token: reset_token.clone(),
+            token_hash: crate::utils::crypto::hash_bearer(&reset_token),
             expires_at,
             used: false,
             created_at: now,
@@ -967,7 +962,7 @@ impl AuthService {
         let token = Uuid::new_v4().to_string();
 
         let mut updated_user = user.clone();
-        updated_user.verification_token = Some(token.clone());
+        updated_user.verification_token_hash = Some(crate::utils::crypto::hash_bearer(&token));
         updated_user.verification_token_expires_at =
             Some((now + Duration::hours(VERIFICATION_TOKEN_TTL_HOURS)).timestamp());
         updated_user.updated_at = now.timestamp();
@@ -1034,10 +1029,10 @@ impl AuthService {
                 // 按**类型序**比较而非值序，条件因此不成立。这个坑在
                 // rate_limiter.rs 的注释里已经记过一次。
                 "UPDATE password_reset_token SET used = true \
-                 WHERE token = $token_value AND used = false AND expires_at > time::now() \
-                 RETURN VALUE token",
+                 WHERE token_hash = $token_hash AND used = false AND expires_at > time::now() \
+                 RETURN VALUE token_hash",
                 // 同上：`$token` 是 SurrealDB 保留变量。
-                serde_json::json!({ "token_value": &token }),
+                serde_json::json!({ "token_hash": crate::utils::crypto::hash_bearer(&token) }),
             )
             .await?;
         let claimed_tokens: Vec<String> = claimed.take(0)?;
@@ -1050,7 +1045,11 @@ impl AuthService {
         // 抢占成功后才去读它，拿邮箱。此时 used 已经是 true，重放不可能再走到这里。
         let reset_token = self
             .db
-            .find_record_by_field::<PasswordResetToken>("password_reset_token", "token", &token)
+            .find_record_by_field::<PasswordResetToken>(
+                "password_reset_token",
+                "token_hash",
+                &crate::utils::crypto::hash_bearer(&token),
+            )
             .await?
             .ok_or(AuthError::InvalidToken)?;
 
@@ -1108,6 +1107,8 @@ impl AuthService {
         user_id: &str,
         current_token: &str,
     ) -> Result<Vec<SessionInfo>> {
+        // 库里存的是指纹，来件也算一遍再比 —— 标记"当前会话"不需要明文。
+        let current_token_hash = crate::utils::crypto::hash_bearer(current_token);
         let sessions = self.db.get_sessions_by_user_id(user_id).await?;
 
         let session_infos: Vec<SessionInfo> = sessions
@@ -1120,7 +1121,7 @@ impl AuthService {
                         .unwrap_or_else(Utc::now),
                     user_agent: session.user_agent,
                     ip_address: session.ip_address,
-                    is_current: session.token == current_token,
+                    is_current: session.token_hash == current_token_hash,
                 })
             })
             .collect();

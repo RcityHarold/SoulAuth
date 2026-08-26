@@ -6,11 +6,12 @@
 
 use std::sync::Arc;
 
-use axum::{http::StatusCode, response::Json, routing::get, Extension, Router};
+use axum::{response::Json, routing::get, Extension, Router};
 use serde_json::json;
 
 use crate::{
-    require_permission_status, services::database::Database, utils::jwt::AuthedUser,
+    error::AuthError, require_permission_status, services::database::Database,
+    utils::jwt::AuthedUser,
 };
 
 pub fn router() -> Router {
@@ -20,8 +21,8 @@ pub fn router() -> Router {
 async fn get_membership_overview(
     user: AuthedUser,
     Extension(db): Extension<Arc<Database>>,
-) -> Result<Json<serde_json::Value>, StatusCode> {
-    let user_id = user.id().map_err(|_| StatusCode::UNAUTHORIZED)?;
+) -> Result<Json<serde_json::Value>, AuthError> {
+    let user_id = user.id()?;
     require_permission_status!(db, &user_id, crate::models::permission::names::USERS_READ);
 
     // 在库里聚合，只取回几行。
@@ -37,7 +38,7 @@ async fn get_membership_overview(
              WHERE account_status != 'Deleted' GROUP BY membership_level",
         )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
 
     let mut distribution = serde_json::Map::new();
     for level in ["FREE", "PRO", "PREMIUM", "ULTIMATE", "TEAM"] {
@@ -59,19 +60,22 @@ async fn get_membership_overview(
 
         // 库里出现了预设档位之外的值时，仍然计入总数并单列一档，
         // 而不是悄悄丢掉 —— 看板的总数对不上账比多出一档更难查。
-        let current = distribution.get(&level).and_then(|v| v.as_u64()).unwrap_or(0);
+        let current = distribution
+            .get(&level)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         distribution.insert(level, json!(current + count));
     }
 
     Ok(Json(json!({
-            "total_users": total_users,
-            "distribution": distribution,
-            "limits": {
-                "FREE": { "ai_limit": 1, "daily_messages": 10, "price": 0.0 },
-                "PRO": { "ai_limit": 3, "daily_messages": 50, "price": 19.9 },
-                "PREMIUM": { "ai_limit": 5, "daily_messages": 100, "price": 39.9 },
-                "ULTIMATE": { "ai_limit": 7, "daily_messages": null, "price": 79.9 },
-                "TEAM": { "ai_limit": 35, "daily_messages": null, "price": 299.9 }
-            }
-        })))
+        "total_users": total_users,
+        "distribution": distribution,
+        "limits": {
+            "FREE": { "ai_limit": 1, "daily_messages": 10, "price": 0.0 },
+            "PRO": { "ai_limit": 3, "daily_messages": 50, "price": 19.9 },
+            "PREMIUM": { "ai_limit": 5, "daily_messages": 100, "price": 39.9 },
+            "ULTIMATE": { "ai_limit": 7, "daily_messages": null, "price": 79.9 },
+            "TEAM": { "ai_limit": 35, "daily_messages": null, "price": 299.9 }
+        }
+    })))
 }

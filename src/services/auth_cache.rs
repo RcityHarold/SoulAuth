@@ -145,7 +145,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             is_email_verified: true,
-            verification_token: None,
+            verification_token_hash: None,
             verification_token_expires_at: None,
             account_status: "Active".to_string(),
             membership_level: "FREE".to_string(),

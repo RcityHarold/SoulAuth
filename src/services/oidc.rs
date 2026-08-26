@@ -85,7 +85,11 @@ pub struct OidcConfiguration {
 }
 
 impl OidcService {
-    pub fn new(db: Arc<Database>, config: Config, signing_key: Arc<OidcSigningKey>) -> Result<Self> {
+    pub fn new(
+        db: Arc<Database>,
+        config: Config,
+        signing_key: Arc<OidcSigningKey>,
+    ) -> Result<Self> {
         Ok(Self {
             db,
             config,
@@ -201,7 +205,7 @@ impl OidcService {
 
         let auth_code = OidcAuthorizationCode {
             id: None,
-            code: code.clone(),
+            code_hash: crate::utils::crypto::hash_bearer(&code),
             client_id: request.client_id.clone(),
             user_id: user_id.to_string(),
             redirect_uri: request.redirect_uri.clone(),
@@ -366,7 +370,10 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Missing refresh token"))?;
 
         let client = self.authenticate_client(request).await?;
-        if !client.allowed_grant_types.contains(&GrantType::RefreshToken) {
+        if !client
+            .allowed_grant_types
+            .contains(&GrantType::RefreshToken)
+        {
             return Err(anyhow!("Grant type not allowed for this client"));
         }
 
@@ -389,12 +396,15 @@ impl OidcService {
         }
 
         // 原子地标记旧刷新令牌为已使用，避免并发重放
-        if !self.consume_refresh_token(&stored_refresh_token.token).await? {
+        if !self
+            .consume_refresh_token_by_hash(&stored_refresh_token.token_hash)
+            .await?
+        {
             return Err(anyhow!("Refresh token already used"));
         }
 
         // 使旧的访问令牌失效
-        self.revoke_access_token(&stored_refresh_token.access_token)
+        self.revoke_access_token_by_hash(&stored_refresh_token.access_token_hash)
             .await?;
 
         // 刷新时不允许提权：新 scope 必须是原 scope 的子集
@@ -418,7 +428,7 @@ impl OidcService {
             None,
             stored_refresh_token.auth_session_ref.as_deref(),
         )
-            .await
+        .await
     }
 
     async fn generate_tokens(
@@ -445,7 +455,7 @@ impl OidcService {
 
         let oidc_access_token = OidcAccessToken {
             id: None,
-            token: access_token.clone(),
+            token_hash: crate::utils::crypto::hash_bearer(&access_token),
             token_type: "Bearer".to_string(),
             client_id: client.client_id.clone(),
             user_id: user_id.to_string(),
@@ -459,16 +469,19 @@ impl OidcService {
             .map_err(|e| anyhow!("save access token failed: {e}"))?;
 
         // 生成刷新令牌
-        let refresh_token = if client.allowed_grant_types.contains(&GrantType::RefreshToken) {
+        let refresh_token = if client
+            .allowed_grant_types
+            .contains(&GrantType::RefreshToken)
+        {
             let token = generate_random_string(48);
             let refresh_token_expires_at = now + client.refresh_token_lifetime;
 
             let oidc_refresh_token = OidcRefreshToken {
                 id: None,
-                token: token.clone(),
+                token_hash: crate::utils::crypto::hash_bearer(&token),
                 client_id: client.client_id.clone(),
                 user_id: user_id.to_string(),
-                access_token: access_token.clone(),
+                access_token_hash: crate::utils::crypto::hash_bearer(&access_token),
                 scope: scope.to_string(),
                 auth_session_ref: auth_session_ref.map(ToOwned::to_owned),
                 used: false,
@@ -579,8 +592,9 @@ impl OidcService {
         // `aud` 不设置即表示不校验（jsonwebtoken 只在 `validation.aud` 存在时比对）。
         validation.validate_exp = false;
 
-        let token_data = decode::<IdTokenClaims>(id_token, self.signing_key.decoding_key(), &validation)
-            .map_err(|e| anyhow!("Invalid id_token_hint: {e}"))?;
+        let token_data =
+            decode::<IdTokenClaims>(id_token, self.signing_key.decoding_key(), &validation)
+                .map_err(|e| anyhow!("Invalid id_token_hint: {e}"))?;
 
         Ok((token_data.claims.sub, token_data.claims.aud))
     }
@@ -658,7 +672,10 @@ impl OidcService {
             Some("S256") => {
                 let hash = Sha256::digest(code_verifier.as_bytes());
                 let encoded = general_purpose::URL_SAFE_NO_PAD.encode(hash);
-                Ok(constant_time_eq(encoded.as_bytes(), code_challenge.as_bytes()))
+                Ok(constant_time_eq(
+                    encoded.as_bytes(),
+                    code_challenge.as_bytes(),
+                ))
             }
             Some(other) => Err(anyhow!("Unsupported code challenge method: {}", other)),
             None => Err(anyhow!("Missing code_challenge_method; S256 is required")),
@@ -759,7 +776,7 @@ impl OidcService {
     async fn save_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
         let query = r#"
             CREATE oidc_authorization_code CONTENT {
-                code: $code,
+                code_hash: $code_hash,
                 client_id: $client_id,
                 user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 redirect_uri: $redirect_uri,
@@ -783,7 +800,7 @@ impl OidcService {
                 "oidc_save_authorization_code",
                 query,
                 serde_json::json!({
-                    "code": code.code,
+                    "code_hash": code.code_hash,
                     "client_id": code.client_id,
                     "user_key": normalize_user_id(&code.user_id),
                     "redirect_uri": code.redirect_uri,
@@ -803,11 +820,12 @@ impl OidcService {
         Ok(())
     }
 
+    /// 按**指纹**取授权码。入参仍是来件原文，指纹在这里算。
     async fn get_authorization_code(&self, code: &str) -> Result<OidcAuthorizationCode> {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                code,
+                code_hash,
                 client_id,
                 type::string(user_id) AS user_id,
                 redirect_uri,
@@ -821,7 +839,7 @@ impl OidcService {
                 expires_at,
                 created_at
             FROM oidc_authorization_code
-            WHERE code = $code
+            WHERE code_hash = $code_hash
             LIMIT 1
         "#;
 
@@ -830,7 +848,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_authorization_code",
                 query,
-                serde_json::json!({ "code": code }),
+                serde_json::json!({ "code_hash": crate::utils::crypto::hash_bearer(code) }),
             )
             .await?;
 
@@ -846,13 +864,13 @@ impl OidcService {
 
     async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
         let query =
-            "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN VALUE code";
+            "UPDATE oidc_authorization_code SET used = true WHERE code_hash = $code_hash AND used = false RETURN VALUE code_hash";
         let mut result = self
             .db
             .raw_query(
                 "oidc_update_authorization_code",
                 query,
-                serde_json::json!({ "code": code.code }),
+                serde_json::json!({ "code_hash": code.code_hash }),
             )
             .await?;
 
@@ -867,7 +885,7 @@ impl OidcService {
     async fn save_access_token(&self, token: &OidcAccessToken) -> Result<()> {
         let query = r#"
             CREATE oidc_access_token CONTENT {
-                token: $access_token_value,
+                token_hash: $access_token_hash,
                 token_type: $token_type,
                 client_id: $client_id,
                 user_id: type::record('actor_identity', $user_key),
@@ -882,7 +900,7 @@ impl OidcService {
                 "oidc_save_access_token",
                 query,
                 serde_json::json!({
-                    "access_token_value": token.token,
+                    "access_token_hash": token.token_hash,
                     "token_type": token.token_type,
                     "client_id": token.client_id,
                     "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
@@ -900,7 +918,7 @@ impl OidcService {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                token,
+                token_hash,
                 token_type,
                 client_id,
                 type::string(user_id) AS user_id,
@@ -908,7 +926,7 @@ impl OidcService {
                 expires_at,
                 created_at
             FROM oidc_access_token
-            WHERE token = $access_token_value
+            WHERE token_hash = $access_token_hash
             LIMIT 1
         "#;
 
@@ -917,7 +935,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_access_token",
                 query,
-                serde_json::json!({ "access_token_value": token }),
+                serde_json::json!({ "access_token_hash": crate::utils::crypto::hash_bearer(token) }),
             )
             .await?;
 
@@ -931,12 +949,16 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Access token not found"))
     }
 
-    async fn revoke_access_token(&self, token: &str) -> Result<()> {
+    /// 按指纹吊销访问令牌。
+    ///
+    /// 收指纹而不是原文：唯一调用方是刷新流程，它手上只有刷新令牌记录里
+    /// 存的那份指纹，原文早就交给客户端了。
+    async fn revoke_access_token_by_hash(&self, token_hash: &str) -> Result<()> {
         self.db
             .raw_query(
                 "oidc_revoke_access_token",
-                "DELETE oidc_access_token WHERE token = $access_token_value",
-                serde_json::json!({ "access_token_value": token }),
+                "DELETE oidc_access_token WHERE token_hash = $access_token_hash",
+                serde_json::json!({ "access_token_hash": token_hash }),
             )
             .await?;
 
@@ -946,10 +968,10 @@ impl OidcService {
     async fn save_refresh_token(&self, token: &OidcRefreshToken) -> Result<()> {
         let query = r#"
             CREATE oidc_refresh_token CONTENT {
-                token: $refresh_token_value,
+                token_hash: $refresh_token_hash,
                 client_id: $client_id,
                 user_id: type::record('actor_identity', $user_key),
-                access_token: $access_token,
+                access_token_hash: $access_token_hash,
                 scope: $scope,
                 auth_session_ref: $auth_session_ref ?? NONE,
                 used: $used,
@@ -963,10 +985,10 @@ impl OidcService {
                 "oidc_save_refresh_token",
                 query,
                 serde_json::json!({
-                    "refresh_token_value": token.token,
+                    "refresh_token_hash": token.token_hash,
                     "client_id": token.client_id,
                     "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
-                    "access_token": token.access_token,
+                    "access_token_hash": token.access_token_hash,
                     "auth_session_ref": token.auth_session_ref,
                     "scope": token.scope,
                     "used": token.used,
@@ -983,17 +1005,17 @@ impl OidcService {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                token,
+                token_hash,
                 client_id,
                 type::string(user_id) AS user_id,
-                access_token,
+                access_token_hash,
                 scope,
                 auth_session_ref,
                 used,
                 expires_at,
                 created_at
             FROM oidc_refresh_token
-            WHERE token = $refresh_token_value
+            WHERE token_hash = $refresh_token_hash
             LIMIT 1
         "#;
 
@@ -1002,7 +1024,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_refresh_token",
                 query,
-                serde_json::json!({ "refresh_token_value": token }),
+                serde_json::json!({ "refresh_token_hash": crate::utils::crypto::hash_bearer(token) }),
             )
             .await?;
 
@@ -1017,15 +1039,16 @@ impl OidcService {
     }
 
     /// 原子地把刷新令牌标记为已使用；返回 false 表示已经被别的请求消费掉了。
-    async fn consume_refresh_token(&self, token: &str) -> Result<bool> {
-        let query = "UPDATE oidc_refresh_token SET used = true WHERE token = $refresh_token_value AND used = false RETURN VALUE token";
+    /// 按指纹原子地把刷新令牌标记为已用。收指纹，理由同 `revoke_access_token_by_hash`。
+    async fn consume_refresh_token_by_hash(&self, token_hash: &str) -> Result<bool> {
+        let query = "UPDATE oidc_refresh_token SET used = true WHERE token_hash = $refresh_token_hash AND used = false RETURN VALUE token_hash";
 
         let mut result = self
             .db
             .raw_query(
                 "oidc_consume_refresh_token",
                 query,
-                serde_json::json!({ "refresh_token_value": token }),
+                serde_json::json!({ "refresh_token_hash": token_hash }),
             )
             .await?;
 
@@ -1194,7 +1217,9 @@ mod tests {
         let verifier = "plain-verifier-abcdefghijklmnopqrstuvwxyz012345";
         let err = OidcService::verify_pkce_value(verifier, Some("plain"), verifier)
             .expect_err("plain must be rejected");
-        assert!(err.to_string().contains("Unsupported code challenge method"));
+        assert!(err
+            .to_string()
+            .contains("Unsupported code challenge method"));
     }
 
     #[test]

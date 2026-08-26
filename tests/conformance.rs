@@ -377,23 +377,57 @@ fn b4a_client_secret_is_hashed() {
 ///
 /// Token compromise 不应等价于整个 ActorIdentity 被永久接管。
 #[test]
-#[ignore = "V2 Stage 3 —— oidc_refresh_token.token 与 oidc_authorization_code.code 仍是明文"]
 fn b4b_bearer_secrets_are_not_stored_in_clear() {
-    assert!(
-        !field_exists("oidc_refresh_token", "token"),
-        "refresh token 不得明文存储，应存 hash"
-    );
-    assert!(
-        !field_exists("oidc_authorization_code", "code"),
-        "authorization code 不得明文存储，应存 digest"
-    );
-    // 轮换与重放检测必须是正式 Token Lifecycle，不是散落的业务逻辑。
-    for f in ["token_family", "reuse_detected_at"] {
+    // 六处长效 bearer 凭证，一处都不许留原文。
+    //
+    // 会话那条最容易被忽略：`session.token` 存的曾是**完整签名 JWT**，
+    // 与客户端手里那枚逐字节相同 —— 一次数据库读泄露等于交出全站在线会话。
+    for (table, plain, hashed) in [
+        ("session", "token", "token_hash"),
+        ("oidc_access_token", "token", "token_hash"),
+        ("oidc_refresh_token", "token", "token_hash"),
+        ("oidc_refresh_token", "access_token", "access_token_hash"),
+        ("oidc_authorization_code", "code", "code_hash"),
+        ("password_reset_token", "token", "token_hash"),
+    ] {
         assert!(
-            field_exists("oidc_refresh_token", f),
-            "refresh token 缺少 lifecycle 字段 `{f}`"
+            !field_exists(table, plain),
+            "`{table}.{plain}` 是明文 bearer 凭证，必须改存指纹"
+        );
+        assert!(
+            field_exists(table, hashed),
+            "`{table}` 缺少指纹列 `{hashed}`"
         );
     }
+    assert!(
+        !field_exists("user", "verification_token"),
+        "`user.verification_token` 是明文，必须改存指纹"
+    );
+    assert!(field_exists("user", "verification_token_hash"));
+
+    // 指纹必须真的是单向的。
+    let crypto = read("src/utils/crypto.rs");
+    assert!(
+        crypto.contains("pub fn hash_bearer"),
+        "缺少 bearer 指纹函数"
+    );
+    assert!(
+        crypto.contains("Sha256::digest"),
+        "hash_bearer 必须是真哈希，不能是编码或加前缀"
+    );
+
+    // 轮换与重放检测：`used` 标记 + 复用即吊销令牌族。
+    // 不断言具体列名（`token_family` 之类）—— 同一个语义可以用
+    // client_id + user_id 的族查询实现，强求列名是过度规定。
+    assert!(
+        field_exists("oidc_refresh_token", "used"),
+        "刷新令牌缺少轮换标记"
+    );
+    let oidc = read("src/services/oidc.rs");
+    assert!(
+        oidc.contains("revoke_client_tokens_for_user"),
+        "检测到刷新令牌复用时必须吊销整个令牌族"
+    );
 }
 
 /// B5 · 三类 Key 不得共用
@@ -825,15 +859,45 @@ fn g2_security_state_is_shared_across_replicas() {
 
 /// G3 · 稳定的机器可读 error contract
 ///
-/// `code` 是契约，`message` 可以变。调用方按状态码和 code 匹配，不按文案匹配。
+/// 契约是：`error` 携带**稳定的机器可读码**，`message` 是可以改措辞的人话。
+/// 调用方按 HTTP 状态码 + `error` 分支，永远不按 `message` 的文案分支。
+///
+/// 字段名用 `error` 而不是 `code`，是为了与本服务 OIDC 端点上 RFC 6749 强制的
+/// `{"error", "error_description"}` 同名同位 —— 一个 API 里两种命名习惯，
+/// 消费方仍然要记两套。
 #[test]
-#[ignore = "V2 Stage 6 —— 四种错误形状并存，且无机器可读 code"]
 fn g3_error_contract_is_stable() {
     let err = read("src/error.rs");
     assert!(
-        err.contains("\"code\""),
-        "非 OIDC API 的错误体必须携带稳定的机器可读 `code`"
+        err.contains("pub fn code(&self) -> &'static str"),
+        "AuthError 必须提供稳定的机器可读 `code()`"
     );
+    assert!(
+        err.contains(r#"body.insert("error".into()"#)
+            && err.contains(r#"body.insert("message".into()"#),
+        "错误响应体必须同时含 `error`（码）与 `message`（人话）"
+    );
+
+    // 码只能是 snake_case 字面量：一旦有人把 `format!` 塞进去，它就不再稳定了。
+    let codes = err
+        .split("pub fn code(&self) -> &'static str")
+        .nth(1)
+        .expect("code() 不见了");
+    let body = &codes[..codes.find("\n    }").expect("code() 没有结尾")];
+    assert!(
+        !body.contains("format!"),
+        "错误码必须是字面量，不能是格式化出来的字符串"
+    );
+    for line in body.lines().filter(|l| l.contains("=>") && l.contains('"')) {
+        let lit = line.split('"').nth(1).unwrap_or("");
+        assert!(
+            !lit.is_empty()
+                && lit
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c == '_' || c.is_ascii_digit()),
+            "错误码 `{lit}` 不是 snake_case"
+        );
+    }
 }
 
 // ═════════════════════ H. 30 篇公开文档补充的不变式 ═════════════════════
@@ -1561,15 +1625,18 @@ fn j1_permission_registry_matches_runtime() {
 #[test]
 fn j2_configuration_registry_matches_runtime() {
     let registry = read("contracts/configuration.yaml");
-    let cfg = read("src/config.rs");
-    let main = read("src/main.rs");
 
     // Runtime 读取的每一个环境变量都必须在注册表里。
     //
+    // **扫全 `src/`，不是只扫 config.rs 与 main.rs。** 早先这里只看那两个文件,
+    // 于是 `services/database.rs` 里四个 `SURREAL_*` 从未被登记也从未被报警 ——
+    // 守卫自己有盲区，比没有守卫更危险 —— 它给了一种「已经守住了」的错觉。
+    //
     // 只认「配置读取辅助函数 + 裸 env::var」这两种形态 —— 源码里其它大写
     // 字符串（错误文案、SQL 关键字）不是配置项。
+    let all = sources();
     let mut in_runtime: Vec<String> = Vec::new();
-    for src in [&cfg, &main] {
+    for (_, src) in &all {
         let production = match src.find("#[cfg(test)]") {
             Some(i) => &src[..i],
             None => &src[..],
@@ -1744,4 +1811,93 @@ fn j5_standards_registry_does_not_overclaim() {
         "Standards Registry 出现 certified: true —— 认证需要 Standards \
          Organization 的正式流程作为 Evidence，不能自我声明"
     );
+}
+
+/// J6 · 全站只有一种错误形状
+///
+/// 法源: V3 30｜Project Status §12 —— 消费方最容易被误导的不是缺功能，
+/// 而是**同一个 API 在不同端点上行为不一致**。
+///
+/// 这条防的是一个真实存在过的缺口：`/api/rbac/*` 与 `/api/ops/*` 的 handler
+/// 返回 `Result<T, StatusCode>`，于是「权限不足」在那 14 个端点上是**空响应体**，
+/// 在其余端点上是 JSON。四种形状并存时，API Reference 物理上写不出来。
+#[test]
+fn j6_error_shape_is_uniform() {
+    // 1. 没有任何 handler 把裸 StatusCode 当错误返回。
+    for (file, body) in sources() {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        for pat in ["Err(StatusCode::", "Err(axum::http::StatusCode::"] {
+            assert!(
+                !production.contains(pat),
+                "{file} 用裸 StatusCode 当错误返回 —— 那是空响应体，\
+                 调用方拿不到码也拿不到说明。改成返回 AuthError。"
+            );
+        }
+    }
+
+    // 2. 两个权限宏必须产出同一个错误。分叉过一次，不能再分叉第二次。
+    let mw = read("src/utils/permission_middleware.rs");
+    assert!(
+        mw.contains("AuthError::MissingPermission"),
+        "权限宏必须产出 AuthError::MissingPermission"
+    );
+    assert!(
+        !mw.contains("StatusCode::FORBIDDEN"),
+        "权限宏不得再返回裸 StatusCode"
+    );
+
+    // 3. 路由层自造的错误体只允许两处：统一的 error_body，和 OIDC 的 RFC 形状。
+    let mut ad_hoc = Vec::new();
+    for (file, body) in sources() {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        for line in body.lines() {
+            let l = line.trim();
+            if l.contains("json!({") && l.contains("\"error\"") {
+                let allowed = l.contains("\"error\": code, \"message\": message")
+                    || l.contains("\"error\": code, \"error_description\": description");
+                if !allowed {
+                    ad_hoc.push(format!("{file}: {l}"));
+                }
+            }
+        }
+    }
+    assert!(
+        ad_hoc.is_empty(),
+        "路由层出现自造错误体，形状会与 AuthError 分叉：\n{}",
+        ad_hoc.join("\n")
+    );
+}
+
+/// J7 · 对外 URL 里不得出现重复路径段
+///
+/// 法源: V3 22 —— Published Machine-readable Contract 是消费方唯一依据，
+/// 而一条 `/api/users/users/:user_id` 这样的路径会让人第一眼认为文档写错了。
+///
+/// 发布前改是零成本，发布后改是 breaking change。
+#[test]
+fn j7_no_duplicated_path_segments() {
+    let contract = read("contracts/openapi.yaml");
+    for line in contract.lines() {
+        let l = line.trim_start();
+        if !l.starts_with('/') || !l.ends_with(':') {
+            continue;
+        }
+        let path = l.trim_end_matches(':');
+        let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+        for pair in segments.windows(2) {
+            assert!(
+                pair[0] != pair[1],
+                "路径 `{path}` 里出现重复段 `{}` —— 多半是 nest 前缀与路由本身撞了",
+                pair[0]
+            );
+        }
+    }
 }

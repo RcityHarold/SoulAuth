@@ -40,7 +40,10 @@ macro_rules! require_permission {
     ($db:expr, $user_id:expr, $permission:expr) => {{
         let rbac_service = $crate::services::rbac::RBACService::new($db.clone());
 
-        match rbac_service.check_user_permission($user_id, $permission).await {
+        match rbac_service
+            .check_user_permission($user_id, $permission)
+            .await
+        {
             Ok(has_permission) => {
                 if !has_permission {
                     $crate::utils::permission_middleware::record_permission_denied(
@@ -48,10 +51,9 @@ macro_rules! require_permission {
                         $user_id,
                         $permission,
                     );
-                    return Err($crate::error::AuthError::Forbidden(format!(
-                        "Missing permission: {}",
-                        $permission
-                    )));
+                    return Err($crate::error::AuthError::MissingPermission(
+                        $permission.to_string(),
+                    ));
                 }
             }
             Err(e) => {
@@ -64,27 +66,15 @@ macro_rules! require_permission {
     }};
 }
 
-/// 权限检查宏（返回 `StatusCode`），用于返回 `StatusCode` 的路由处理器。
+/// 与 [`require_permission`] 等价，保留独立名字只为兼容既有调用点。
+///
+/// 它原本返回裸 `StatusCode`，于是同一个「权限不足」在 `/api/rbac/*` 与
+/// `/api/ops/*` 上是**空响应体**，在别处是 JSON —— 同一个 API 两种错误形状，
+/// 调用方得逐端点记。现在两个宏产出同一个 `AuthError::MissingPermission`。
 #[macro_export]
 macro_rules! require_permission_status {
     ($db:expr, $user_id:expr, $permission:expr) => {{
-        let rbac_service = $crate::services::rbac::RBACService::new($db.clone());
-
-        match rbac_service.check_user_permission($user_id, $permission).await {
-            Ok(has_permission) => {
-                if !has_permission {
-                    $crate::utils::permission_middleware::record_permission_denied(
-                        &$db.clone(),
-                        $user_id,
-                        $permission,
-                    );
-                    return Err(axum::http::StatusCode::FORBIDDEN);
-                }
-            }
-            Err(_) => {
-                return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-            }
-        }
+        $crate::require_permission!($db, $user_id, $permission)
     }};
 }
 

@@ -339,7 +339,7 @@ has '"is_admin":true' "$(body)" "引导响应直接断言 is_admin"
 req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"boot@test.local","password":"CorrectHorse42!"}' > /dev/null
 BOOT_TOKEN_USER="$(jget token)"
-eq 200 "$(req GET /api/users/users -H "Authorization: Bearer ${BOOT_TOKEN_USER}")" \
+eq 200 "$(req GET /api/users -H "Authorization: Bearer ${BOOT_TOKEN_USER}")" \
     "引导出的管理员可访问受保护端点"
 
 # 门是一次性的：已有管理员之后，正确令牌同样被拒。
@@ -363,12 +363,12 @@ UNPREFIXED="$(sql_count "SELECT count() FROM permission WHERE !string::starts_wi
 eq 0 "$UNPREFIXED" "无未加前缀的残留权限"
 
 eq 200 "$(req GET /api/rbac/roles -H "Authorization: Bearer $ADMIN_TOKEN")"          "管理员可读角色（soulauth:roles.read）"
-eq 200 "$(req GET '/api/users/users?limit=2' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读用户（soulauth:users.read）"
+eq 200 "$(req GET '/api/users?limit=2' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读用户（soulauth:users.read）"
 eq 200 "$(req GET '/api/audit/dashboard?days=1' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读审计（soulauth:audit.read）"
 eq 200 "$(req GET /api/oidc/clients -H "Authorization: Bearer $ADMIN_TOKEN")"        "管理员可读 OIDC 客户端"
 
 PLAIN_TOKEN="$(signup plain@test.local plaintest)"
-eq 403 "$(req GET /api/users/users -H "Authorization: Bearer $PLAIN_TOKEN")" "无权限用户被拒"
+eq 403 "$(req GET /api/users -H "Authorization: Bearer $PLAIN_TOKEN")" "无权限用户被拒"
 has 'soulauth:users.read' "$(body)" "拒绝信息里带命名空间前缀"
 
 group "5. RBAC 授予与撤销的往返"
@@ -871,40 +871,40 @@ ADMIN_UID="$(user_id_of admin@test.local)"
 
 # 已知缺陷：资料/偏好在 POST 建立之前读取返回 404 而不是空对象。
 # 这里把现状钉住 —— 哪天改成返回空对象，这条会红，提醒同步前端与文档。
-eq 404 "$(req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}")" \
+eq 404 "$(req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}")" \
     "尚未建立时读资料 → 404（现状，非空对象）"
 
-eq 200 "$(req POST /api/users/profile -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req POST /api/me/profile -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"display_name":"Plain User","bio":"hello"}')" "建立资料"
-req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'Plain User' "$(body)" "读回自己的资料"
 
-eq 200 "$(req PUT /api/users/profile -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req PUT /api/me/profile -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"display_name":"Renamed","bio":"updated"}')" "更新资料"
-req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'Renamed' "$(body)" "更新确实落库（不是只返回成功）"
 
-eq 200 "$(req POST /api/users/preferences -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req POST /api/me/preferences -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"language":"zh-CN","timezone":"Asia/Shanghai"}')" "建立偏好"
-eq 200 "$(req PUT /api/users/preferences -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req PUT /api/me/preferences -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"language":"en-US","timezone":"UTC"}')" "更新偏好"
-req GET /api/users/preferences -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/preferences -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'en-US' "$(body)" "偏好更新落库"
 
-eq 200 "$(req GET /api/users/activity-log -H "Authorization: Bearer ${TOK_P}")" "可读自己的活动日志"
-eq 401 "$(req GET /api/users/profile)" "无令牌读资料 → 401"
+eq 200 "$(req GET /api/me/activity-log -H "Authorization: Bearer ${TOK_P}")" "可读自己的活动日志"
+eq 401 "$(req GET /api/me/profile)" "无令牌读资料 → 401"
 
 # 跨用户读取：本人之外一律要权限
-eq 200 "$(req GET "/api/users/users/${PLAIN_UID}/profile" -H "Authorization: Bearer ${TOK_A}")" \
+eq 200 "$(req GET "/api/users/${PLAIN_UID}/profile" -H "Authorization: Bearer ${TOK_A}")" \
     "管理员可读他人资料（users.read）"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/profile" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/profile" -H "Authorization: Bearer ${TOK_P}")" \
     "无 users.read 读不了他人资料"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/preferences" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/preferences" -H "Authorization: Bearer ${TOK_P}")" \
     "无 users.read 读不了他人偏好"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/activity-log" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/activity-log" -H "Authorization: Bearer ${TOK_P}")" \
     "无 audit.read 读不了他人活动日志"
-eq 200 "$(req GET "/api/users/users/${PLAIN_UID}" -H "Authorization: Bearer ${TOK_A}")" "管理员可按 id 读用户"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}" -H "Authorization: Bearer ${TOK_P}")" "普通用户按 id 读不了他人"
+eq 200 "$(req GET "/api/users/${PLAIN_UID}" -H "Authorization: Bearer ${TOK_A}")" "管理员可按 id 读用户"
+eq 403 "$(req GET "/api/users/${ADMIN_UID}" -H "Authorization: Bearer ${TOK_P}")" "普通用户按 id 读不了他人"
 
 group "18. 账号状态与会员等级：越权与即时失效"
 
@@ -916,15 +916,15 @@ VICTIM_UID="$(user_id_of victim@test.local)"
 [ -n "$VICTIM_TOKEN" ] && ok "受害账号建立并登录" || bad "受害账号建立并登录" "$(body)"
 
 # 越权：普通用户不得改任何人的状态，包括自己
-eq 403 "$(req PUT "/api/users/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
+eq 403 "$(req PUT "/api/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
     -H 'Content-Type: application/json' -d '{"status":"Active","reason":"self"}')" \
     "无 users.write 改不了自己的状态"
-eq 403 "$(req PUT "/api/users/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
+eq 403 "$(req PUT "/api/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO"}')" \
     "无 users.write 不能自封会员等级"
 
 # 会员等级由管理员改，且要真的落库
-eq 200 "$(req PUT "/api/users/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${TOK_A}" \
+eq 200 "$(req PUT "/api/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO"}')" "管理员可改会员等级"
 LEVEL="$(sql "SELECT VALUE membership_level FROM user WHERE email='victim@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
@@ -933,7 +933,7 @@ eq PRO "$LEVEL" "会员等级确实落库"
 # 停用之后，**已经签发的令牌必须立刻失效**。
 # 这是本组的核心：只清缓存而不在校验时看状态，被停用的人还能继续用到令牌自然过期。
 eq 200 "$(req GET /api/auth/me -H "Authorization: Bearer ${VICTIM_TOKEN}")" "停用前令牌可用"
-eq 200 "$(req PUT "/api/users/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${TOK_A}" \
+eq 200 "$(req PUT "/api/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"status":"Suspended","reason":"itest"}')" "管理员停用该账号"
 # 停用后的判定用显式 if：`[ A ] || [ B ] && ok || bad` 在 shell 里是
 # 左结合的等优先级串联，读起来像三元表达式，实际语义靠碰巧。
@@ -1384,7 +1384,7 @@ eq 200 "$(req GET /api/oidc/userinfo -H "Authorization: Bearer ${SUSP_AT}")" "�
     bad "scope=openid+email 的 ID Token 含 email" "email 为空"
 eq "" "$(claim "$SUSP_IDT" preferred_username)" "email scope 不放行 preferred_username"
 
-eq 200 "$(req PUT "/api/users/users/${SUSP_UID}/status" -H "Authorization: Bearer ${TOK_ADMIN}" \
+eq 200 "$(req PUT "/api/users/${SUSP_UID}/status" -H "Authorization: Bearer ${TOK_ADMIN}" \
     -H 'Content-Type: application/json' -d '{"status":"Suspended","reason":"regression"}')" \
     "管理员停用该账号"
 
@@ -1662,7 +1662,7 @@ eq 0 "$(sql_count "SELECT count() FROM password_reset_token WHERE used = true GR
 # PendingDeletion 已从 AccountStatus 移除：管理员不能再设置它。
 # 它此前的行为与 Deleted 完全同义，却对外宣告了一条不存在的删除流水线。
 CONTRACT_UID="$(user_id_of sesslist@test.local)"
-STATUS_CODE="$(req PUT "/api/users/users/${CONTRACT_UID}/status" -H "Authorization: Bearer ${TOK_AUDIT}" \
+STATUS_CODE="$(req PUT "/api/users/${CONTRACT_UID}/status" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' -d '{"status":"PendingDeletion","reason":"x"}')"
 case "$STATUS_CODE" in
     400|422) ok "PendingDeletion 已不被接受（${STATUS_CODE}）" ;;
@@ -1687,25 +1687,25 @@ case "$LEGACY_CODE" in
 esac
 
 # membership_expiry 现在是时间点：非法字符串在反序列化阶段就被拒。
-BAD_EXPIRY="$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+BAD_EXPIRY="$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO","membership_expiry":"下个月"}')"
 case "$BAD_EXPIRY" in
     400|422) ok "非法的 membership_expiry 被拒（${BAD_EXPIRY}）" ;;
     *)       bad "非法的 membership_expiry 被拒" "竟然收下了：${BAD_EXPIRY}" ;;
 esac
 
-eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+eq 200 "$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' \
     -d '{"membership_level":"PRO","membership_expiry":"2030-01-01T00:00:00Z"}')" \
     "合法的 RFC3339 时间点被接受"
 
 # SoulAuth 不解释这个字段：即使已经"过期"，等级也不会被自动降级
 # （P0-DECISION-09 §4.7：membership 归 Entitlement 侧，不由本服务判断）。
-eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+eq 200 "$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' \
     -d '{"membership_level":"PRO","membership_expiry":"2020-01-01T00:00:00Z"}')" \
     "过去的时间点同样被接受（形状合法即可）"
-req GET "/api/users/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+req GET "/api/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 has 'PRO' "$(body)" "已过期的会员等级不被本服务自动降级（解释权在消费方）"
 
 # ───────── 25.7 角色列表返回真实权限 / 拒绝实现不了的 grant ─────────
@@ -1811,12 +1811,12 @@ d=json.load(open('$WORK/body'))
 sys.exit(0 if isinstance(d,list) and d and 'name' in d[0] else 1)" \
   && ok "/api/rbac/roles 直接返回数组（信封已移除）" || bad "/api/rbac/roles 直接返回数组" "$(body | head -c 90)"
 
-req GET /api/users/users -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+req GET /api/users -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 python3 -c "
 import json,sys
 d=json.load(open('$WORK/body'))
 sys.exit(0 if ('users' in d and 'data' not in d) else 1)" \
-  && ok "/api/users/users 返回裸对象" || bad "/api/users/users 返回裸对象" "$(body | head -c 90)"
+  && ok "/api/users 返回裸对象" || bad "/api/users 返回裸对象" "$(body | head -c 90)"
 
 req GET /api/ops/memberships/overview -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 python3 -c "
@@ -1825,21 +1825,34 @@ d=json.load(open('$WORK/body'))
 sys.exit(0 if ('total_users' in d and 'data' not in d) else 1)" \
   && ok "/api/ops 返回裸对象" || bad "/api/ops 返回裸对象" "$(body | head -c 90)"
 
-# 错误体统一为单字段 {"error": …}
+# 错误体统一为 {"error": <机器码>, "message": <人话>}
+#
+# `error` 必须是 snake_case 机器码而不是英文散文 —— 调用方按它分支。
 req GET /api/auth/me -H "Authorization: Bearer not-a-token" > /dev/null
 python3 -c "
-import json,sys
+import json,re,sys
 d=json.load(open('$WORK/body'))
-sys.exit(0 if (list(d.keys())==['error']) else 1)" \
-  && ok "错误体只有 error 一个字段" || bad "错误体形状" "$(body | head -c 90)"
+sys.exit(0 if {'error','message'} <= set(d) and re.fullmatch(r'[a-z0-9_]+', d['error']) else 1)" \
+  && ok "错误体是 error(码)+message(人话)" || bad "错误体形状" "$(body | head -c 120)"
 
 req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"nobody@test.local","password":"WrongPass99!"}' > /dev/null
 python3 -c "
 import json,sys
 d=json.load(open('$WORK/body'))
-sys.exit(0 if (list(d.keys())==['error']) else 1)" \
-  && ok "登录失败的错误体同样是单字段" || bad "登录失败错误体" "$(body | head -c 90)"
+sys.exit(0 if d.get('error')=='invalid_credentials' and 'message' in d else 1)" \
+  && ok "登录失败给出 invalid_credentials" || bad "登录失败错误体" "$(body | head -c 120)"
+
+# 曾经的空响应体：/api/rbac/* 与 /api/ops/* 用裸 StatusCode 当错误，
+# 权限不足时 403 不带任何内容。现在必须与全站同形。
+TOK_NOPERM="$(login_token plain@test.local "CorrectHorse42!")"
+req GET /api/rbac/roles -H "Authorization: Bearer ${TOK_NOPERM}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if d.get('error')=='missing_permission' and d.get('required_permission') else 1)" \
+  && ok "rbac 权限不足给出 missing_permission + required_permission" \
+  || bad "rbac 403 形状" "$(body | head -c 120)"
 
 # OIDC 是有意的例外：形状由规范规定
 req GET /api/oidc/.well-known/openid-configuration > /dev/null

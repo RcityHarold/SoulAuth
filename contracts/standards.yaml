@@ -50,6 +50,18 @@ specifications:
       Authorization Code Flow。ID Token 为 RS256，含 sid（强制，取不到会话
       引用时拒签而不是签发残缺令牌）。implicit 与 hybrid flow 未实现。
     evidence: tests/integration.sh（ID Token sid / RS256 / scope 裁剪断言）
+    caveats:
+      - id: subject-stability
+        summary: >-
+          `sub` 当前取 `user` 行的记录键，而不是 `actor_identity` 的键。
+        detail: >-
+          架构上持久的身份根是 `actor_identity`（`status: retired` 正是为了
+          防止标识符被重新分配），但 wire 上暴露的 `sub` 指的不是它。
+          因此本 Release **不能**承诺 OIDC Core 要求的「`sub` 永不重新分配」
+          这一强度 —— 它只在 `user` 行的生命周期内稳定。
+          消费方若需要跨账号重建仍然稳定的主体标识，当前无法从 `sub` 获得。
+          改动会让全部在途令牌失效，属于需要单独规划的迁移。
+        runtime: "src/services/oidc.rs（id_token / userinfo 的 sub 取值）"
 
   - id: openid-connect-discovery-1.0
     title: OpenID Connect Discovery 1.0

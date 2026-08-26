@@ -145,7 +145,7 @@ DEFINE FIELD username ON user TYPE string;
 DEFINE FIELD username_normalized ON user TYPE string;
 DEFINE FIELD password ON user TYPE option<string>;
 DEFINE FIELD verified ON user TYPE bool DEFAULT false;
-DEFINE FIELD verification_token ON user TYPE option<string>;
+DEFINE FIELD verification_token_hash ON user TYPE option<string>;   -- 指纹，不是令牌
 DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
 DEFINE FIELD account_status ON user TYPE string DEFAULT "Active";
 DEFINE FIELD membership_level ON user TYPE string DEFAULT "FREE";
@@ -170,17 +170,17 @@ DEFINE INDEX provider_idx ON identity_provider COLUMNS provider, provider_user_i
 -- 会话表
 DEFINE TABLE session SCHEMAFULL;
 DEFINE FIELD user_id ON session TYPE record<actor_identity>;
-DEFINE FIELD token ON session TYPE string;
+DEFINE FIELD token_hash ON session TYPE string;          -- SHA-256 指纹，不是令牌本身
 DEFINE FIELD expires_at ON session TYPE number;
 DEFINE FIELD created_at ON session TYPE number;
 DEFINE FIELD user_agent ON session TYPE string;
 DEFINE FIELD ip_address ON session TYPE string;
-DEFINE INDEX token_idx ON session COLUMNS token UNIQUE;
+DEFINE INDEX session_token_hash_idx ON session COLUMNS token_hash UNIQUE;
 
 -- 密码重置令牌表
 DEFINE TABLE password_reset_token SCHEMAFULL;
 DEFINE FIELD email ON password_reset_token TYPE string;
-DEFINE FIELD token ON password_reset_token TYPE string;
+DEFINE FIELD token_hash ON password_reset_token TYPE string;        -- 指纹，不是令牌
 DEFINE FIELD expires_at ON password_reset_token TYPE datetime;
 DEFINE FIELD used ON password_reset_token TYPE bool;
 DEFINE FIELD created_at ON password_reset_token TYPE datetime;
@@ -342,7 +342,7 @@ DEFINE INDEX oidc_client_id_idx ON oidc_client COLUMNS client_id UNIQUE;
 
 -- OIDC 授权码表
 DEFINE TABLE oidc_authorization_code SCHEMAFULL;
-DEFINE FIELD code ON oidc_authorization_code TYPE string;
+DEFINE FIELD code_hash ON oidc_authorization_code TYPE string;
 DEFINE FIELD client_id ON oidc_authorization_code TYPE string;
 DEFINE FIELD user_id ON oidc_authorization_code TYPE record<actor_identity>;
 DEFINE FIELD redirect_uri ON oidc_authorization_code TYPE string;
@@ -356,34 +356,34 @@ DEFINE FIELD auth_session_ref ON oidc_authorization_code TYPE option<string>;
 DEFINE FIELD used ON oidc_authorization_code TYPE bool DEFAULT false;
 DEFINE FIELD expires_at ON oidc_authorization_code TYPE number;
 DEFINE FIELD created_at ON oidc_authorization_code TYPE number;
-DEFINE INDEX oidc_auth_code_idx ON oidc_authorization_code COLUMNS code UNIQUE;
+DEFINE INDEX oidc_auth_code_idx ON oidc_authorization_code COLUMNS code_hash UNIQUE;
 DEFINE INDEX oidc_auth_code_expiry_idx ON oidc_authorization_code COLUMNS expires_at;
 
 -- OIDC 访问令牌表
 DEFINE TABLE oidc_access_token SCHEMAFULL;
-DEFINE FIELD token ON oidc_access_token TYPE string;
+DEFINE FIELD token_hash ON oidc_access_token TYPE string;
 DEFINE FIELD token_type ON oidc_access_token TYPE string DEFAULT "Bearer";
 DEFINE FIELD client_id ON oidc_access_token TYPE string;
 DEFINE FIELD user_id ON oidc_access_token TYPE record<actor_identity>;
 DEFINE FIELD scope ON oidc_access_token TYPE string;
 DEFINE FIELD expires_at ON oidc_access_token TYPE number;
 DEFINE FIELD created_at ON oidc_access_token TYPE number;
-DEFINE INDEX oidc_access_token_idx ON oidc_access_token COLUMNS token UNIQUE;
+DEFINE INDEX oidc_access_token_idx ON oidc_access_token COLUMNS token_hash UNIQUE;
 DEFINE INDEX oidc_access_token_expiry_idx ON oidc_access_token COLUMNS expires_at;
 
 -- OIDC 刷新令牌表
 DEFINE TABLE oidc_refresh_token SCHEMAFULL;
-DEFINE FIELD token ON oidc_refresh_token TYPE string;
+DEFINE FIELD token_hash ON oidc_refresh_token TYPE string;
 DEFINE FIELD client_id ON oidc_refresh_token TYPE string;
 DEFINE FIELD user_id ON oidc_refresh_token TYPE record<actor_identity>;
-DEFINE FIELD access_token ON oidc_refresh_token TYPE string; -- 关联的访问令牌
+DEFINE FIELD access_token_hash ON oidc_refresh_token TYPE string; -- 关联访问令牌的指纹
 DEFINE FIELD scope ON oidc_refresh_token TYPE string;
 -- 同上：刷新也会签 ID Token，sid 必须能继续传递。
 DEFINE FIELD auth_session_ref ON oidc_refresh_token TYPE option<string>;
 DEFINE FIELD used ON oidc_refresh_token TYPE bool DEFAULT false;
 DEFINE FIELD expires_at ON oidc_refresh_token TYPE number;
 DEFINE FIELD created_at ON oidc_refresh_token TYPE number;
-DEFINE INDEX oidc_refresh_token_idx ON oidc_refresh_token COLUMNS token UNIQUE;
+DEFINE INDEX oidc_refresh_token_idx ON oidc_refresh_token COLUMNS token_hash UNIQUE;
 DEFINE INDEX oidc_refresh_token_expiry_idx ON oidc_refresh_token COLUMNS expires_at;
 
 -- 跨副本共享的限流计数桶。

@@ -1,22 +1,25 @@
+use serde_json::Value as JsonValue;
+use std::time::Duration;
 use std::{
     env,
     fmt::Debug,
     sync::{
-        Arc,
         atomic::{AtomicU64, Ordering},
+        Arc,
     },
     time::{SystemTime, UNIX_EPOCH},
 };
-use std::time::Duration;
-use serde_json::Value as JsonValue;
 use surrealdb::engine::remote::http::{Client, Http, Https};
 use surrealdb::opt::auth::Root;
-use surrealdb::{Surreal, types::RecordId};
 use surrealdb::types::SurrealValue;
+use surrealdb::{types::RecordId, Surreal};
 use tokio::time::sleep;
 use tracing::{debug, warn};
 
-use crate::{config::Config, error::{Result, AuthError}};
+use crate::{
+    config::Config,
+    error::{AuthError, Result},
+};
 
 #[derive(Clone)]
 pub struct Database {
@@ -61,7 +64,6 @@ impl Database {
             .unwrap_or(ep)
             .to_string()
     }
-
 
     /// 端点是否要求 TLS。
     fn is_tls_endpoint(raw: &str) -> bool {
@@ -119,7 +121,13 @@ impl Database {
         }
     }
 
-    async fn rpc_signin_token(endpoint: &str, user: &str, pass: &str, ns: &str, db: &str) -> Result<String> {
+    async fn rpc_signin_token(
+        endpoint: &str,
+        user: &str,
+        pass: &str,
+        ns: &str,
+        db: &str,
+    ) -> Result<String> {
         let endpoint = endpoint.trim_end_matches('/');
         let rpc_url = format!("{endpoint}/rpc");
         let payloads = [
@@ -145,13 +153,13 @@ impl Database {
                 .await
                 .map_err(|e| AuthError::DatabaseError(format!("RPC signin request failed: {e}")))?;
 
-            let body = resp
-                .text()
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("RPC signin response read failed: {e}")))?;
+            let body = resp.text().await.map_err(|e| {
+                AuthError::DatabaseError(format!("RPC signin response read failed: {e}"))
+            })?;
 
-            let v: serde_json::Value = serde_json::from_str(&body)
-                .map_err(|e| AuthError::DatabaseError(format!("RPC signin invalid json: {e}; body={body}")))?;
+            let v: serde_json::Value = serde_json::from_str(&body).map_err(|e| {
+                AuthError::DatabaseError(format!("RPC signin invalid json: {e}; body={body}"))
+            })?;
 
             if let Some(token) = v.get("result").and_then(|x| x.as_str()) {
                 return Ok(token.to_string());
@@ -199,9 +207,9 @@ impl Database {
         let user = self.database_user.trim().to_string();
         let pass = self.database_pass.trim().to_string();
 
-        let client = Self::connect(&endpoint_raw)
-            .await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to connect fresh client: {e}")))?;
+        let client = Self::connect(&endpoint_raw).await.map_err(|e| {
+            AuthError::DatabaseError(format!("Failed to connect fresh client: {e}"))
+        })?;
 
         match client
             .signin(Root {
@@ -218,22 +226,16 @@ impl Database {
                 );
                 let token = Self::rpc_signin_token(&with_scheme, &user, &pass, &ns, &db).await?;
                 client.authenticate(token).await.map_err(|e| {
-                    AuthError::DatabaseError(format!(
-                        "Failed to authenticate fresh client: {e}"
-                    ))
+                    AuthError::DatabaseError(format!("Failed to authenticate fresh client: {e}"))
                 })?;
             }
         }
 
-        client
-            .use_ns(&ns)
-            .use_db(&db)
-            .await
-            .map_err(|e| {
-                AuthError::DatabaseError(format!(
-                    "Failed to select namespace/database for fresh client: {e}"
-                ))
-            })?;
+        client.use_ns(&ns).use_db(&db).await.map_err(|e| {
+            AuthError::DatabaseError(format!(
+                "Failed to select namespace/database for fresh client: {e}"
+            ))
+        })?;
 
         Ok(client)
     }
@@ -247,14 +249,17 @@ impl Database {
 
         let env_db_user = env::var("DATABASE_USER").ok().map(|v| v.trim().to_string());
         let env_db_pass = env::var("DATABASE_PASS").ok().map(|v| v.trim().to_string());
-        let env_db_ns = env::var("DATABASE_NAMESPACE").ok().map(|v| v.trim().to_string());
+        let env_db_ns = env::var("DATABASE_NAMESPACE")
+            .ok()
+            .map(|v| v.trim().to_string());
         let env_db_name = env::var("DATABASE_NAME").ok().map(|v| v.trim().to_string());
 
-        let env_sur_user = env::var("SURREAL_USER").ok().map(|v| v.trim().to_string());
-        let env_sur_pass = env::var("SURREAL_PASS").ok().map(|v| v.trim().to_string());
-        let env_sur_ns = env::var("SURREAL_NAMESPACE").ok().map(|v| v.trim().to_string());
-        let env_sur_db = env::var("SURREAL_DATABASE").ok().map(|v| v.trim().to_string());
-
+        // 候选只有两组：构造时记下的那份，和当前环境里的 `DATABASE_*`。
+        //
+        // 这里原本还有第三组 `SURREAL_USER/PASS/NAMESPACE/DATABASE`。它们
+        // **只在重连时**被读，初次连接不认，于是同一个进程的配置来源会随时间
+        // 变化；而且四个名字没出现在任何部署文件、文档或测试里。删掉，
+        // 配置来源就只剩 `DATABASE_*` 一套。
         let mut candidates: Vec<(String, String, String, String)> = Vec::new();
         candidates.push((
             stored_user.clone(),
@@ -265,11 +270,6 @@ impl Database {
         if let (Some(u), Some(p)) = (env_db_user.clone(), env_db_pass.clone()) {
             let ns = env_db_ns.clone().unwrap_or_else(|| stored_ns.clone());
             let db = env_db_name.clone().unwrap_or_else(|| stored_db.clone());
-            candidates.push((u, p, ns, db));
-        }
-        if let (Some(u), Some(p)) = (env_sur_user.clone(), env_sur_pass.clone()) {
-            let ns = env_sur_ns.clone().unwrap_or_else(|| stored_ns.clone());
-            let db = env_sur_db.clone().unwrap_or_else(|| stored_db.clone());
             candidates.push((u, p, ns, db));
         }
 
@@ -313,15 +313,11 @@ impl Database {
             };
             match signin_result {
                 Ok(_) => {
-                    self.client
-                        .use_ns(&ns)
-                        .use_db(&db)
-                        .await
-                        .map_err(|e| {
-                            AuthError::DatabaseError(format!(
-                                "Failed to select namespace/database after reauth: {e}"
-                            ))
-                        })?;
+                    self.client.use_ns(&ns).use_db(&db).await.map_err(|e| {
+                        AuthError::DatabaseError(format!(
+                            "Failed to select namespace/database after reauth: {e}"
+                        ))
+                    })?;
                     return Ok(());
                 }
                 Err(e) => {
@@ -375,7 +371,10 @@ impl Database {
                     if retry_count >= max_retries {
                         return Err(e);
                     }
-                    warn!("Failed to connect to database (attempt {}/{}): {}", retry_count, max_retries, e);
+                    warn!(
+                        "Failed to connect to database (attempt {}/{}): {}",
+                        retry_count, max_retries, e
+                    );
                     sleep(retry_delay).await;
                 }
             }
@@ -384,15 +383,16 @@ impl Database {
 
     async fn try_connect(config: &Config) -> Result<Self> {
         debug!("Connecting to database url={}", config.database_url);
-        
+
         // 设置连接超时
         Self::warn_if_plaintext_remote(&config.database_url);
         let client = tokio::time::timeout(
             Duration::from_secs(config.database_connection_timeout),
             Self::connect(&config.database_url),
-        ).await
+        )
+        .await
         .map_err(|_| AuthError::DatabaseError("Database connection timeout".to_string()))??;
-            
+
         debug!("Authenticating with database");
         // Prefer native signin first, fallback to RPC token authenticate.
         match tokio::time::timeout(
@@ -406,7 +406,10 @@ impl Database {
         {
             Ok(Ok(_)) => {}
             Ok(Err(native_err)) => {
-                warn!("Database native signin failed at startup, fallback to rpc token auth: {}", native_err);
+                warn!(
+                    "Database native signin failed at startup, fallback to rpc token auth: {}",
+                    native_err
+                );
                 let endpoint = Self::endpoint_with_scheme(&config.database_url);
                 let token = tokio::time::timeout(
                     Duration::from_secs(config.database_connection_timeout),
@@ -417,22 +420,31 @@ impl Database {
                         &config.database_namespace,
                         &config.database_name,
                     ),
-                ).await
-                .map_err(|_| AuthError::DatabaseError("Database authentication timeout".to_string()))??;
-                client
-                    .authenticate(token)
-                    .await
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to authenticate: {e}")))?;
+                )
+                .await
+                .map_err(|_| {
+                    AuthError::DatabaseError("Database authentication timeout".to_string())
+                })??;
+                client.authenticate(token).await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to authenticate: {e}"))
+                })?;
             }
             Err(_) => {
-                return Err(AuthError::DatabaseError("Database authentication timeout".to_string()));
+                return Err(AuthError::DatabaseError(
+                    "Database authentication timeout".to_string(),
+                ));
             }
         }
-        
+
         debug!("Selecting namespace and database");
-        client.use_ns(&config.database_namespace).use_db(&config.database_name).await
-            .map_err(|e| AuthError::DatabaseError(format!("Failed to select namespace/database: {}", e)))?;
-        
+        client
+            .use_ns(&config.database_namespace)
+            .use_db(&config.database_name)
+            .await
+            .map_err(|e| {
+                AuthError::DatabaseError(format!("Failed to select namespace/database: {}", e))
+            })?;
+
         debug!("Database connection established successfully");
         Ok(Database {
             client,
@@ -450,34 +462,37 @@ impl Database {
     pub async fn verify_connection(&self) -> Result<()> {
         if self.should_prefer_fresh() {
             let fresh = self.fresh_client().await?;
-            fresh
-                .query("INFO FOR DB")
-                .await
-                .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
+            fresh.query("INFO FOR DB").await.map_err(|e| {
+                AuthError::DatabaseError(format!("Database connection failed: {e}"))
+            })?;
             debug!("Database connection verified successfully via fresh client");
             return Ok(());
         }
 
-        match self.retry_on_unauthorized("verify_connection", || async {
-            // 使用 INFO 查询验证数据库连接
-            let query = "INFO FOR DB";
-            self.client
-                .query(query)
-                .await
-                .and_then(|response| response.check())
-                .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
-            Ok(())
-        })
-        .await
+        match self
+            .retry_on_unauthorized("verify_connection", || async {
+                // 使用 INFO 查询验证数据库连接
+                let query = "INFO FOR DB";
+                self.client
+                    .query(query)
+                    .await
+                    .and_then(|response| response.check())
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Database connection failed: {e}"))
+                    })?;
+                Ok(())
+            })
+            .await
         {
             Ok(()) => {}
             Err(err) if Self::should_retry_verify_with_fresh(&err) => {
                 let fresh = self.fresh_client().await?;
-                fresh
-                    .query("INFO FOR DB")
-                    .await
-                    .map_err(|e| AuthError::DatabaseError(format!("Database connection failed: {e}")))?;
-                debug!("Database connection verified successfully via fresh client after auth refresh");
+                fresh.query("INFO FOR DB").await.map_err(|e| {
+                    AuthError::DatabaseError(format!("Database connection failed: {e}"))
+                })?;
+                debug!(
+                    "Database connection verified successfully via fresh client after auth refresh"
+                );
                 return Ok(());
             }
             Err(err) => return Err(err),
@@ -500,7 +515,8 @@ impl Database {
                 .content(record.clone())
                 .await
                 .map_err(|e| AuthError::DatabaseError(format!("Failed to create record: {}", e)))?;
-            return created.ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()));
+            return created
+                .ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()));
         }
 
         let created: Option<T> = match self.client.create(table).content(record.clone()).await {
@@ -508,30 +524,48 @@ impl Database {
             Err(err) if Self::is_unauthorized_error(&err) => {
                 warn!("create_record failed with 401, retrying on fresh client");
                 let fresh = self.fresh_client().await?;
-                fresh.create(table)
+                fresh
+                    .create(table)
                     .content(record.clone())
                     .await
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to create record: {}", e)))?
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to create record: {}", e))
+                    })?
             }
             Err(err) => {
-                return Err(AuthError::DatabaseError(format!("Failed to create record: {}", err)));
+                return Err(AuthError::DatabaseError(format!(
+                    "Failed to create record: {}",
+                    err
+                )));
             }
         };
 
         created.ok_or_else(|| AuthError::DatabaseError("Failed to create record".into()))
     }
 
-    pub async fn find_record_by_field<T>(&self, table: &str, field: &str, value: &str) -> Result<Option<T>>
+    pub async fn find_record_by_field<T>(
+        &self,
+        table: &str,
+        field: &str,
+        value: &str,
+    ) -> Result<Option<T>>
     where
         T: serde::de::DeserializeOwned + Clone + Debug + SurrealValue,
     {
-        debug!("Finding record in table {} where {} = {}", table, field, value);
+        debug!(
+            "Finding record in table {} where {} = {}",
+            table, field, value
+        );
 
         if field == "id" {
             let (rid_table, rid_key) = if let Some((tb, key_raw)) = value.split_once(':') {
                 (
                     tb.to_string(),
-                    key_raw.trim().trim_matches('⟨').trim_matches('⟩').to_string(),
+                    key_raw
+                        .trim()
+                        .trim_matches('⟨')
+                        .trim_matches('⟩')
+                        .to_string(),
                 )
             } else {
                 (table.to_string(), value.to_string())
@@ -550,53 +584,50 @@ impl Database {
                     .map_err(|e| {
                         AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
                     })?;
-                let records: Vec<T> = result
-                    .take(0)
-                    .map_err(|e| {
-                        AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
-                    })?;
+                let records: Vec<T> = result.take(0).map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
+                })?;
                 return Ok(records.into_iter().next());
             }
 
-            match self.retry_on_unauthorized("find_record_by_field(id)", || async {
-                let mut result = self
-                    .client
-                    .query(&query)
-                    .bind(("value", rid.clone()))
-                    .await
-                    .and_then(|response| response.check())
-                    .map_err(|e| {
-                        AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
-                    })?;
+            match self
+                .retry_on_unauthorized("find_record_by_field(id)", || async {
+                    let mut result = self
+                        .client
+                        .query(&query)
+                        .bind(("value", rid.clone()))
+                        .await
+                        .and_then(|response| response.check())
+                        .map_err(|e| {
+                            AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
+                        })?;
 
-                debug!("原始查询结果: {:?}", result);
+                    debug!("原始查询结果: {:?}", result);
 
-                let records: Vec<T> = result
-                    .take(0)
-                    .map_err(|e| {
+                    let records: Vec<T> = result.take(0).map_err(|e| {
                         AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
                     })?;
 
-                debug!("解析后的记录: {:?}", records);
-                Ok(records.into_iter().next())
-            })
-            .await {
+                    debug!("解析后的记录: {:?}", records);
+                    Ok(records.into_iter().next())
+                })
+                .await
+            {
                 Ok(result) => Ok(result),
                 Err(err) if Self::is_unauthorized_error(&err) => {
                     warn!("find_record_by_field(id) retrying on fresh client");
                     let fresh = self.fresh_client().await?;
-                    let mut result = fresh
-                        .query(&query)
-                        .bind(("value", rid))
-                        .await
-                        .map_err(|e| {
-                            AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
-                        })?;
-                    let records: Vec<T> = result
-                        .take(0)
-                        .map_err(|e| {
-                            AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
-                        })?;
+                    let mut result =
+                        fresh
+                            .query(&query)
+                            .bind(("value", rid))
+                            .await
+                            .map_err(|e| {
+                                AuthError::DatabaseError(format!("Failed to execute id query: {e}"))
+                            })?;
+                    let records: Vec<T> = result.take(0).map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to parse id records: {e}"))
+                    })?;
                     Ok(records.into_iter().next())
                 }
                 Err(err) => Err(err),
@@ -612,32 +643,38 @@ impl Database {
                     .query(&query)
                     .bind(("value", value.to_string()))
                     .await
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
-                let records: Vec<T> = result
-                    .take(0)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to parse records: {e}")))?;
+                    .map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to execute query: {e}"))
+                    })?;
+                let records: Vec<T> = result.take(0).map_err(|e| {
+                    AuthError::DatabaseError(format!("Failed to parse records: {e}"))
+                })?;
                 return Ok(records.into_iter().next());
             }
 
-            match self.retry_on_unauthorized("find_record_by_field", || async {
-                let mut result = self
-                    .client
-                    .query(&query)
-                    .bind(("value", value.to_string()))
-                    .await
-                    .and_then(|response| response.check())
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
+            match self
+                .retry_on_unauthorized("find_record_by_field", || async {
+                    let mut result = self
+                        .client
+                        .query(&query)
+                        .bind(("value", value.to_string()))
+                        .await
+                        .and_then(|response| response.check())
+                        .map_err(|e| {
+                            AuthError::DatabaseError(format!("Failed to execute query: {e}"))
+                        })?;
 
-                debug!("原始查询结果: {:?}", result);
+                    debug!("原始查询结果: {:?}", result);
 
-                let records: Vec<T> = result
-                    .take(0)
-                    .map_err(|e| AuthError::DatabaseError(format!("Failed to parse records: {e}")))?;
+                    let records: Vec<T> = result.take(0).map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to parse records: {e}"))
+                    })?;
 
-                debug!("解析后的记录: {:?}", records);
-                Ok(records.into_iter().next())
-            })
-            .await {
+                    debug!("解析后的记录: {:?}", records);
+                    Ok(records.into_iter().next())
+                })
+                .await
+            {
                 Ok(result) => Ok(result),
                 Err(err) if Self::is_unauthorized_error(&err) => {
                     warn!("find_record_by_field retrying on fresh client");
@@ -646,10 +683,12 @@ impl Database {
                         .query(&query)
                         .bind(("value", value.to_string()))
                         .await
-                        .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))?;
-                    let records: Vec<T> = result
-                        .take(0)
-                        .map_err(|e| AuthError::DatabaseError(format!("Failed to parse records: {e}")))?;
+                        .map_err(|e| {
+                            AuthError::DatabaseError(format!("Failed to execute query: {e}"))
+                        })?;
+                    let records: Vec<T> = result.take(0).map_err(|e| {
+                        AuthError::DatabaseError(format!("Failed to parse records: {e}"))
+                    })?;
                     Ok(records.into_iter().next())
                 }
                 Err(err) => Err(err),
@@ -704,20 +743,22 @@ impl Database {
                 .map_err(|e| AuthError::DatabaseError(format!("Failed to update record: {}", e)))?
             }
             Err(err) => {
-                return Err(AuthError::DatabaseError(format!("Failed to update record: {}", err)));
+                return Err(AuthError::DatabaseError(format!(
+                    "Failed to update record: {}",
+                    err
+                )));
             }
         };
 
         updated.ok_or_else(|| AuthError::DatabaseError("Record not found".into()))
     }
 
-
     pub async fn delete_record<T>(&self, table: &str, id: &str) -> Result<Option<T>>
     where
         T: serde::de::DeserializeOwned + Clone + Debug + SurrealValue,
     {
         debug!("Deleting record from table {} with id {}", table, id);
-        
+
         let rid = RecordId::new(table, id);
         let deleted = self
             .client
@@ -737,8 +778,8 @@ impl Database {
     pub async fn delete_session_by_token(&self, token: &str) -> Result<()> {
         self.raw_query(
             "delete_session_by_token",
-            "DELETE session WHERE token = $session_token",
-            serde_json::json!({ "session_token": token }),
+            "DELETE session WHERE token_hash = $session_token_hash",
+            serde_json::json!({ "session_token_hash": crate::utils::crypto::hash_bearer(token) }),
         )
         .await
         .map_err(|e| AuthError::DatabaseError(format!("Failed to delete session: {}", e)))?;
@@ -799,7 +840,10 @@ impl Database {
     /// 展示的东西不对，这个功能就起了反作用。
     ///
     /// LIMIT 同样是必要的：`session` 行此前只增不减，重度用户能攒出很长一串。
-    pub async fn get_sessions_by_user_id(&self, user_id: &str) -> Result<Vec<crate::models::session::Session>> {
+    pub async fn get_sessions_by_user_id(
+        &self,
+        user_id: &str,
+    ) -> Result<Vec<crate::models::session::Session>> {
         let mut result = self
             .raw_query(
                 "get_sessions_by_user_id",
@@ -875,11 +919,10 @@ impl Database {
     /// 这两张表此前**没有任何清理路径**：`session` 只在登出（按 token）与停用
     /// （按 user）时被删，`password_reset_token` 全代码库一条 DELETE 都没有，
     /// 用过的只是标记 `used = true`。两张都随时间单调增长，而
-    /// `session.token` 上还有一个建在完整 JWT 字符串上的 UNIQUE 索引，
-    /// 每个已认证请求都要查它。
+    /// `session.token_hash` 上还有一个 UNIQUE 索引，每个已认证请求都要查它。
     ///
-    /// 重置令牌更麻烦一些：它是**明文**入库的，永不删除意味着历史上
-    /// 每一枚发出去的重置令牌都留在库里。
+    /// 两张表现在都只存 SHA-256 指纹（见 `utils::crypto::hash_bearer`），
+    /// 但清理仍然必要：索引会随行数单调变大，而过期记录没有任何用处。
     pub async fn cleanup_expired_auth_artifacts(&self) -> Result<()> {
         let now = chrono::Utc::now();
 
@@ -929,7 +972,9 @@ impl Database {
                         .bind(bindings)
                         .await
                         .and_then(|response| response.check())
-                        .map_err(|e| AuthError::DatabaseError(format!("Failed to execute query: {e}")))
+                        .map_err(|e| {
+                            AuthError::DatabaseError(format!("Failed to execute query: {e}"))
+                        })
                 }
             })
             .await
@@ -954,7 +999,8 @@ impl Database {
         op: &str,
         sql: &str,
     ) -> Result<surrealdb::IndexedResults> {
-        self.raw_query(op, sql, JsonValue::Object(Default::default())).await
+        self.raw_query(op, sql, JsonValue::Object(Default::default()))
+            .await
     }
 
     pub async fn query_take0_vec<T>(
@@ -987,11 +1033,7 @@ impl Database {
             .map_err(|e| AuthError::DatabaseError(format!("Failed to parse query result: {e}")))
     }
 
-    pub async fn query_take0_vec_no_bind<T>(
-        &self,
-        op: &str,
-        sql: &str,
-    ) -> Result<Vec<T>>
+    pub async fn query_take0_vec_no_bind<T>(&self, op: &str, sql: &str) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
     {
@@ -999,11 +1041,7 @@ impl Database {
             .await
     }
 
-    pub async fn query_take0_option_no_bind<T>(
-        &self,
-        op: &str,
-        sql: &str,
-    ) -> Result<Option<T>>
+    pub async fn query_take0_option_no_bind<T>(&self, op: &str, sql: &str) -> Result<Option<T>>
     where
         T: serde::de::DeserializeOwned + surrealdb_types::SurrealValue,
     {
@@ -1028,15 +1066,30 @@ mod tests {
 
     #[test]
     fn endpoint_without_scheme_accepts_both_forms() {
-        assert_eq!(Database::endpoint_without_scheme("http://localhost:8000"), "localhost:8000");
-        assert_eq!(Database::endpoint_without_scheme("https://db.example:8000/"), "db.example:8000");
-        assert_eq!(Database::endpoint_without_scheme(" 127.0.0.1:8000 "), "127.0.0.1:8000");
+        assert_eq!(
+            Database::endpoint_without_scheme("http://localhost:8000"),
+            "localhost:8000"
+        );
+        assert_eq!(
+            Database::endpoint_without_scheme("https://db.example:8000/"),
+            "db.example:8000"
+        );
+        assert_eq!(
+            Database::endpoint_without_scheme(" 127.0.0.1:8000 "),
+            "127.0.0.1:8000"
+        );
     }
 
     #[test]
     fn endpoint_with_scheme_adds_http_when_missing() {
-        assert_eq!(Database::endpoint_with_scheme("127.0.0.1:8000"), "http://127.0.0.1:8000");
-        assert_eq!(Database::endpoint_with_scheme("https://db.example:8000/"), "https://db.example:8000");
+        assert_eq!(
+            Database::endpoint_with_scheme("127.0.0.1:8000"),
+            "http://127.0.0.1:8000"
+        );
+        assert_eq!(
+            Database::endpoint_with_scheme("https://db.example:8000/"),
+            "https://db.example:8000"
+        );
     }
 
     #[test]

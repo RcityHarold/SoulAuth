@@ -4,7 +4,12 @@ use std::{
     time::Instant,
 };
 
-use axum::{http::HeaderValue, middleware, routing::{get, Router}, Extension, Json};
+use axum::{
+    http::HeaderValue,
+    middleware,
+    routing::{get, Router},
+    Extension, Json,
+};
 use tokio::time::{interval, Duration};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
@@ -21,14 +26,14 @@ use crate::{
     config::Config,
     services::{
         account_lockout::AccountLockoutService,
-        auth::AuthService,
         audit_logger::AuditLogger,
+        auth::AuthService,
         auth_cache::AuthCache,
         database::Database,
         oidc::OidcService,
         oidc_client_management::OidcClientService,
         oidc_keys::OidcSigningKey,
-        rate_limiter::{RateLimiter, RateLimitRules},
+        rate_limiter::{RateLimitRules, RateLimiter},
     },
     utils::rate_limit_middleware::rate_limit_layer,
 };
@@ -85,7 +90,10 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         })
         .collect();
 
-    info!("CORS allowed origins: {:?}", config.effective_cors_origins());
+    info!(
+        "CORS allowed origins: {:?}",
+        config.effective_cors_origins()
+    );
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
@@ -107,7 +115,8 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "soulauth=debug,tower_http=info".to_string()),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "soulauth=debug,tower_http=info".to_string()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -140,7 +149,10 @@ async fn main() -> anyhow::Result<()> {
     let bootstrap = Arc::new(routes::bootstrap::BootstrapGate::new(
         config.bootstrap_token.as_deref(),
     ));
-    if routes::bootstrap::admin_exists(&shared_db).await.unwrap_or(false) {
+    if routes::bootstrap::admin_exists(&shared_db)
+        .await
+        .unwrap_or(false)
+    {
         info!("Bootstrap path closed: an administrator already exists");
     } else if let Some(token) = bootstrap.token() {
         // 用 warn 而不是 info：这行必须在默认日志级别下可见，否则开发者
@@ -151,7 +163,10 @@ async fn main() -> anyhow::Result<()> {
              curl -X POST {}/api/bootstrap/admin -H 'Content-Type: application/json' \\\n         \
                -d '{{\"token\":\"{}\",\"email\":\"you@example.com\",\
 \"username\":\"admin\",\"password\":\"<at least {} chars>\"}}'",
-            token, config.app_url.trim_end_matches('/'), token, config.password_min_length
+            token,
+            config.app_url.trim_end_matches('/'),
+            token,
+            config.password_min_length
         );
     } else {
         info!("Bootstrap path disabled by configuration (SOULAUTH_BOOTSTRAP_TOKEN is empty)");
@@ -278,7 +293,10 @@ async fn main() -> anyhow::Result<()> {
         // 因此不需要额外的开关或权限守卫。
         .nest("/api/bootstrap", routes::bootstrap::router())
         .nest("/api/rbac", routes::rbac::router())
-        .nest("/api/users", routes::user_management::router())
+        // 自助与管理分开挂载：`/api/me/*` 是「我自己的」，`/api/users/*` 是
+        // 「按 id 管别人的」。合在一个前缀下才有了之前的 `/api/users/users/...`。
+        .nest("/api/me", routes::user_management::self_service_router())
+        .nest("/api/users", routes::user_management::admin_router())
         .nest("/api/ops", routes::ops::router())
         .nest("/api/security", routes::security::router())
         .nest("/api/audit", routes::audit::audit_routes())
@@ -306,9 +324,10 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(oidc_client_service))
         .layer(build_cors_layer(&config));
 
-    let addr: SocketAddr = config.bind_addr.parse().map_err(|e| {
-        anyhow::anyhow!("Invalid BIND_ADDR `{}`: {e}", config.bind_addr)
-    })?;
+    let addr: SocketAddr = config
+        .bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid BIND_ADDR `{}`: {e}", config.bind_addr))?;
     info!("Server listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())

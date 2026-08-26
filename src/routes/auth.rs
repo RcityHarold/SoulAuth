@@ -15,15 +15,18 @@ use tracing::{error, info, warn};
 use crate::{
     config::Config,
     error::{AuthError, Result},
+    models::user_activity::{ActivityCategory, ActivityStatus},
     models::{
         account_lockout::LockoutCheckResult,
         mfa::{
-            EnableTotpRequest, MfaMethod, MfaStatusResponse, TotpSetupResponse, UseBackupCodeRequest,
-            VerifyTotpRequest,
+            EnableTotpRequest, MfaMethod, MfaStatusResponse, TotpSetupResponse,
+            UseBackupCodeRequest, VerifyTotpRequest,
         },
         password_reset::{RequestPasswordResetRequest, ResetPasswordRequest},
         session::SessionInfo,
-        user::{AuthResponse, CreateUserRequest, InitializePasswordRequest, LoginRequest, UserResponse},
+        user::{
+            AuthResponse, CreateUserRequest, InitializePasswordRequest, LoginRequest, UserResponse,
+        },
     },
     routes::oidc::{
         build_cookie, build_expired_cookie, cookie_value, create_browser_session_token,
@@ -31,7 +34,6 @@ use crate::{
         IssuedOAuthState, OAUTH_STATE_COOKIE, OAUTH_STATE_COOKIE_TTL_SECONDS, OIDC_RETURN_COOKIE,
         SESSION_TTL_SECONDS, SOULAUTH_SESSION_COOKIE,
     },
-    models::user_activity::{ActivityCategory, ActivityStatus},
     services::{
         audit_logger::{actions, AuditEvent, AuditLogger},
         auth::{AuthService, IssuedSession, LoginOutcome, RequestContext},
@@ -115,15 +117,14 @@ pub(crate) fn request_context(
 
 /// 错误响应体。
 ///
-/// 形状与 `AuthError::into_response` 保持一致：**只有一个 `error` 字段**。
-/// 此前这里是 `{"error": <类别>, "message": <详情>}` 两字段，而全站其余端点
-/// 走 `AuthError` 出来的是 `{"error": <详情>}` —— 同一个 API 两种错误形状，
-/// 客户端得逐端点记。类别本身是冗余的：401 / 403 / 409 已经把它表达清楚了。
+/// 形状与 `AuthError::into_response` 逐字一致：`error` 是**稳定的机器可读码**，
+/// `message` 是可以改措辞的人话。
 ///
-/// 第一个参数保留是为了让调用点读起来仍带上下文（它会被拼进日志语义），
-/// 但不再进响应体。
-fn error_body(_category: &str, message: &str) -> Json<serde_json::Value> {
-    Json(json!({ "error": message }))
+/// 这几个 handler 没走 `AuthError`（它们要在同一个函数里混合 401/403/409 且
+/// 带自己的审计埋点），所以形状只能靠这里手工对齐 —— `tests/conformance.rs::j6`
+/// 静态守住两边不分叉。
+fn error_body(code: &str, message: &str) -> Json<serde_json::Value> {
+    Json(json!({ "error": code, "message": message }))
 }
 
 /// 执行锁定检查；数据库鉴权态过期时先重连再试一次。
@@ -149,12 +150,18 @@ where
         Ok(_) => match check().await {
             Ok(result) => Ok(result),
             Err(retry_err) => {
-                error!("{} lockout check failed after reauth: {:?}", scope, retry_err);
+                error!(
+                    "{} lockout check failed after reauth: {:?}",
+                    scope, retry_err
+                );
                 Err(service_unavailable())
             }
         },
         Err(reauth_err) => {
-            error!("{} lockout check failed while reauthing: {:?}", scope, reauth_err);
+            error!(
+                "{} lockout check failed while reauthing: {:?}",
+                scope, reauth_err
+            );
             Err(service_unavailable())
         }
     }
@@ -175,15 +182,19 @@ fn failure_reason(error: &AuthError) -> &'static str {
 fn service_unavailable() -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::SERVICE_UNAVAILABLE,
-        error_body("Service unavailable", "Please retry in a moment"),
+        error_body("service_unavailable", "Please retry in a moment"),
     )
 }
 
+/// 账号/IP 被锁定时的 429。
+///
+/// `error` / `message` 与全站同形；`locked_until_seconds` 是本错误**已文档化的
+/// 补充字段** —— 客户端需要它才能显示倒计时，塞进 `message` 让人正则去抠更糟。
 fn locked_response(result: &LockoutCheckResult) -> (StatusCode, Json<serde_json::Value>) {
     (
         StatusCode::TOO_MANY_REQUESTS,
         Json(json!({
-            "error": "Account locked",
+            "error": "account_locked",
             "message": result.message,
             "locked_until_seconds": result.remaining_lockout_seconds
         })),
@@ -256,19 +267,28 @@ async fn register(
 
     let (result, _session_key) = auth_service.register(req, &ctx).await.map_err(|e| {
         error!("Registration failed: {:?}", e);
+        // 码统一取 `AuthError::code()`，与走 IntoResponse 的端点同源；
+        // 这里只覆写面向人的措辞。
         let (status, message) = match &e {
-            AuthError::EmailExists => (StatusCode::CONFLICT, "Email already registered".to_string()),
-            AuthError::UsernameExists => {
-                (StatusCode::CONFLICT, "Username already registered".to_string())
+            AuthError::EmailExists => {
+                (StatusCode::CONFLICT, "Email already registered".to_string())
             }
+            AuthError::UsernameExists => (
+                StatusCode::CONFLICT,
+                "Username already registered".to_string(),
+            ),
             AuthError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AuthError::DatabaseError(_) => {
-                (StatusCode::INTERNAL_SERVER_ERROR, "Database error".to_string())
-            }
-            _ => (StatusCode::INTERNAL_SERVER_ERROR, "Registration failed".to_string()),
+            AuthError::DatabaseError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal server error".to_string(),
+            ),
+            _ => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Registration failed".to_string(),
+            ),
         };
 
-        (status, error_body("Registration failed", &message))
+        (status, error_body(e.code(), &message))
     })?;
 
     Ok(Json(result))
@@ -327,7 +347,7 @@ fn login_response(
                     error!("Failed to create browser session token: {:?}", e);
                     (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        error_body("Internal server error", "Failed to establish session"),
+                        error_body("internal_error", "Failed to establish session"),
                     )
                 },
             )?,
@@ -349,7 +369,7 @@ fn login_response(
             error!("Invalid session cookie: {e}");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                error_body("Internal server error", "Failed to establish session"),
+                error_body("internal_error", "Failed to establish session"),
             )
         })?;
         response.headers_mut().append(header::SET_COOKIE, value);
@@ -366,7 +386,7 @@ async fn ensure_admin_console_access(
         error!("Admin permission check failed after login: {:?}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            error_body("Internal server error", "Failed to verify admin permissions"),
+            error_body("internal_error", "Failed to verify admin permissions"),
         )
     })?;
 
@@ -374,7 +394,7 @@ async fn ensure_admin_console_access(
         return Err((
             StatusCode::FORBIDDEN,
             error_body(
-                "Forbidden",
+                "forbidden",
                 "Current account does not have admin console access",
             ),
         ));
@@ -415,6 +435,11 @@ async fn perform_login(
                 .with_details(json!({ "reason": failure_reason(&e) })),
             );
 
+            // 「用户不存在」对外与「口令错」同码同文案，避免账号枚举。
+            let code = match e {
+                AuthError::UserNotFound => AuthError::InvalidCredentials.code(),
+                ref other => other.code(),
+            };
             let (status, message) = match e {
                 AuthError::InvalidCredentials | AuthError::UserNotFound => {
                     (StatusCode::UNAUTHORIZED, "Invalid email or password")
@@ -426,7 +451,7 @@ async fn perform_login(
                 _ => (StatusCode::INTERNAL_SERVER_ERROR, "Login failed"),
             };
 
-            (status, error_body("Authentication failed", message))
+            (status, error_body(code, message))
         })?;
 
     Ok(match outcome {
@@ -648,11 +673,11 @@ async fn mfa_login_verify(
     headers: HeaderMap,
     Json(request): Json<MfaLoginVerifyRequest>,
 ) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
-    let challenge = decode_mfa_challenge_token(&request.temp_token, &config.jwt_secret)
-        .map_err(|_| {
+    let challenge =
+        decode_mfa_challenge_token(&request.temp_token, &config.jwt_secret).map_err(|_| {
             (
                 StatusCode::UNAUTHORIZED,
-                error_body("Authentication failed", "Invalid or expired MFA token"),
+                error_body("invalid_token", "Invalid or expired MFA token"),
             )
         })?;
 
@@ -660,19 +685,23 @@ async fn mfa_login_verify(
     ensure_not_locked_out(&app_state, &challenge.email, &ctx.ip_address).await?;
 
     let verification = match (request.totp_code, request.backup_code) {
-        (Some(totp_code), _) => auth_service
-            .mfa()
-            .verify_totp(&challenge.user_id, VerifyTotpRequest { totp_code })
-            .await,
-        (None, Some(backup_code)) => auth_service
-            .mfa()
-            .use_backup_code(&challenge.user_id, UseBackupCodeRequest { backup_code })
-            .await,
+        (Some(totp_code), _) => {
+            auth_service
+                .mfa()
+                .verify_totp(&challenge.user_id, VerifyTotpRequest { totp_code })
+                .await
+        }
+        (None, Some(backup_code)) => {
+            auth_service
+                .mfa()
+                .use_backup_code(&challenge.user_id, UseBackupCodeRequest { backup_code })
+                .await
+        }
         (None, None) => {
             return Err((
                 StatusCode::BAD_REQUEST,
                 error_body(
-                    "Validation failed",
+                    "validation_error",
                     "Either totp_code or backup_code is required",
                 ),
             ))
@@ -682,7 +711,7 @@ async fn mfa_login_verify(
         error!("MFA verification failed: {:?}", e);
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            error_body("Internal server error", "MFA verification failed"),
+            error_body("internal_error", "MFA verification failed"),
         )
     })?;
 
@@ -701,7 +730,7 @@ async fn mfa_login_verify(
         warn!("MFA verification rejected for {}", challenge.email);
         return Err((
             StatusCode::UNAUTHORIZED,
-            error_body("Authentication failed", "Invalid verification code"),
+            error_body("invalid_credentials", "Invalid verification code"),
         ));
     }
 
@@ -712,14 +741,14 @@ async fn mfa_login_verify(
                 error!("Admin permission check failed after MFA: {:?}", e);
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    error_body("Internal server error", "Failed to verify admin permissions"),
+                    error_body("internal_error", "Failed to verify admin permissions"),
                 )
             })?;
         if !allowed {
             return Err((
                 StatusCode::FORBIDDEN,
                 error_body(
-                    "Forbidden",
+                    "forbidden",
                     "Current account does not have admin console access",
                 ),
             ));
@@ -737,7 +766,7 @@ async fn mfa_login_verify(
                 | AuthError::AccountDeleted => StatusCode::FORBIDDEN,
                 _ => StatusCode::INTERNAL_SERVER_ERROR,
             };
-            (status, error_body("Authentication failed", "Login failed"))
+            (status, error_body(e.code(), "Login failed"))
         })?;
 
     // 走完两步才清零。
@@ -851,8 +880,11 @@ async fn logout(
     let mut response = Json(json!({ "message": "Logged out successfully" })).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&build_expired_cookie(SOULAUTH_SESSION_COOKIE, secure_cookies))
-            .map_err(|e| AuthError::ServerError(format!("Invalid session cookie: {e}")))?,
+        HeaderValue::from_str(&build_expired_cookie(
+            SOULAUTH_SESSION_COOKIE,
+            secure_cookies,
+        ))
+        .map_err(|e| AuthError::ServerError(format!("Invalid session cookie: {e}")))?,
     );
     Ok(response)
 }
@@ -879,8 +911,11 @@ async fn logout_all(
         Json(json!({ "message": "All sessions logged out successfully" })).into_response();
     response.headers_mut().append(
         header::SET_COOKIE,
-        HeaderValue::from_str(&build_expired_cookie(SOULAUTH_SESSION_COOKIE, secure_cookies))
-            .map_err(|e| AuthError::ServerError(format!("Invalid session cookie: {e}")))?,
+        HeaderValue::from_str(&build_expired_cookie(
+            SOULAUTH_SESSION_COOKIE,
+            secure_cookies,
+        ))
+        .map_err(|e| AuthError::ServerError(format!("Invalid session cookie: {e}")))?,
     );
     Ok(response)
 }
@@ -1120,8 +1155,11 @@ fn build_oauth_redirect(
     if clear_return_cookie {
         response.headers_mut().append(
             header::SET_COOKIE,
-            HeaderValue::from_str(&build_expired_cookie(OIDC_RETURN_COOKIE, config.cookies_secure()))
-                .map_err(|e| AuthError::ServerError(format!("Invalid return cookie: {e}")))?,
+            HeaderValue::from_str(&build_expired_cookie(
+                OIDC_RETURN_COOKIE,
+                config.cookies_secure(),
+            ))
+            .map_err(|e| AuthError::ServerError(format!("Invalid return cookie: {e}")))?,
         );
     }
 

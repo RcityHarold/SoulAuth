@@ -7,7 +7,8 @@ use surrealdb::types::SurrealValue;
 pub struct PasswordResetToken {
     pub id: Option<Thing>,
     pub email: String,
-    pub token: String,
+    /// 重置令牌的 SHA-256 指纹。邮件里发出去的是原文，库里只留这个。
+    pub token_hash: String,
     pub expires_at: DateTime<Utc>,
     pub used: bool,
     pub created_at: DateTime<Utc>,
