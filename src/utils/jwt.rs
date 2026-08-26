@@ -283,26 +283,13 @@ where
 
 /// 已认证的 **AIActor**。
 ///
+/// 元组字段是 `pub`，消费方直接取 `.0`。这里不放访问器 —— 加了就是 dead code，
+/// 而本仓库靠 `dead_code` 警告顶住「先写着以后可能用」。
+///
 /// 与 [`AuthedUser`] 是两个提取器而不是一个枚举：人类端点写 `AuthedUser`、
 /// Agent 端点写 `AuthedActor`，「这个端点给谁用」在函数签名上就看得见，
 /// 不需要在函数体里再判一次主体类型（那种判断迟早会有人忘记写）。
 pub struct AuthedActor(pub ActorIdentity);
-
-impl AuthedActor {
-    pub fn actor(&self) -> &ActorIdentity {
-        &self.0
-    }
-
-    /// 不带表名前缀的 record key。
-    pub fn key(&self) -> Result<String> {
-        let rid = self
-            .0
-            .id
-            .as_ref()
-            .ok_or_else(|| AuthError::DatabaseError("actor_identity 没有 id".into()))?;
-        Ok(crate::utils::record_id::record_id_key_to_string(rid))
-    }
-}
 
 #[async_trait]
 impl<S> FromRequestParts<S> for AuthedActor

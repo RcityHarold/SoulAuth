@@ -931,11 +931,18 @@ fn g3_error_contract_is_stable() {
         err.contains("pub fn code(&self) -> &'static str"),
         "AuthError 必须提供稳定的机器可读 `code()`"
     );
-    assert!(
-        err.contains(r#"body.insert("error".into()"#)
-            && err.contains(r#"body.insert("message".into()"#),
-        "错误响应体必须同时含 `error`（码）与 `message`（人话）"
-    );
+    // 断言前先把空白压平。
+    //
+    // 直接匹配 `body.insert("error".into()` 会被 rustfmt 的折行打断 ——
+    // 那样这条守卫报的是「格式变了」而不是「契约变了」，是假红。
+    let flat: String = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    for (key, what) in [("error", "码"), ("message", "人话")] {
+        assert!(
+            flat.contains(&format!(r#"body.insert( "{key}".into()"#))
+                || flat.contains(&format!(r#"body.insert("{key}".into()"#)),
+            "错误响应体必须含 `{key}`（{what}）"
+        );
+    }
 
     // 码只能是 snake_case 字面量：一旦有人把 `format!` 塞进去，它就不再稳定了。
     let codes = err

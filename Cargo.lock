@@ -4422,6 +4422,7 @@ dependencies = [
  "chacha20poly1305",
  "chrono",
  "dotenvy",
+ "ed25519-dalek",
  "jsonwebtoken 8.3.0",
  "lettre",
  "oauth2",

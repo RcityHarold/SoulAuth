@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn credential_with_unlisted_algorithm_cannot_authenticate() {
-        let mut c = AiActorCredential::new(Thing::from(("actor_identity", "a")), "pk", "l");
+        let mut c = AiActorCredential::new(Thing::new("actor_identity", "a"), "pk", "l");
         assert!(c.can_authenticate());
         c.algorithm = "rsa".to_string();
         assert!(!c.can_authenticate(), "算法不在白名单内必须拒绝");
