@@ -75,7 +75,8 @@ pub struct UserProfileResponse {
 impl From<UserProfile> for UserProfileResponse {
     fn from(profile: UserProfile) -> Self {
         Self {
-            id: profile.id
+            id: profile
+                .id
                 .map(|id| crate::utils::record_id::record_id_key_to_string(&id))
                 .unwrap_or_default(),
             user_id: crate::utils::record_id::record_id_key_to_string(&profile.user_id),
@@ -90,9 +91,10 @@ impl From<UserProfile> for UserProfileResponse {
             bio: profile.bio,
             website: profile.website,
             location: profile.location,
-            created_at: chrono::DateTime::<Utc>::from_timestamp(profile.created_at, 0).unwrap_or_else(Utc::now),
-            updated_at: chrono::DateTime::<Utc>::from_timestamp(profile.updated_at, 0).unwrap_or_else(Utc::now),
+            created_at: chrono::DateTime::<Utc>::from_timestamp(profile.created_at, 0)
+                .unwrap_or_else(Utc::now),
+            updated_at: chrono::DateTime::<Utc>::from_timestamp(profile.updated_at, 0)
+                .unwrap_or_else(Utc::now),
         }
     }
 }
-

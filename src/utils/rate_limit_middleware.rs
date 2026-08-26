@@ -129,7 +129,10 @@ pub async fn rate_limit_layer<B>(
 }
 
 fn rate_limited_response(ip: &str, endpoint: &str) -> Response {
-    warn!("Rate limit exceeded for client: {}, endpoint: {}", ip, endpoint);
+    warn!(
+        "Rate limit exceeded for client: {}, endpoint: {}",
+        ip, endpoint
+    );
     (
         StatusCode::TOO_MANY_REQUESTS,
         Json(json!({

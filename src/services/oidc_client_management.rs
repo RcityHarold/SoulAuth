@@ -1,17 +1,14 @@
-use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use rand::{distributions::Alphanumeric, Rng};
+use std::sync::Arc;
 
 use crate::{
     models::oidc_client::{
-        OidcClient, CreateOidcClientRequest, OidcClientResponse,
-        ClientType, GrantType, ResponseType
+        ClientType, CreateOidcClientRequest, GrantType, OidcClient, OidcClientResponse,
+        ResponseType,
     },
-    services::{
-        database::Database,
-        oidc::hash_client_secret,
-    },
+    services::{database::Database, oidc::hash_client_secret},
 };
 
 /// ID Token 的生命周期上限（秒）。
@@ -82,19 +79,25 @@ impl OidcClientService {
             redirect_uris: request.redirect_uris.clone(),
             post_logout_redirect_uris: request.post_logout_redirect_uris.unwrap_or_default(),
             allowed_scopes: request.allowed_scopes.unwrap_or_else(|| {
-                vec!["openid".to_string(), "profile".to_string(), "email".to_string()]
+                vec![
+                    "openid".to_string(),
+                    "profile".to_string(),
+                    "email".to_string(),
+                ]
             }),
-            allowed_grant_types: request.allowed_grant_types.unwrap_or_else(|| {
-                vec![GrantType::AuthorizationCode, GrantType::RefreshToken]
-            }),
-            allowed_response_types: request.allowed_response_types.unwrap_or_else(|| {
-                vec![ResponseType::Code]
-            }),
+            allowed_grant_types: request
+                .allowed_grant_types
+                .unwrap_or_else(|| vec![GrantType::AuthorizationCode, GrantType::RefreshToken]),
+            allowed_response_types: request
+                .allowed_response_types
+                .unwrap_or_else(|| vec![ResponseType::Code]),
             require_pkce: resolve_require_pkce(&request.client_type, request.require_pkce),
             access_token_lifetime: request.access_token_lifetime.unwrap_or(3600),
             refresh_token_lifetime: request.refresh_token_lifetime.unwrap_or(86400),
             id_token_lifetime: clamp_id_token_lifetime(
-                request.id_token_lifetime.unwrap_or(MAX_ID_TOKEN_LIFETIME_SECS),
+                request
+                    .id_token_lifetime
+                    .unwrap_or(MAX_ID_TOKEN_LIFETIME_SECS),
             ),
             is_active: true,
             created_by: created_by.to_string(),
@@ -183,24 +186,27 @@ impl OidcClientService {
             .map(serde_json::from_value::<OidcClient>)
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
-        Ok(clients.into_iter().map(|client| OidcClientResponse {
-            client_id: client.client_id,
-            client_secret: "***".to_string(), // 不返回密钥
-            client_name: client.client_name,
-            client_type: client.client_type,
-            redirect_uris: client.redirect_uris,
-            post_logout_redirect_uris: client.post_logout_redirect_uris,
-            allowed_scopes: client.allowed_scopes,
-            allowed_grant_types: client.allowed_grant_types,
-            allowed_response_types: client.allowed_response_types,
-            require_pkce: client.require_pkce,
-            access_token_lifetime: client.access_token_lifetime,
-            refresh_token_lifetime: client.refresh_token_lifetime,
-            id_token_lifetime: client.id_token_lifetime,
-            is_active: client.is_active,
-            created_at: client.created_at,
-            updated_at: client.updated_at,
-        }).collect())
+        Ok(clients
+            .into_iter()
+            .map(|client| OidcClientResponse {
+                client_id: client.client_id,
+                client_secret: "***".to_string(), // 不返回密钥
+                client_name: client.client_name,
+                client_type: client.client_type,
+                redirect_uris: client.redirect_uris,
+                post_logout_redirect_uris: client.post_logout_redirect_uris,
+                allowed_scopes: client.allowed_scopes,
+                allowed_grant_types: client.allowed_grant_types,
+                allowed_response_types: client.allowed_response_types,
+                require_pkce: client.require_pkce,
+                access_token_lifetime: client.access_token_lifetime,
+                refresh_token_lifetime: client.refresh_token_lifetime,
+                id_token_lifetime: client.id_token_lifetime,
+                is_active: client.is_active,
+                created_at: client.created_at,
+                updated_at: client.updated_at,
+            })
+            .collect())
     }
 
     // 更新客户端
@@ -210,21 +216,33 @@ impl OidcClientService {
         request: CreateOidcClientRequest,
     ) -> Result<OidcClientResponse> {
         let mut client = self.get_client(client_id).await?;
-        
+
         // 更新字段
         client.client_name = request.client_name;
         client.client_type = request.client_type;
         client.redirect_uris = request.redirect_uris;
         client.post_logout_redirect_uris = request.post_logout_redirect_uris.unwrap_or_default();
         client.allowed_scopes = request.allowed_scopes.unwrap_or(client.allowed_scopes);
-        client.allowed_grant_types = request.allowed_grant_types.unwrap_or(client.allowed_grant_types);
-        client.allowed_response_types = request.allowed_response_types.unwrap_or(client.allowed_response_types);
-        client.require_pkce =
-            resolve_require_pkce(&client.client_type, request.require_pkce.or(Some(client.require_pkce)));
-        client.access_token_lifetime = request.access_token_lifetime.unwrap_or(client.access_token_lifetime);
-        client.refresh_token_lifetime = request.refresh_token_lifetime.unwrap_or(client.refresh_token_lifetime);
+        client.allowed_grant_types = request
+            .allowed_grant_types
+            .unwrap_or(client.allowed_grant_types);
+        client.allowed_response_types = request
+            .allowed_response_types
+            .unwrap_or(client.allowed_response_types);
+        client.require_pkce = resolve_require_pkce(
+            &client.client_type,
+            request.require_pkce.or(Some(client.require_pkce)),
+        );
+        client.access_token_lifetime = request
+            .access_token_lifetime
+            .unwrap_or(client.access_token_lifetime);
+        client.refresh_token_lifetime = request
+            .refresh_token_lifetime
+            .unwrap_or(client.refresh_token_lifetime);
         client.id_token_lifetime = clamp_id_token_lifetime(
-            request.id_token_lifetime.unwrap_or(client.id_token_lifetime),
+            request
+                .id_token_lifetime
+                .unwrap_or(client.id_token_lifetime),
         );
         client.updated_at = Utc::now().timestamp();
 
@@ -262,7 +280,9 @@ impl OidcClientService {
         let query = "UPDATE oidc_client SET is_active = false, updated_at = $updated_at \
                      WHERE client_id = $client_id RETURN VALUE client_id";
 
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("client_id", client_id.to_owned()))
             .bind(("updated_at", Utc::now().timestamp()))
@@ -290,7 +310,9 @@ impl OidcClientService {
         let query = "UPDATE oidc_client SET client_secret_hash = $hash, updated_at = $updated_at \
                      WHERE client_id = $client_id RETURN VALUE client_id";
 
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("hash", client_secret_hash))
             .bind(("client_id", client_id.to_owned()))
@@ -330,17 +352,27 @@ impl OidcClientService {
             }
         "#;
 
-        self.db.client
+        self.db
+            .client
             .query(query)
             .bind(("client_id", client.client_id.clone()))
             .bind(("client_secret_hash", client.client_secret_hash.clone()))
             .bind(("client_name", client.client_name.clone()))
             .bind(("client_type", client_type_value(&client.client_type)))
             .bind(("redirect_uris", client.redirect_uris.clone()))
-            .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
+            .bind((
+                "post_logout_redirect_uris",
+                client.post_logout_redirect_uris.clone(),
+            ))
             .bind(("allowed_scopes", client.allowed_scopes.clone()))
-            .bind(("allowed_grant_types", grant_type_values(&client.allowed_grant_types)))
-            .bind(("allowed_response_types", response_type_values(&client.allowed_response_types)))
+            .bind((
+                "allowed_grant_types",
+                grant_type_values(&client.allowed_grant_types),
+            ))
+            .bind((
+                "allowed_response_types",
+                response_type_values(&client.allowed_response_types),
+            ))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
@@ -376,16 +408,26 @@ impl OidcClientService {
             WHERE client_id = $client_id
         "#;
 
-        self.db.client
+        self.db
+            .client
             .query(query)
             .bind(("client_id", client.client_id.clone()))
             .bind(("client_name", client.client_name.clone()))
             .bind(("client_type", client_type_value(&client.client_type)))
             .bind(("redirect_uris", client.redirect_uris.clone()))
-            .bind(("post_logout_redirect_uris", client.post_logout_redirect_uris.clone()))
+            .bind((
+                "post_logout_redirect_uris",
+                client.post_logout_redirect_uris.clone(),
+            ))
             .bind(("allowed_scopes", client.allowed_scopes.clone()))
-            .bind(("allowed_grant_types", grant_type_values(&client.allowed_grant_types)))
-            .bind(("allowed_response_types", response_type_values(&client.allowed_response_types)))
+            .bind((
+                "allowed_grant_types",
+                grant_type_values(&client.allowed_grant_types),
+            ))
+            .bind((
+                "allowed_response_types",
+                response_type_values(&client.allowed_response_types),
+            ))
             .bind(("require_pkce", client.require_pkce))
             .bind(("access_token_lifetime", client.access_token_lifetime))
             .bind(("refresh_token_lifetime", client.refresh_token_lifetime))
@@ -471,7 +513,10 @@ mod tests {
         // confidential 有 client_secret 兜底，可以自己决定；缺省仍然是开。
         assert!(resolve_require_pkce(&ClientType::Confidential, None));
         assert!(resolve_require_pkce(&ClientType::Confidential, Some(true)));
-        assert!(!resolve_require_pkce(&ClientType::Confidential, Some(false)));
+        assert!(!resolve_require_pkce(
+            &ClientType::Confidential,
+            Some(false)
+        ));
     }
 
     #[test]

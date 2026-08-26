@@ -60,8 +60,7 @@ pub mod names {
     ///
     /// 以前这个列表直接写在 `routes::auth::is_admin_console_user` 里，
     /// 与常量分居两处；放在这里，"哪些权限算后台准入"只有一个答案。
-    pub const ADMIN_CONSOLE_READ: [&str; 4] =
-        [USERS_READ, ROLES_READ, SECURITY_READ, AUDIT_READ];
+    pub const ADMIN_CONSOLE_READ: [&str; 4] = [USERS_READ, ROLES_READ, SECURITY_READ, AUDIT_READ];
 
     /// 代码实际会校验的全部权限名，仅供一致性测试使用。
     #[cfg(test)]
@@ -176,7 +175,6 @@ pub struct CreatePermissionRequest {
     pub resource: String,
     pub action: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PermissionResponse {

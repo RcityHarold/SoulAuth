@@ -98,7 +98,6 @@ impl AuditLogger {
             }
         });
     }
-
 }
 
 async fn write_event(db: &Database, event: AuditEvent) -> crate::error::Result<()> {

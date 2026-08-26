@@ -211,7 +211,9 @@ async fn regenerate_secret(
     match client_service.regenerate_client_secret(&client_id).await {
         Ok(new_secret) => Ok(Json(RegenerateSecretResponse {
             client_secret: new_secret,
-            message: "Client secret has been regenerated. Please update your application configuration.".to_string(),
+            message:
+                "Client secret has been regenerated. Please update your application configuration."
+                    .to_string(),
         })),
         Err(e) => Err(client_error("regenerate client secret", e)),
     }

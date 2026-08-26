@@ -96,8 +96,18 @@ async fn get_lockout_status(
 
     let identifier = normalise(&query.identifier)?;
     let result = match query.scope {
-        LockoutScope::User => app_state.lockout_service.check_user_lockout(&identifier).await?,
-        LockoutScope::Ip => app_state.lockout_service.check_ip_lockout(&identifier).await?,
+        LockoutScope::User => {
+            app_state
+                .lockout_service
+                .check_user_lockout(&identifier)
+                .await?
+        }
+        LockoutScope::Ip => {
+            app_state
+                .lockout_service
+                .check_ip_lockout(&identifier)
+                .await?
+        }
     };
 
     Ok(Json(result))
@@ -174,7 +184,10 @@ mod tests {
     fn identifier_rejects_empty_and_control_characters() {
         assert!(normalise("  ").is_err());
         assert!(normalise("a\u{1b}[31mb@example.com").is_err());
-        assert_eq!(normalise("  user@example.com  ").unwrap(), "user@example.com");
+        assert_eq!(
+            normalise("  user@example.com  ").unwrap(),
+            "user@example.com"
+        );
         assert_eq!(normalise("203.0.113.7").unwrap(), "203.0.113.7");
     }
 

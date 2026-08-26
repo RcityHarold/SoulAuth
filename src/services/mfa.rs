@@ -2,17 +2,17 @@ use crate::{
     config::Config,
     error::{AuthError, Result},
     models::mfa::{
-        UserMfa, MfaStatus, MfaMethod, TotpSetupResponse, MfaVerificationResponse, 
-        MfaStatusResponse, EnableTotpRequest, VerifyTotpRequest, UseBackupCodeRequest
+        EnableTotpRequest, MfaMethod, MfaStatus, MfaStatusResponse, MfaVerificationResponse,
+        TotpSetupResponse, UseBackupCodeRequest, UserMfa, VerifyTotpRequest,
     },
     services::database::Database,
     utils::crypto::{constant_time_eq, hash_backup_code, verify_backup_code, SecretCipher},
 };
 use chrono::Utc;
-use qrcode::{QrCode, render::svg};
+use qrcode::{render::svg, QrCode};
 use std::sync::Arc;
-use totp_rs::{Algorithm, TOTP, Secret};
-use tracing::{info, error, debug, warn};
+use totp_rs::{Algorithm, Secret, TOTP};
+use tracing::{debug, error, info, warn};
 
 /// TOTP 的时间步长（秒），与 `TOTP::new` 的 `step` 参数保持一致。
 const TOTP_STEP_SECS: i64 = 30;
@@ -74,7 +74,8 @@ impl MfaService {
             let mut rng = rand::thread_rng();
             (0..20).map(|_| rng.gen()).collect()
         };
-        let secret_str = base32::encode(base32::Alphabet::RFC4648 { padding: false }, &secret_bytes);
+        let secret_str =
+            base32::encode(base32::Alphabet::RFC4648 { padding: false }, &secret_bytes);
         let secret = Secret::Encoded(secret_str.clone());
 
         // 创建TOTP实例
@@ -92,15 +93,18 @@ impl MfaService {
         let qr_code_url = totp.get_url();
         let qr_code = QrCode::new(&qr_code_url)
             .map_err(|e| AuthError::ServerError(format!("Failed to generate QR code: {}", e)))?;
-        
+
         let qr_svg = qr_code
             .render::<svg::Color>()
             .min_dimensions(200, 200)
             .build();
 
         // 转换为数据URL
-        use base64::{Engine as _, engine::general_purpose};
-        let qr_data_url = format!("data:image/svg+xml;base64,{}", general_purpose::STANDARD.encode(qr_svg));
+        use base64::{engine::general_purpose, Engine as _};
+        let qr_data_url = format!(
+            "data:image/svg+xml;base64,{}",
+            general_purpose::STANDARD.encode(qr_svg)
+        );
 
         // 生成备用恢复代码：明文只在这一次返回给用户，库里存 Argon2 哈希。
         let backup_codes = UserMfa::generate_backup_codes();
@@ -140,9 +144,11 @@ impl MfaService {
 
         // 获取用户MFA配置
         let mut mfa_config = self.get_user_mfa(user_id).await?;
-        
+
         if mfa_config.status != MfaStatus::Pending {
-            return Err(AuthError::ServerError("TOTP not in pending state".to_string()));
+            return Err(AuthError::ServerError(
+                "TOTP not in pending state".to_string(),
+            ));
         }
 
         // 验证TOTP代码
@@ -162,11 +168,15 @@ impl MfaService {
     }
 
     /// 验证TOTP代码
-    pub async fn verify_totp(&self, user_id: &str, request: VerifyTotpRequest) -> Result<MfaVerificationResponse> {
+    pub async fn verify_totp(
+        &self,
+        user_id: &str,
+        request: VerifyTotpRequest,
+    ) -> Result<MfaVerificationResponse> {
         debug!("Verifying TOTP for user: {}", user_id);
 
         let mut mfa_config = self.get_user_mfa(user_id).await?;
-        
+
         if mfa_config.status != MfaStatus::Enabled {
             return Ok(MfaVerificationResponse {
                 verified: false,
@@ -179,7 +189,7 @@ impl MfaService {
             self.save_user_mfa(&mfa_config).await?;
 
             info!("TOTP verification successful for user: {}", user_id);
-            
+
             Ok(MfaVerificationResponse {
                 verified: true,
                 token: None, // 将在上层生成JWT token
@@ -187,7 +197,7 @@ impl MfaService {
             })
         } else {
             error!("Invalid TOTP code for user: {}", user_id);
-            
+
             Ok(MfaVerificationResponse {
                 verified: false,
                 token: None,
@@ -197,11 +207,15 @@ impl MfaService {
     }
 
     /// 使用备用恢复代码
-    pub async fn use_backup_code(&self, user_id: &str, request: UseBackupCodeRequest) -> Result<MfaVerificationResponse> {
+    pub async fn use_backup_code(
+        &self,
+        user_id: &str,
+        request: UseBackupCodeRequest,
+    ) -> Result<MfaVerificationResponse> {
         info!("Using backup code for user: {}", user_id);
 
         let mut mfa_config = self.get_user_mfa(user_id).await?;
-        
+
         if mfa_config.status != MfaStatus::Enabled {
             return Ok(MfaVerificationResponse {
                 verified: false,
@@ -225,7 +239,7 @@ impl MfaService {
             self.save_user_mfa(&mfa_config).await?;
 
             info!("Backup code used successfully for user: {}", user_id);
-            
+
             Ok(MfaVerificationResponse {
                 verified: true,
                 token: None, // 将在上层生成JWT token
@@ -233,7 +247,7 @@ impl MfaService {
             })
         } else {
             error!("Invalid backup code for user: {}", user_id);
-            
+
             Ok(MfaVerificationResponse {
                 verified: false,
                 token: None,
@@ -247,7 +261,7 @@ impl MfaService {
         info!("Disabling MFA for user: {}", user_id);
 
         let mfa_config = self.get_user_mfa(user_id).await?;
-        
+
         if mfa_config.status == MfaStatus::Disabled {
             return Ok(true);
         }
@@ -262,22 +276,18 @@ impl MfaService {
     /// 获取用户MFA状态
     pub async fn get_mfa_status(&self, user_id: &str) -> Result<MfaStatusResponse> {
         match self.get_user_mfa(user_id).await {
-            Ok(mfa_config) => {
-                Ok(MfaStatusResponse {
-                    enabled: mfa_config.status == MfaStatus::Enabled,
-                    method: Some(mfa_config.method),
-                    backup_codes_count: mfa_config.backup_codes.len() as u32,
-                    last_used_at: mfa_config.last_used_at,
-                })
-            }
-            Err(AuthError::UserNotFound) => {
-                Ok(MfaStatusResponse {
-                    enabled: false,
-                    method: None,
-                    backup_codes_count: 0,
-                    last_used_at: None,
-                })
-            }
+            Ok(mfa_config) => Ok(MfaStatusResponse {
+                enabled: mfa_config.status == MfaStatus::Enabled,
+                method: Some(mfa_config.method),
+                backup_codes_count: mfa_config.backup_codes.len() as u32,
+                last_used_at: mfa_config.last_used_at,
+            }),
+            Err(AuthError::UserNotFound) => Ok(MfaStatusResponse {
+                enabled: false,
+                method: None,
+                backup_codes_count: 0,
+                last_used_at: None,
+            }),
             Err(e) => Err(e),
         }
     }
@@ -330,7 +340,8 @@ impl MfaService {
             secret_bytes,
             Some("RustAuth".to_string()),
             "".to_string(),
-        ).map_err(|e| AuthError::ServerError(format!("TOTP creation failed: {}", e)))?;
+        )
+        .map_err(|e| AuthError::ServerError(format!("TOTP creation failed: {}", e)))?;
 
         Ok(match_totp_step(&totp, code, Utc::now().timestamp()))
     }
@@ -494,10 +505,10 @@ mod tests {
     async fn test_totp_code_verification() {
         // 创建MFA服务实例用于测试
         // 注意：这需要有效的数据库配置，在实际测试中可能需要模拟
-        
+
         // 测试TOTP代码验证逻辑
         let secret = Secret::Raw((0u8..20).collect());
-        
+
         let totp = TOTP::new(
             Algorithm::SHA1,
             6,
@@ -506,8 +517,9 @@ mod tests {
             secret.to_bytes().unwrap(),
             Some("RustAuth".to_string()),
             "test@example.com".to_string(),
-        ).unwrap();
-        
+        )
+        .unwrap();
+
         let code = totp.generate_current().unwrap();
 
         // 验证生成的代码应该是有效的
@@ -564,14 +576,16 @@ mod tests {
     #[test]
     fn test_backup_codes_generation() {
         let codes = UserMfa::generate_backup_codes();
-        
+
         assert_eq!(codes.len(), 8);
-        
+
         for code in &codes {
             assert_eq!(code.len(), 8);
-            assert!(code.chars().all(|c| c.is_ascii_alphanumeric() && c.is_uppercase()));
+            assert!(code
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() && c.is_uppercase()));
         }
-        
+
         // 确保代码是唯一的
         let mut unique_codes = codes.clone();
         unique_codes.sort();

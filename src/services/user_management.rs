@@ -7,12 +7,20 @@ use tracing::{error, info};
 use crate::{
     error::AuthError,
     models::{
-        user::{User, UpdateAccountStatusRequest, AccountStatusResponse, UserListRequest, UserListResponse, UserResponse, UpdateMembershipRequest},
-        user_profile::{UserProfile, CreateUserProfileRequest, UpdateUserProfileRequest, UserProfileResponse},
-        user_preferences::{UserPreferences, CreateUserPreferencesRequest, UpdateUserPreferencesRequest, UserPreferencesResponse},
+        user::{
+            AccountStatusResponse, UpdateAccountStatusRequest, UpdateMembershipRequest, User,
+            UserListRequest, UserListResponse, UserResponse,
+        },
         user_activity::{
             ActivityCategory, ActivityLogRequest, ActivityLogResponse, ActivityStatus,
             UserActivityResponse, UserActivityRow,
+        },
+        user_preferences::{
+            CreateUserPreferencesRequest, UpdateUserPreferencesRequest, UserPreferences,
+            UserPreferencesResponse,
+        },
+        user_profile::{
+            CreateUserProfileRequest, UpdateUserProfileRequest, UserProfile, UserProfileResponse,
         },
     },
     services::{
@@ -30,8 +38,12 @@ pub struct UserManagementService {
 impl UserManagementService {
     fn normalize_membership_level(level: &str) -> Result<String, AuthError> {
         match level.trim().to_ascii_uppercase().as_str() {
-            "FREE" | "PRO" | "PREMIUM" | "ULTIMATE" | "TEAM" => Ok(level.trim().to_ascii_uppercase()),
-            _ => Err(AuthError::ValidationError("Invalid membership level".to_string())),
+            "FREE" | "PRO" | "PREMIUM" | "ULTIMATE" | "TEAM" => {
+                Ok(level.trim().to_ascii_uppercase())
+            }
+            _ => Err(AuthError::ValidationError(
+                "Invalid membership level".to_string(),
+            )),
         }
     }
 
@@ -48,9 +60,11 @@ impl UserManagementService {
     ) -> Result<UserProfileResponse, AuthError> {
         // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
         let user_thing = self.db.actor_ref_of_user(user_id).await?;
-        
+
         // 检查用户是否存在
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             // `user_thing` 自 Stage 3 起是**身份根**引用，不能拿它去 user 表查 ——
             // 那必然查不到，于是建资料返回 404。存在性判定改查 actor_identity。
             // `SELECT VALUE id` 而不是 `SELECT *`：整行里有 record 类型字段，
@@ -79,7 +93,9 @@ impl UserManagementService {
         // 检查档案是否已存在
         let existing_profile = self.get_user_profile(user_id).await;
         if existing_profile.is_ok() {
-            return Err(AuthError::ValidationError("User profile already exists".to_string()));
+            return Err(AuthError::ValidationError(
+                "User profile already exists".to_string(),
+            ));
         }
 
         let now = Utc::now().timestamp();
@@ -102,7 +118,9 @@ impl UserManagementService {
         };
 
         let query = "CREATE user_profile CONTENT $profile";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("profile", profile.clone()))
             .await
@@ -118,7 +136,9 @@ impl UserManagementService {
         })?;
 
         if created_profile.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to create user profile".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to create user profile".to_string(),
+            ));
         }
 
         // 记录活动
@@ -130,7 +150,8 @@ impl UserManagementService {
             &ctx.ip_address,
             &ctx.user_agent,
             serde_json::json!({"action": "profile_created"}),
-        ).await?;
+        )
+        .await?;
 
         info!("User profile created for user '{}'", user_id);
         Ok(created_profile[0].clone().into())
@@ -139,9 +160,11 @@ impl UserManagementService {
     pub async fn get_user_profile(&self, user_id: &str) -> Result<UserProfileResponse, AuthError> {
         // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
         let user_thing = self.db.actor_ref_of_user(user_id).await?;
-        
+
         let query = "SELECT * FROM user_profile WHERE user_id = $user_id";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
@@ -156,7 +179,9 @@ impl UserManagementService {
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        profiles.into_iter().next()
+        profiles
+            .into_iter()
+            .next()
             .map(|profile| profile.into())
             .ok_or_else(|| AuthError::NotFound("User profile not found".to_string()))
     }
@@ -169,7 +194,7 @@ impl UserManagementService {
     ) -> Result<UserProfileResponse, AuthError> {
         // 档案不存在时先报 404，而不是让 UPDATE 静默命中 0 行。
         self.get_user_profile(user_id).await?;
-        
+
         // 全部走绑定参数。以前这里把 bio / website / display_name 等用户可控字段
         // 直接内插进 SurrealQL，一个单引号就能改写整条语句。
         // `$x ?? field` 表示"传了就更新，没传就保持原值"。
@@ -227,7 +252,9 @@ impl UserManagementService {
         })?;
 
         if updated_profile.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to update user profile".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to update user profile".to_string(),
+            ));
         }
 
         // 记录活动
@@ -239,7 +266,8 @@ impl UserManagementService {
             &ctx.ip_address,
             &ctx.user_agent,
             serde_json::json!({"action": "profile_updated"}),
-        ).await?;
+        )
+        .await?;
 
         info!("User profile updated for user '{}'", user_id);
         Ok(updated_profile[0].clone().into())
@@ -254,18 +282,20 @@ impl UserManagementService {
     ) -> Result<UserPreferencesResponse, AuthError> {
         // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
         let user_thing = self.db.actor_ref_of_user(user_id).await?;
-        
+
         // 检查偏好是否已存在
         let existing_prefs = self.get_user_preferences(user_id).await;
         if existing_prefs.is_ok() {
-            return Err(AuthError::ValidationError("User preferences already exist".to_string()));
+            return Err(AuthError::ValidationError(
+                "User preferences already exist".to_string(),
+            ));
         }
 
         let mut preferences = UserPreferences {
             user_id: user_thing,
             ..Default::default()
         };
-        
+
         if let Some(theme) = request.theme {
             preferences.theme = theme;
         }
@@ -298,7 +328,9 @@ impl UserManagementService {
         }
 
         let query = "CREATE user_preferences CONTENT $preferences";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("preferences", preferences.clone()))
             .await
@@ -314,7 +346,9 @@ impl UserManagementService {
         })?;
 
         if created_preferences.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to create user preferences".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to create user preferences".to_string(),
+            ));
         }
 
         // 记录活动
@@ -326,18 +360,24 @@ impl UserManagementService {
             &ctx.ip_address,
             &ctx.user_agent,
             serde_json::json!({"action": "preferences_created"}),
-        ).await?;
+        )
+        .await?;
 
         info!("User preferences created for user '{}'", user_id);
         Ok(created_preferences[0].clone().into())
     }
 
-    pub async fn get_user_preferences(&self, user_id: &str) -> Result<UserPreferencesResponse, AuthError> {
+    pub async fn get_user_preferences(
+        &self,
+        user_id: &str,
+    ) -> Result<UserPreferencesResponse, AuthError> {
         // profile / preferences 挂在**身份根**上（Stage 3 起外键指 actor_identity）。
         let user_thing = self.db.actor_ref_of_user(user_id).await?;
-        
+
         let query = "SELECT * FROM user_preferences WHERE user_id = $user_id";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("user_id", user_thing.clone()))
             .await
@@ -352,7 +392,9 @@ impl UserManagementService {
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        preferences.into_iter().next()
+        preferences
+            .into_iter()
+            .next()
             .map(|prefs| prefs.into())
             .ok_or_else(|| AuthError::NotFound("User preferences not found".to_string()))
     }
@@ -365,7 +407,7 @@ impl UserManagementService {
     ) -> Result<UserPreferencesResponse, AuthError> {
         // 偏好不存在时先报 404。
         self.get_user_preferences(user_id).await?;
-        
+
         // 同上：改为全绑定参数。
         let query = r#"
             UPDATE user_preferences SET
@@ -413,7 +455,9 @@ impl UserManagementService {
         })?;
 
         if updated_preferences.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to update user preferences".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to update user preferences".to_string(),
+            ));
         }
 
         // 记录活动
@@ -425,7 +469,8 @@ impl UserManagementService {
             &ctx.ip_address,
             &ctx.user_agent,
             serde_json::json!({"action": "preferences_updated"}),
-        ).await?;
+        )
+        .await?;
 
         info!("User preferences updated for user '{}'", user_id);
         Ok(updated_preferences[0].clone().into())
@@ -440,9 +485,11 @@ impl UserManagementService {
         ctx: &RequestContext,
     ) -> Result<AccountStatusResponse, AuthError> {
         let user_thing = crate::utils::record_id::user_record_id(user_id)?;
-        
+
         // 检查用户是否存在
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query("SELECT * FROM user WHERE id = $user_id LIMIT 1")
             .bind(("user_id", user_thing.clone()))
             .await
@@ -531,10 +578,14 @@ impl UserManagementService {
                 "new_status": request.status,
                 "reason": request.reason
             }),
-        ).await?;
+        )
+        .await?;
 
-        info!("Account status updated for user '{}' to {:?} by '{}'", user_id, request.status, updated_by.email);
-        
+        info!(
+            "Account status updated for user '{}' to {:?} by '{}'",
+            user_id, request.status, updated_by.email
+        );
+
         Ok(AccountStatusResponse {
             user_id: user_id.to_string(),
             status: request.status,
@@ -591,7 +642,10 @@ impl UserManagementService {
         let limit = request.limit.unwrap_or(50).clamp(1, 200);
         let offset = (page - 1).saturating_mul(limit);
 
-        let mut where_clauses = vec!["user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]".to_string()];
+        let mut where_clauses = vec![
+            "user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]"
+                .to_string(),
+        ];
         if request.category.is_some() {
             where_clauses.push("category = $category".to_string());
         }
@@ -692,7 +746,9 @@ impl UserManagementService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let user = users.into_iter().next()
+        let user = users
+            .into_iter()
+            .next()
             .ok_or_else(|| AuthError::NotFound("User not found".to_string()))?;
 
         let mut response: UserResponse = user.into();
@@ -705,7 +761,10 @@ impl UserManagementService {
         rbac.check_user_role(user_id, "admin").await
     }
 
-    pub async fn list_users(&self, request: UserListRequest) -> Result<UserListResponse, AuthError> {
+    pub async fn list_users(
+        &self,
+        request: UserListRequest,
+    ) -> Result<UserListResponse, AuthError> {
         // `page` / `limit` 是 u32 且直接来自查询串：`page=0` 会让 `page - 1` 下溢
         // （debug 直接 panic，release 绕回 u32::MAX），`limit` 不设上限则
         // `?limit=4294967295` 等于一次性把整张 user 表拉进内存。
@@ -774,7 +833,8 @@ impl UserManagementService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let total = count_result.first()
+        let total = count_result
+            .first()
             .and_then(|c| c.get("total"))
             .and_then(|t| t.as_u64())
             .unwrap_or(0);
@@ -783,9 +843,11 @@ impl UserManagementService {
 
         let mut user_responses = Vec::with_capacity(users.len());
         for user in users {
-            let user_id = crate::utils::record_id::record_id_key_to_string(user.id.as_ref().ok_or_else(|| {
-                AuthError::DatabaseError("User missing id".to_string())
-            })?);
+            let user_id = crate::utils::record_id::record_id_key_to_string(
+                user.id
+                    .as_ref()
+                    .ok_or_else(|| AuthError::DatabaseError("User missing id".to_string()))?,
+            );
             let mut response: UserResponse = user.into();
             response.is_admin = self.user_has_admin_role(&user_id).await?;
             user_responses.push(response);
@@ -838,12 +900,10 @@ impl UserManagementService {
             updated
                 .id
                 .as_ref()
-                .ok_or_else(|| AuthError::DatabaseError("Updated user missing id".to_string()))?
+                .ok_or_else(|| AuthError::DatabaseError("Updated user missing id".to_string()))?,
         );
         let mut response: UserResponse = updated.into();
-        response.is_admin = self
-            .user_has_admin_role(&updated_id)
-            .await?;
+        response.is_admin = self.user_has_admin_role(&updated_id).await?;
         Ok(response)
     }
 }

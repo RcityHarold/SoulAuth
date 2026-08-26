@@ -11,9 +11,7 @@ pub fn validate_email(email: &str) -> Result<String> {
         return Err(AuthError::ValidationError("Email is required".to_string()));
     }
     if email.len() > 254 {
-        return Err(AuthError::ValidationError(
-            "Email is too long".to_string(),
-        ));
+        return Err(AuthError::ValidationError("Email is too long".to_string()));
     }
     if email.chars().any(|ch| ch.is_whitespace()) {
         return Err(AuthError::ValidationError(
@@ -126,7 +124,10 @@ mod tests {
 
     #[test]
     fn accepts_normal_email_and_lowercases_it() {
-        assert_eq!(validate_email(" User@Example.COM ").unwrap(), "user@example.com");
+        assert_eq!(
+            validate_email(" User@Example.COM ").unwrap(),
+            "user@example.com"
+        );
     }
 
     #[test]
@@ -149,7 +150,14 @@ mod tests {
 
     #[test]
     fn rejects_malformed_emails() {
-        for bad in ["", "no-at-sign", "a@b", "a@@b.com", "a b@example.com", "a@.com"] {
+        for bad in [
+            "",
+            "no-at-sign",
+            "a@b",
+            "a@@b.com",
+            "a b@example.com",
+            "a@.com",
+        ] {
             assert!(validate_email(bad).is_err(), "should reject {bad}");
         }
     }

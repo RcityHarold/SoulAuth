@@ -15,9 +15,9 @@ use oauth2::{
 /// 而不是等到换令牌时才失败。
 type ConfiguredClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+use reqwest::{Client, Proxy};
 use serde::Deserialize;
 use tracing::{error, info};
-use reqwest::{Client, Proxy};
 
 #[derive(Debug, Deserialize)]
 struct GoogleUserInfo {
@@ -43,7 +43,6 @@ struct GitHubEmail {
     primary: bool,
     verified: bool,
 }
-
 
 /// 用**我们自己配置的** `reqwest::Client` 执行 oauth2 的 HTTP 往返。
 ///
@@ -97,7 +96,6 @@ pub struct OAuthService {
     github_emails_url: String,
 }
 
-
 /// 各 provider 的端点。`base` 为 `None` 时用官方地址；为 `Some` 时
 /// **沿用该 provider 真实的路径形状**，只换根地址 —— 这样本地替身是忠实
 /// 替身，测出来的东西对真实端点同样成立。
@@ -139,7 +137,10 @@ fn github_endpoints(base: Option<&str>) -> (String, String, String, String) {
 impl OAuthService {
     pub fn new(config: Config) -> Result<Self> {
         let base = |v: &Option<String>| {
-            v.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned)
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
         };
         let (google_auth, google_token, google_userinfo_url) =
             google_endpoints(base(&config.google_oauth_base_url).as_deref());
@@ -162,7 +163,8 @@ impl OAuthService {
                     AuthUrl::new(google_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_token_uri(
-                    TokenUrl::new(google_token).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    TokenUrl::new(google_token)
+                        .map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_redirect_uri(
                     RedirectUrl::new(format!(
@@ -188,7 +190,8 @@ impl OAuthService {
                     AuthUrl::new(github_auth).map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_token_uri(
-                    TokenUrl::new(github_token).map_err(|e| AuthError::OAuthError(e.to_string()))?,
+                    TokenUrl::new(github_token)
+                        .map_err(|e| AuthError::OAuthError(e.to_string()))?,
                 )
                 .set_redirect_uri(
                     RedirectUrl::new(format!(
@@ -223,16 +226,17 @@ impl OAuthService {
         // 连接。这里给整个请求封顶。
         let mut client_builder = Client::builder()
             .timeout(std::time::Duration::from_secs(OUTBOUND_HTTP_TIMEOUT_SECS))
-            .connect_timeout(std::time::Duration::from_secs(OUTBOUND_CONNECT_TIMEOUT_SECS));
+            .connect_timeout(std::time::Duration::from_secs(
+                OUTBOUND_CONNECT_TIMEOUT_SECS,
+            ));
 
         if self.config.proxy_enabled {
             if let Some(proxy_url) = &self.config.proxy_url {
-                let proxy_url = proxy_url.replace("https://", "http://");  // 强制使用 http 协议
+                let proxy_url = proxy_url.replace("https://", "http://"); // 强制使用 http 协议
                 info!("Using proxy: {}", proxy_url);
-                client_builder = client_builder.proxy(
-                    Proxy::all(&proxy_url)
-                        .map_err(|e| AuthError::OAuthError(format!("Failed to create proxy: {}", e)))?
-                );
+                client_builder = client_builder.proxy(Proxy::all(&proxy_url).map_err(|e| {
+                    AuthError::OAuthError(format!("Failed to create proxy: {}", e))
+                })?);
             }
         }
 
@@ -302,32 +306,36 @@ impl OAuthService {
             .get(&self.google_userinfo_url)
             .bearer_auth(token.access_token().secret())
             .send()
-            .await {
-                Ok(response) => {
-                    info!("Received response from Google API");
-                    match response.json().await {
-                        Ok(info) => {
-                            info!("Successfully parsed user info");
-                            info
-                        },
-                        Err(e) => {
-                            error!("Failed to parse user info: {}", e);
-                            return Err(AuthError::OAuthError(e.to_string()));
-                        }
+            .await
+        {
+            Ok(response) => {
+                info!("Received response from Google API");
+                match response.json().await {
+                    Ok(info) => {
+                        info!("Successfully parsed user info");
+                        info
                     }
-                },
-                Err(e) => {
-                    error!("Failed to fetch user info: {}", e);
-                    return Err(AuthError::OAuthError(e.to_string()));
+                    Err(e) => {
+                        error!("Failed to parse user info: {}", e);
+                        return Err(AuthError::OAuthError(e.to_string()));
+                    }
                 }
-            };
+            }
+            Err(e) => {
+                error!("Failed to fetch user info: {}", e);
+                return Err(AuthError::OAuthError(e.to_string()));
+            }
+        };
 
         if !user_info.verified_email {
             error!("User email is not verified");
             return Err(AuthError::EmailNotVerified);
         }
 
-        info!("Successfully completed Google OAuth callback for user: {}", user_info.email);
+        info!(
+            "Successfully completed Google OAuth callback for user: {}",
+            user_info.email
+        );
         Ok(OAuthUserInfo {
             provider: "google".to_string(),
             provider_user_id: user_info.id,
@@ -361,7 +369,6 @@ impl OAuthService {
             .request_async(&exchange)
             .await
             .map_err(|e| AuthError::OAuthError(e.to_string()))?;
-
 
         // 获取用户信息
         let user_info: GitHubUserInfo = client

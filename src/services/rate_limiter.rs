@@ -23,8 +23,8 @@ pub struct RateLimitRule {
 impl Default for RateLimitRule {
     fn default() -> Self {
         Self {
-            window_duration: Duration::from_secs(60),  // 1分钟窗口
-            max_requests: 10,                          // 最多10次请求
+            window_duration: Duration::from_secs(60), // 1分钟窗口
+            max_requests: 10,                         // 最多10次请求
             block_duration: Duration::from_secs(300), // 阻塞5分钟
         }
     }
@@ -154,7 +154,9 @@ impl RateLimiter {
 
     /// 获取端点的规则
     fn get_rule(&self, endpoint: &str) -> &RateLimitRule {
-        self.endpoint_rules.get(endpoint).unwrap_or(&self.default_rule)
+        self.endpoint_rules
+            .get(endpoint)
+            .unwrap_or(&self.default_rule)
     }
 
     /// 计数桶的键：**必须**按 (客户端, 端点) 组合。
@@ -170,8 +172,15 @@ impl RateLimiter {
     ///
     /// 只关心"能不能过"的调用方用这个；需要区分"刚被封"和"封着呢"的用
     /// [`Self::check_rate_limit_verbose`]。
-    pub async fn check_rate_limit(&self, key: &str, endpoint: &str) -> Result<bool, crate::error::AppError> {
-        Ok(self.check_rate_limit_verbose(key, endpoint).await?.allowed())
+    pub async fn check_rate_limit(
+        &self,
+        key: &str,
+        endpoint: &str,
+    ) -> Result<bool, crate::error::AppError> {
+        Ok(self
+            .check_rate_limit_verbose(key, endpoint)
+            .await?
+            .allowed())
     }
 
     /// 同 [`Self::check_rate_limit`]，但会告诉调用方这次是不是**刚**触发阻塞。
@@ -193,7 +202,10 @@ impl RateLimiter {
 
         // 检查是否被阻塞
         if record.is_blocked() {
-            debug!("Rate limit blocked for key: {}, endpoint: {}", key, endpoint);
+            debug!(
+                "Rate limit blocked for key: {}, endpoint: {}",
+                key, endpoint
+            );
             return Ok(RateLimitDecision::StillBlocked);
         }
 
@@ -204,16 +216,23 @@ impl RateLimiter {
         if record.is_rate_limited(rule.max_requests) {
             // 触发阻塞
             record.block(rule.block_duration);
-            warn!("Rate limit exceeded for key: {}, endpoint: {}, blocking for {:?}",
-                  key, endpoint, rule.block_duration);
+            warn!(
+                "Rate limit exceeded for key: {}, endpoint: {}, blocking for {:?}",
+                key, endpoint, rule.block_duration
+            );
             return Ok(RateLimitDecision::JustBlocked);
         }
 
         // 记录请求
         record.add_request();
         // 每个请求都会走到这里，放 info 会把日志淹掉（也拖慢高 QPS 下的写入）。
-        debug!("Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}",
-              key, endpoint, record.timestamps.len(), rule.max_requests);
+        debug!(
+            "Rate limit check passed for key: {}, endpoint: {}, requests: {}/{}",
+            key,
+            endpoint,
+            record.timestamps.len(),
+            rule.max_requests
+        );
 
         // 进程内这一关过了，还要过跨副本这一关。锁在这里就得放掉：
         // 共享计数要走一次数据库往返，攥着写锁会把本进程的所有请求串起来。
@@ -312,7 +331,10 @@ impl RateLimiter {
 
         let mut last_error = None;
         for attempt in 0..WRITE_CONFLICT_RETRIES {
-            match db.raw_query("rate_limit_shared", query, bindings.clone()).await {
+            match db
+                .raw_query("rate_limit_shared", query, bindings.clone())
+                .await
+            {
                 Ok(mut response) => {
                     let just_blocked: Vec<u32> = response.take(2).unwrap_or_default();
                     let rows: Vec<serde_json::Value> = response.take(3).unwrap_or_default();
@@ -354,7 +376,7 @@ impl RateLimiter {
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
         client_key.hash(&mut hasher);
-        0u8.hash(&mut hasher);      // 分隔，免得 ("ab","c") 与 ("a","bc") 撞同一个桶
+        0u8.hash(&mut hasher); // 分隔，免得 ("ab","c") 与 ("a","bc") 撞同一个桶
         endpoint.hash(&mut hasher);
         format!("{:016x}", hasher.finish())
     }
@@ -371,12 +393,13 @@ impl RateLimiter {
     pub async fn get_remaining_requests(&self, key: &str, endpoint: &str) -> u32 {
         let rule = self.get_rule(endpoint);
         let records = self.records.read().await;
-        
+
         if let Some(record) = records.get(&Self::record_key(key, endpoint)) {
             if record.is_blocked() {
                 return 0;
             }
-            rule.max_requests.saturating_sub(record.timestamps.len() as u32)
+            rule.max_requests
+                .saturating_sub(record.timestamps.len() as u32)
         } else {
             rule.max_requests
         }
@@ -386,10 +409,10 @@ impl RateLimiter {
     pub async fn cleanup_expired_records(&self) {
         let mut records = self.records.write().await;
         let now = Instant::now();
-        
+
         // 清理超过1小时没有活动的记录
         let cleanup_threshold = Duration::from_secs(3600);
-        
+
         records.retain(|_, record| {
             // 如果有阻塞且未过期，保留
             if let Some(blocked_until) = record.blocked_until {
@@ -397,7 +420,7 @@ impl RateLimiter {
                     return true;
                 }
             }
-            
+
             // 如果有最近的请求，保留
             if let Some(&last_request) = record.timestamps.last() {
                 now - last_request < cleanup_threshold
@@ -405,8 +428,11 @@ impl RateLimiter {
                 false
             }
         });
-        
-        info!("Cleaned up rate limiter records, remaining: {}", records.len());
+
+        info!(
+            "Cleaned up rate limiter records, remaining: {}",
+            records.len()
+        );
         drop(records);
 
         self.cleanup_shared_records().await;
@@ -473,9 +499,9 @@ impl RateLimitRules {
     /// 一般API规则
     pub fn general_api() -> RateLimitRule {
         RateLimitRule {
-            window_duration: Duration::from_secs(60),  // 1分钟窗口
-            max_requests: 30,                          // 最多30次请求
-            block_duration: Duration::from_secs(60),   // 阻塞1分钟
+            window_duration: Duration::from_secs(60), // 1分钟窗口
+            max_requests: 30,                         // 最多30次请求
+            block_duration: Duration::from_secs(60),  // 阻塞1分钟
         }
     }
 }
@@ -487,12 +513,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_basic() {
-        let limiter = RateLimiter::new()
-            .with_default_rule(RateLimitRule {
-                window_duration: Duration::from_secs(60),
-                max_requests: 3,
-                block_duration: Duration::from_secs(120),
-            });
+        let limiter = RateLimiter::new().with_default_rule(RateLimitRule {
+            window_duration: Duration::from_secs(60),
+            max_requests: 3,
+            block_duration: Duration::from_secs(120),
+        });
 
         let key = "test_user";
         let endpoint = "test_endpoint";
@@ -544,12 +569,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_rate_limiter_reset() {
-        let limiter = RateLimiter::new()
-            .with_default_rule(RateLimitRule {
-                window_duration: Duration::from_secs(60),
-                max_requests: 2,
-                block_duration: Duration::from_secs(120),
-            });
+        let limiter = RateLimiter::new().with_default_rule(RateLimitRule {
+            window_duration: Duration::from_secs(60),
+            max_requests: 2,
+            block_duration: Duration::from_secs(120),
+        });
 
         let key = "test_user";
         let endpoint = "test_endpoint";
@@ -570,12 +594,11 @@ mod tests {
 
     #[tokio::test]
     async fn limits_are_tracked_per_endpoint_not_globally_per_client() {
-        let limiter = RateLimiter::new()
-            .with_default_rule(RateLimitRule {
-                window_duration: Duration::from_secs(60),
-                max_requests: 2,
-                block_duration: Duration::from_secs(120),
-            });
+        let limiter = RateLimiter::new().with_default_rule(RateLimitRule {
+            window_duration: Duration::from_secs(60),
+            max_requests: 2,
+            block_duration: Duration::from_secs(120),
+        });
 
         // 打满 /a 的配额
         assert!(limiter.check_rate_limit("1.2.3.4", "/a").await.unwrap());
@@ -591,12 +614,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_remaining_requests() {
-        let limiter = RateLimiter::new()
-            .with_default_rule(RateLimitRule {
-                window_duration: Duration::from_secs(60),
-                max_requests: 5,
-                block_duration: Duration::from_secs(120),
-            });
+        let limiter = RateLimiter::new().with_default_rule(RateLimitRule {
+            window_duration: Duration::from_secs(60),
+            max_requests: 5,
+            block_duration: Duration::from_secs(120),
+        });
 
         let key = "test_user";
         let endpoint = "test_endpoint";
