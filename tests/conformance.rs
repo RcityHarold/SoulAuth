@@ -2105,3 +2105,77 @@ fn j8_ai_actor_auth_surface_is_frozen() {
         );
     }
 }
+
+/// J9 · Schema 内部自洽：索引不得指向不存在的列
+///
+/// 这条是被一次真实事故补上的。B3 把六个明文令牌列改名成 `*_hash` 时，
+/// `password_reset_token` 上有个索引仍指着旧列名 `token`。后果不是编译错误，
+/// 也不是某个端点返回 500 —— 是**整个 `schema.sql` 导入失败**：
+///
+/// ```text
+/// The field 'token' does not exist
+/// ```
+///
+/// 于是服务连库都建不起来。它在 `cargo check`、`cargo test`、rustfmt 面前
+/// 全部隐形，只有在真的把 schema 喂给 SurrealDB 时才现形 —— 而那已经是
+/// 集成测试阶段了。改个列名忘了改索引是最容易犯的一类错，值得一条静态守卫。
+#[test]
+fn j9_schema_indexes_reference_existing_fields() {
+    let schema = schema();
+
+    let mut fields: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    for line in schema.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("DEFINE FIELD ") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(field), Some("ON"), Some(table)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        fields
+            .entry(table.to_string())
+            .or_default()
+            .push(field.to_string());
+    }
+    assert!(
+        fields.len() > 10,
+        "只解析出 {} 张表的字段 —— 解析逻辑失效了",
+        fields.len()
+    );
+
+    for line in schema.lines() {
+        let l = line.trim();
+        let Some(rest) = l.strip_prefix("DEFINE INDEX ") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let (Some(index), Some("ON"), Some(table), Some("COLUMNS")) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let columns: String = parts.collect::<Vec<_>>().join(" ");
+        let columns = columns
+            .trim_end_matches(';')
+            .replace("UNIQUE", "")
+            .replace("SEARCH", "");
+
+        let known = fields.get(table).cloned().unwrap_or_default();
+        for col in columns.split(',') {
+            let col = col.trim();
+            if col.is_empty() {
+                continue;
+            }
+            // 支持 `a.b` 这类嵌套路径：只校验根字段。
+            let root = col.split('.').next().unwrap_or(col);
+            assert!(
+                known.iter().any(|f| f == root),
+                "索引 `{index}` 建在 `{table}.{root}` 上，但该表没有这个字段 —— \
+                 schema.sql 会整份导入失败，服务连库都建不起来"
+            );
+        }
+    }
+}

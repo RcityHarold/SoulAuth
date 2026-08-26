@@ -184,7 +184,7 @@ DEFINE FIELD token_hash ON password_reset_token TYPE string;        -- 指纹，
 DEFINE FIELD expires_at ON password_reset_token TYPE datetime;
 DEFINE FIELD used ON password_reset_token TYPE bool;
 DEFINE FIELD created_at ON password_reset_token TYPE datetime;
-DEFINE INDEX reset_token_idx ON password_reset_token COLUMNS token UNIQUE;
+DEFINE INDEX reset_token_idx ON password_reset_token COLUMNS token_hash UNIQUE;
 DEFINE INDEX reset_email_idx ON password_reset_token COLUMNS email;
 
 -- 多因素认证表

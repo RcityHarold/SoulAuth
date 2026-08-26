@@ -144,6 +144,15 @@ mail_count() {
 }
 
 # 最后一封信的解码正文
+# bearer 凭证的落库指纹。必须与 `src/utils/crypto.rs::hash_bearer` 逐字节一致：
+# SHA-256 → base64url-no-pad。库里存的是它，测试要按它查。
+bearer_hash() {
+    python3 -c "
+import base64, hashlib, sys
+print(base64.urlsafe_b64encode(hashlib.sha256(sys.argv[1].encode()).digest()).decode().rstrip('='))
+" "$1"
+}
+
 mail_body() {
     python3 -c "
 import email, sys
@@ -593,9 +602,12 @@ esac
 VTOKEN="$(printf '%s' "$VBODY" | grep -oE 'token=[A-Za-z0-9-]+' | head -1 | cut -d= -f2)"
 [ -n "$VTOKEN" ] && ok "验证链接里带 token" || bad "验证链接里带 token" "$VBODY"
 
-DBTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='mail@test.local'" |
+# 库里存的是指纹，不是令牌本身。这条断言因此反过来：
+# 明文一个字都不许留，而指纹必须与邮件里那枚对得上（对得上才说明链接可用）。
+DBHASH="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='mail@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r and r[0] else '')")"
-eq "$DBTOKEN" "$VTOKEN" "邮件里的 token 与库中一致（能对上才说明链接可用）"
+eq "$(bearer_hash "$VTOKEN")" "$DBHASH" "库里的指纹与邮件令牌对得上"
+[ "$DBHASH" != "$VTOKEN" ] && ok "验证令牌不以明文落库" || bad "验证令牌明文落库" "$DBHASH"
 
 eq 401 "$(req GET /api/auth/verify-email/deadbeef-not-a-real-token)" "伪造的验证 token 被拒"
 eq 200 "$(req GET "/api/auth/verify-email/${VTOKEN}")" "真实 token 完成验证"
@@ -1519,9 +1531,10 @@ TOTAL_SESS="$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VAL
 [ "$TOTAL_SESS" -ge 3 ] && ok "库中已有 ${TOTAL_SESS} 条会话" || bad "库中已有多条会话" "只有 ${TOTAL_SESS} 条"
 
 # 把当前令牌以外的全部改成早已过期
+# 库里存的是指纹，所以"当前这条之外"要按指纹排除。
 sql "UPDATE session SET expires_at = 1000 \
      WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SESS_UID}'))[0] \
-       AND token != '${SESS_TOKEN}'" > /dev/null
+       AND token_hash != '$(bearer_hash "$SESS_TOKEN")'" > /dev/null
 
 eq 200 "$(req GET /api/auth/sessions -H "Authorization: Bearer ${SESS_TOKEN}")" "GET /api/auth/sessions"
 LISTED="$(python3 -c "
@@ -1580,7 +1593,7 @@ VERIFY_EMAIL=true restart_app
 req POST /api/auth/register -H 'Content-Type: application/json' \
     -d '{"email":"resend@test.local","password":"CorrectHorse42!","username":"resenduser"}' > /dev/null
 sleep 2
-OLD_VTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='resend@test.local'" |
+OLD_VTOKEN="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
 [ -n "$OLD_VTOKEN" ] && ok "注册后签发了验证令牌" || bad "注册后签发了验证令牌" "未取到"
 
@@ -1597,11 +1610,15 @@ sleep 2
 eq "$((BEFORE_MAIL + 1))" "$(mail_count)" "确实又发出了一封"
 eq 'Verify your email address' "$(mail_header Subject)" "主题为邮箱验证"
 
-NEW_VTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='resend@test.local'" |
+# 比的是**指纹**换没换 —— 明文只存在于邮件里。
+NEW_VHASH="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
-[ -n "$NEW_VTOKEN" ] && [ "$NEW_VTOKEN" != "$OLD_VTOKEN" ] && ok "换发了一枚新的验证令牌" ||
-    bad "换发了一枚新的验证令牌" "旧=${OLD_VTOKEN:0:8} 新=${NEW_VTOKEN:0:8}"
+[ -n "$NEW_VHASH" ] && [ "$NEW_VHASH" != "$OLD_VTOKEN" ] && ok "换发了一枚新的验证令牌" ||
+    bad "换发了一枚新的验证令牌" "旧=${OLD_VTOKEN:0:8} 新=${NEW_VHASH:0:8}"
 
+# 明文只能从信里取。这本身就是一条有价值的断言：库被读走也拿不到可用链接。
+NEW_VTOKEN="$(mail_body | grep -oE 'token=[A-Za-z0-9-]+' | head -1 | cut -d= -f2)"
+eq "$(bearer_hash "$NEW_VTOKEN")" "$NEW_VHASH" "信里的新令牌与库中指纹对应"
 eq 200 "$(req GET "/api/auth/verify-email/${NEW_VTOKEN}")" "用新令牌可以完成验证"
 eq true "$(sql "SELECT VALUE verified FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(str(r[0]).lower() if r else '')")" \
@@ -1632,12 +1649,12 @@ NOW_TS="$(date +%s)"
 CLEAN_UID="$(user_id_of sesslist@test.local)"
 sql "CREATE session CONTENT {
        user_id: (SELECT VALUE subject_id FROM type::record('user','${CLEAN_UID}'))[0],
-       token: 'stale-token-for-cleanup-regression',
+       token_hash: 'stale-token-hash-for-cleanup-regression',
        expires_at: 1000, created_at: 1000,
        user_agent: 'itest', ip_address: '127.0.0.1'
      }" > /dev/null
 sql "CREATE password_reset_token CONTENT {
-       email: 'sesslist@test.local', token: 'stale-reset-token',
+       email: 'sesslist@test.local', token_hash: 'stale-reset-token-hash',
        expires_at: type::datetime('2020-01-01T00:00:00Z'),
        used: true, created_at: type::datetime('2020-01-01T00:00:00Z')
      }" > /dev/null
@@ -1956,7 +1973,16 @@ group "27. 运行期无 panic"
 # 这一组回答一个此前在 Runtime 上完全空白的问题：一个非人主体能不能不伪装成
 # 人类账户就完成认证。`ActorKind::AiActor` 一直只是个从未被构造的枚举变体。
 
+# 先复位，再取令牌。紧挨着的上一组是锁定测试，它会留下 account_lockout 记录
+# 与登录端点的限流计数 —— 不清掉的话这里 login_token 拿到空串，
+# 后面二十条断言全部级联成 401，看起来像 AIActor 路径坏了，其实是脏现场。
+# 这是本脚本各小节的既有惯例（见第 12/16/20 组）。
+sql "DELETE account_lockout" > /dev/null
+sql "DELETE rate_limit" > /dev/null 2>&1
+restart_app
+
 TOK_ADMIN_A="$(login_token admin@test.local "CorrectHorse42!")"
+TOK_NOPERM="$(login_token plain@test.local "CorrectHorse42!")"
 
 # Ed25519 密钥对（固定种子，可复现）。私钥只存在于这个脚本里 —— 与生产一致：
 # SoulAuth 永远不接触它。
