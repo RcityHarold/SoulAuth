@@ -36,6 +36,9 @@ rand = "0.8"
 # OIDC ID Token 的 RS256 签名密钥（生成 / 解析 PEM、导出 JWKS 的 n 与 e）
 rsa = "0.9"
 
+# AIActor 认证证明的验签。只用 verifying 一侧 —— SoulAuth 从不持有 Agent 私钥。
+ed25519-dalek = "2.2"
+
 # 序列化/反序列化
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

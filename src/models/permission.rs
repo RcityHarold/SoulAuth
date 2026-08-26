@@ -50,6 +50,10 @@ pub mod names {
     pub const AUDIT_READ: &str = auth_local!("audit.read");
     pub const OIDC_CLIENTS_READ: &str = auth_local!("oidc_clients.read");
     pub const OIDC_CLIENTS_WRITE: &str = auth_local!("oidc_clients.write");
+    /// 查看已注册的非人主体及其**公钥**。
+    pub const ACTORS_READ: &str = auth_local!("actors.read");
+    /// 注册非人主体、增删其验证密钥。拿到它等于能凭空造出一个可认证的主体。
+    pub const ACTORS_WRITE: &str = auth_local!("actors.write");
 
     /// 命名空间前缀本身，由宏推导而来（`auth_local!("")`），
     /// 不重复写一遍字面量。仅测试需要，故 `cfg(test)`。

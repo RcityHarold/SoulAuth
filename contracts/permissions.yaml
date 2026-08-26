@@ -36,6 +36,8 @@ permissions:
       - user_management::get_user_preferences_by_id
       - user_management::get_user_profile_by_id
       - user_management::list_users
+      - rbac::get_user_permissions
+      - rbac::get_user_roles
   - name: soulauth:users.write
     constant: USERS_WRITE
     description: 修改账号状态与会员等级
@@ -125,6 +127,24 @@ permissions:
 #
 # 注意 auditor 只持有 audit.read，因此读不了 security-metrics 与
 # system-health —— 那两个端点由 security.read 把关。
+  - name: soulauth:actors.read
+    constant: ACTORS_READ
+    description: 查看已注册的非人主体及其验证密钥（只含公钥）
+    status: supported
+    enforced_at:
+      - actors::get_actor
+      - actors::list_actors
+      - actors::list_credentials
+  - name: soulauth:actors.write
+    constant: ACTORS_WRITE
+    description: >-
+      注册非人主体、增删其验证密钥。拿到它等于能凭空造出一个可认证的主体，
+      因此默认只授予 admin。
+    status: supported
+    enforced_at:
+      - actors::add_credential
+      - actors::register
+      - actors::revoke_credential
 roles:
   - name: admin
     permissions:

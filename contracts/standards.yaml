@@ -216,3 +216,55 @@ client_authentication_methods:
 # 那会让「两处 secret 不一致」这种明显异常被静默接受。
 client_authentication_note: >-
   credentials must appear in exactly one location per request
+
+# ═══════════════════════════════════════════════════════════════
+# 非外部标准的本地机制
+#
+# 下面这一条**不是** RFC，也不打算成为 RFC。列在这里是因为它出现在认证表面上，
+# 而消费方最容易犯的错就是把它当成某个既有标准（"这是 mTLS 吗？是 DPoP 吗？
+# 是 RFC 7523 的 client assertion 吗？"）。三个都不是。
+# ═══════════════════════════════════════════════════════════════
+
+local_mechanisms:
+  - id: soulauth-ai-actor-auth/v1
+    title: AIActor Challenge-Response Authentication
+    role: authorization-server
+    kind: soulauth-native          # 非外部标准
+    implemented: true
+    supported: true
+    tested: true
+    conformant: n/a                # 没有可对照的外部规范
+    certified: false
+    scope: >-
+      非人主体（ActorKind = ai_actor）以 Ed25519 对服务端签发的一次性挑战
+      签名来完成认证。不经过 user / human_account，没有邮箱、口令、MFA。
+      换到的会话令牌 `subject_type` 为 `agent`。
+    frozen_surface:
+      credential_representation: "Ed25519 公钥，32 原始字节"
+      verification_key_format: "base64url-no-pad"
+      algorithm_allowlist: ["ed25519"]
+      signed_payload: "四行：域 / issuer / actor_id / nonce"
+      canonicalization: "固定顺序，\n 连接，结尾无换行，不使用 JSON"
+      encoding: "payload UTF-8；密钥、nonce、签名均 base64url-no-pad"
+      domain_separation: "soulauth-ai-actor-auth/v1（首行常量，含版本）"
+      challenge: "服务端签发，32 字节 CSPRNG，唯一索引"
+      timestamp: "服务端 issued_at；客户端不提交时间"
+      expiry: "120 秒"
+      replay_semantics: "nonce 一次性；验签**之前**原子消费"
+      actor_binding: "nonce 绑定 actor；actor_id 进入被签名内容"
+      error_contract: "统一 AuthError（见 openapi.yaml 的 Error）"
+    not_this:
+      - "不是 RFC 7523（JWT client assertion）—— 证明不是 JWT"
+      - "不是 RFC 8705（mTLS）—— 不涉及传输层客户端证书"
+      - "不是 OAuth 2.0 client credentials grant —— 不经过 /api/oidc/token"
+      - "不是 HTTP Message Signatures（RFC 9421）—— 不签名 HTTP 请求本身"
+    limits:
+      - >-
+        Agent 会话**只能**访问 /api/actors/me。RBAC 仍建立在 user 行之上
+        （user_role.user_id），尚未扩展到 ActorIdentity。人类端点会以
+        403 forbidden 明确拒绝 Agent 令牌，而不是让它悄悄通过。
+      - "AIActor 不出现在 OIDC 流程里：/authorize 认的是浏览器会话。"
+    evidence: >-
+      src/models/ai_actor.rs（canonicalization 单测）+
+      src/services/ai_actor.rs（重放 / 跨部署 / 换 actor / 换密钥四类否定单测）+
+      tests/conformance.rs::a6 · ::j8 + tests/integration.sh（第 30 组）

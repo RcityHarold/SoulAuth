@@ -1951,6 +1951,185 @@ group "27. 运行期无 panic"
 
 
 
+# ═════════ 30 AIActor 原生认证（挑战—应答） ═════════
+#
+# 这一组回答一个此前在 Runtime 上完全空白的问题：一个非人主体能不能不伪装成
+# 人类账户就完成认证。`ActorKind::AiActor` 一直只是个从未被构造的枚举变体。
+
+TOK_ADMIN_A="$(login_token admin@test.local "CorrectHorse42!")"
+
+# Ed25519 密钥对（固定种子，可复现）。私钥只存在于这个脚本里 —— 与生产一致：
+# SoulAuth 永远不接触它。
+python3 - > "$WORK/agentkey.json" <<'PYKEY'
+import base64, hashlib, json, sys
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+except Exception:
+    json.dump({"skip": 1}, sys.stdout); sys.exit()
+seed = hashlib.sha256(b"soulauth-integration-agent").digest()
+sk = Ed25519PrivateKey.from_private_bytes(seed)
+pk = sk.public_key().public_bytes(
+    encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+json.dump({"public_key": b64(pk)}, sys.stdout)
+PYKEY
+
+# 签名工具：把 payload 原样喂给私钥。
+sign_payload() {
+    python3 - "$1" <<'PYSIG'
+import base64, hashlib, sys
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+seed = hashlib.sha256(b"soulauth-integration-agent").digest()
+sk = Ed25519PrivateKey.from_private_bytes(seed)
+print(base64.urlsafe_b64encode(sk.sign(sys.argv[1].encode())).decode().rstrip("="))
+PYSIG
+}
+
+if python3 -c "import json,sys; sys.exit(0 if 'skip' in json.load(open('$WORK/agentkey.json')) else 1)"; then
+    printf '  %s AIActor 组已跳过（缺 python cryptography）\n' "$(c_dim ○)"
+else
+
+AGENT_PK="$(python3 -c "import json;print(json.load(open('$WORK/agentkey.json'))['public_key'])")"
+
+# ── 注册 ──
+eq 403 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_NOPERM}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"it-agent\"}")" \
+    "无 actors.write 不能注册非人主体"
+
+eq 200 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"it-agent\"}")" \
+    "管理员可注册 AIActor"
+
+AGENT_ID="$(python3 -c "
+import json
+d=json.load(open('$WORK/body'))
+print(d['actor']['id'])" 2>/dev/null)"
+
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if d['actor']['actor_kind']=='ai_actor' else 1)" \
+  && ok "新主体的 actor_kind 是 ai_actor" || bad "actor_kind" "$(body|head -c 120)"
+
+# 最要紧的存储层不变式：这个主体名下**没有** human_account。
+eq 0 "$(sql_count "SELECT count() FROM human_account WHERE actor_identity_id = ${AGENT_ID} GROUP ALL")" \
+    "AIActor 名下没有 human_account"
+
+# 同一枚公钥不得注册两次 —— 两个 Actor 共用一把钥匙会让审计归因失效。
+eq 400 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"dup\"}")" \
+    "同一公钥不得重复注册"
+
+# 畸形公钥在注册时就被拒，而不是留到第一次认证才以"签名不通过"暴露。
+eq 400 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' -d '{"public_key":"not-base64!!","label":"x"}')" \
+    "畸形公钥在注册时被拒"
+
+# ── 认证 ──
+eq 200 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}")" "可领取挑战（公开端点）"
+NONCE="$(jget nonce)"
+PAYLOAD="$(jget payload)"
+
+# 服务端给出的 payload 必须与按规范拼出来的逐字节一致，否则每个 SDK 都得靠猜。
+python3 - "$APP" "$AGENT_ID" "$NONCE" "$PAYLOAD" <<'PYCHK'
+import sys
+app, actor, nonce, payload = sys.argv[1:5]
+expected = "soulauth-ai-actor-auth/v1\n" + app.rstrip("/") + "\n" + actor + "\n" + nonce
+sys.exit(0 if expected == payload else 1)
+PYCHK
+[ $? -eq 0 ] && ok "被签名内容与规范逐字节一致" || bad "canonical payload" "$PAYLOAD"
+
+SIG="$(sign_payload "$PAYLOAD")"
+eq 200 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${NONCE}\",\"algorithm\":\"ed25519\",\"signature\":\"${SIG}\"}")" \
+    "签名正确即可换到会话"
+AGENT_TOK="$(jget token)"
+
+# 挑战一次性。
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${NONCE}\",\"algorithm\":\"ed25519\",\"signature\":\"${SIG}\"}")" \
+    "重放同一 nonce 被拒"
+
+# 算法不接受协商。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N2="$(jget nonce)"; P2="$(jget payload)"; S2="$(sign_payload "$P2")"
+eq 400 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N2}\",\"algorithm\":\"rsa\",\"signature\":\"${S2}\"}")" \
+    "算法白名单外的取值被拒"
+
+# 错误签名被拒。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N3="$(jget nonce)"
+BAD_SIG="$(sign_payload "wrong-payload")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N3}\",\"algorithm\":\"ed25519\",\"signature\":\"${BAD_SIG}\"}")" \
+    "错误签名被拒"
+
+# 一次失败也会烧掉挑战：允许对同一枚 nonce 反复试签名等于把它变成爆破靶子。
+P3_RETRY="soulauth-ai-actor-auth/v1
+${APP}
+${AGENT_ID}
+${N3}"
+S3_RETRY="$(sign_payload "$P3_RETRY")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N3}\",\"algorithm\":\"ed25519\",\"signature\":\"${S3_RETRY}\"}")" \
+    "失败过的挑战不能再用正确签名补救"
+
+# ── 会话边界 ──
+eq 200 "$(req GET /api/actors/me -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 可以自省 /api/actors/me"
+
+# 整组里最要紧的一条：Agent 令牌不得在人类端点上通过。
+eq 403 "$(req GET /api/auth/me -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 令牌在人类端点上被明确拒绝"
+eq 403 "$(req GET /api/me/profile -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 令牌拿不到人类档案"
+eq 403 "$(req GET /api/actors/me -H "Authorization: Bearer ${TOK_ADMIN_A}")" \
+    "人类令牌被 /api/actors/me 拒绝"
+
+# ── 密钥轮换与吊销 ──
+req GET "/api/actors/${AGENT_ID}/credentials" -H "Authorization: Bearer ${TOK_ADMIN_A}" > /dev/null
+CRED_ID="$(python3 -c "import json;print(json.load(open('$WORK/body'))[0]['id'])" 2>/dev/null)"
+
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+leaked = [k for c in d for k in c if 'private' in k or 'secret' in k]
+sys.exit(0 if not leaked else 1)" \
+  && ok "凭证列表不含任何私有材料" || bad "凭证列表泄露" "$(body|head -c 120)"
+
+eq 200 "$(req DELETE "/api/actors/${AGENT_ID}/credentials/${CRED_ID}" \
+    -H "Authorization: Bearer ${TOK_ADMIN_A}")" "可吊销密钥"
+
+# 吊销之后同一把钥匙再也认证不了。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N4="$(jget nonce)"; P4="$(jget payload)"; S4="$(sign_payload "$P4")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N4}\",\"algorithm\":\"ed25519\",\"signature\":\"${S4}\"}")" \
+    "已吊销的密钥无法再认证"
+
+# 吊销是改状态而不是删记录 —— 否则历史审计追不回"这次用的是哪把钥匙"。
+eq 1 "$(sql_count "SELECT count() FROM ai_actor_credential WHERE status = 'revoked' GROUP ALL")" \
+    "吊销保留记录，只改状态"
+
+# 拿人类的 actor_id 走这条免口令路径必须失败，否则它就是人类认证的后门。
+HUMAN_ACTOR="$(sql "SELECT VALUE type::string(id) FROM actor_identity WHERE actor_kind = 'human' AND status = 'active' LIMIT 1" | grep -oP 'actor_identity:[A-Za-z0-9_-]+' | head -1)"
+if [ -n "$HUMAN_ACTOR" ]; then
+    eq 401 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
+        -d "{\"actor_id\":\"${HUMAN_ACTOR}\"}")" \
+        "人类主体不能走 AIActor 认证路径"
+fi
+
+fi
+
 PANICS="$(grep -c 'panicked' "$WORK/app.log" 2>/dev/null)"; PANICS="${PANICS:-0}"
 eq 0 "$PANICS" "服务日志中无 panic"
 

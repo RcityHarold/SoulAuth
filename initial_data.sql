@@ -353,3 +353,48 @@ UPSERT role_permission:admin__oidc_clients_write CONTENT {
     granted_at: 0,
     granted_by: actor_identity:system
 };
+
+-- ===============================
+-- AIActor 管理权限（新增）
+-- ===============================
+-- 注册一个非人主体、给它挂/吊销密钥，都是特权操作：拿到 actors.write 就等于
+-- 能凭空造出一个可认证的主体。默认只授予 admin。
+--
+-- 认证本身（挑战 / 应答两个端点）不需要任何权限 —— 那是 Agent 自己用私钥
+-- 证明身份，和人类走 /api/auth/login 一样是公开入口。
+
+UPSERT permission:actors_read CONTENT {
+    name: "soulauth:actors.read",
+    display_name: "查看 AIActor",
+    description: "查看已注册的非人主体及其验证密钥（只含公钥）",
+    resource: "actors",
+    action: "read",
+    is_system: true,
+    created_at: 0,
+    updated_at: 0
+};
+
+UPSERT permission:actors_write CONTENT {
+    name: "soulauth:actors.write",
+    display_name: "管理 AIActor",
+    description: "注册非人主体、增删其验证密钥、停用主体",
+    resource: "actors",
+    action: "write",
+    is_system: true,
+    created_at: 0,
+    updated_at: 0
+};
+
+UPSERT role_permission:admin__actors_read CONTENT {
+    role_id: role:admin,
+    permission_id: permission:actors_read,
+    granted_at: 0,
+    granted_by: actor_identity:system
+};
+
+UPSERT role_permission:admin__actors_write CONTENT {
+    role_id: role:admin,
+    permission_id: permission:actors_write,
+    granted_at: 0,
+    granted_by: actor_identity:system
+};

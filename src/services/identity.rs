@@ -15,15 +15,14 @@
 //! 不碰 Credential（Stage 2 后半段收口），不签发会话，不做鉴权判断。
 //! 它只回答「这个主体存不存在、是谁」。
 //!
-//! # 为什么没有 `create_ai_actor` / `find_by_subject`
+//! # 为什么没有 `find_by_subject`
 //!
-//! 前者要等 Stage 2 后半段的 AIActor 认证路径，后者要等 Stage 3 把 OIDC
-//! `sub` 切到 `subject_key`。两个都能现在就写出来，但那样它们会以 dead code
-//! 的形式躺在这里，而本仓库靠 clippy 顶住 dead code —— 一旦为它们开
-//! `allow`，这道闸门对整个模块就失效了。
+//! 它要等 OIDC `sub` 从 `user` 行键切到 `subject_key` —— 那是一次会让全部
+//! 在途令牌失效的迁移，需要单独规划。现在写出来它只会以 dead code 的形式
+//! 躺在这里，而本仓库靠 clippy 顶住 dead code：一旦为它开 `allow`，
+//! 这道闸门对整个模块就失效了。
 //!
-//! 用到的时候再加。`ActorIdentity::new_local` 与 `find_record_by_field`
-//! 已经在这里，届时各是三五行的事。
+//! `create_ai_actor` 已经有了 —— AIActor 认证路径落地时补上的。
 
 use std::sync::Arc;
 
@@ -182,6 +181,37 @@ impl IdentityService {
             .ok_or_else(|| AuthError::DatabaseError("actor_identity 没有 id".into()))?;
         let binding = IdentityBinding::new_federated(actor_id, provider, provider_subject);
         self.db.create_record("identity_binding", &binding).await
+    }
+
+    /// 建立一个 AIActor 身份。
+    ///
+    /// 与 [`Self::create_human`] 的差别就是这个方法的全部意义：**只落一条记录**。
+    /// 没有 `human_account`，因为一个 Agent 不需要邮箱、用户名或口令
+    /// （GA-01 §4 / `human_account` 模块头）。在此之前想给 Agent 一个身份，
+    /// 唯一办法是去注册一个假的人类账户 —— 那会让审计里的「谁做的」
+    /// 从第一天起就是错的。
+    pub async fn create_ai_actor(&self) -> Result<ActorIdentity> {
+        let actor = ActorIdentity::new_local(Self::new_subject_key(), ActorKind::AiActor);
+        self.db.create_record("actor_identity", &actor).await
+    }
+
+    /// 按 record key 取身份根。
+    pub async fn find_actor_by_id(&self, actor_key: &str) -> Result<Option<ActorIdentity>> {
+        let address = format!("actor_identity:{actor_key}");
+        self.db
+            .find_record_by_field::<ActorIdentity>("actor_identity", "id", &address)
+            .await
+    }
+
+    /// 列出全部 AIActor 身份。
+    pub async fn list_ai_actors(&self) -> Result<Vec<ActorIdentity>> {
+        self.db
+            .query_take0_vec(
+                "identity_list_ai_actors",
+                "SELECT * FROM actor_identity WHERE actor_kind = $kind ORDER BY created_at DESC",
+                serde_json::json!({ "kind": ActorKind::AiActor.as_str() }),
+            )
+            .await
     }
 
     /// 修改身份状态。

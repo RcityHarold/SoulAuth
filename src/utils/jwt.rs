@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::{
     error::{AuthError, Result},
-    models::{subject::SubjectType, user::User},
+    models::{actor_identity::ActorIdentity, subject::SubjectType, user::User},
     services::{auth_cache::AuthCache, database::Database},
 };
 use axum::{
@@ -253,6 +253,18 @@ where
         }
 
         let claims = Claims::from_request_parts(parts, state).await?;
+
+        // Agent 令牌背后没有 `user` 行，也**不应该**有。
+        //
+        // 明确挡在这里，而不是让它掉进 `load_user_from_claims` 去 —— 那里会
+        // 以「用户不存在」的形式失败，语义完全是错的，而且一旦将来某个
+        // 查询路径碰巧能解析到一行，Agent 就悄悄拿到了人类端点的访问权。
+        if matches!(claims.subject_type, Some(SubjectType::Agent)) {
+            return Err(AuthError::Forbidden(
+                "This endpoint is for human accounts; AI actor sessions cannot access it".into(),
+            ));
+        }
+
         let db = db_from_parts(parts)?;
         let user = load_user_from_claims(&db, &claims).await?;
 
@@ -266,6 +278,62 @@ where
         }
 
         Ok(AuthedUser(user))
+    }
+}
+
+/// 已认证的 **AIActor**。
+///
+/// 与 [`AuthedUser`] 是两个提取器而不是一个枚举：人类端点写 `AuthedUser`、
+/// Agent 端点写 `AuthedActor`，「这个端点给谁用」在函数签名上就看得见，
+/// 不需要在函数体里再判一次主体类型（那种判断迟早会有人忘记写）。
+pub struct AuthedActor(pub ActorIdentity);
+
+impl AuthedActor {
+    pub fn actor(&self) -> &ActorIdentity {
+        &self.0
+    }
+
+    /// 不带表名前缀的 record key。
+    pub fn key(&self) -> Result<String> {
+        let rid = self
+            .0
+            .id
+            .as_ref()
+            .ok_or_else(|| AuthError::DatabaseError("actor_identity 没有 id".into()))?;
+        Ok(crate::utils::record_id::record_id_key_to_string(rid))
+    }
+}
+
+#[async_trait]
+impl<S> FromRequestParts<S> for AuthedActor
+where
+    S: Send + Sync,
+{
+    type Rejection = AuthError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self> {
+        let claims = Claims::from_request_parts(parts, state).await?;
+
+        // 只认 Agent 令牌。人类令牌走到这里是调用错了端点，不是权限不足。
+        if !matches!(claims.subject_type, Some(SubjectType::Agent)) {
+            return Err(AuthError::Forbidden(
+                "This endpoint is for AI actor sessions".into(),
+            ));
+        }
+
+        let db = db_from_parts(parts)?;
+        let address = format!("actor_identity:{}", claims.sub);
+        let actor = db
+            .find_record_by_field::<ActorIdentity>("actor_identity", "id", &address)
+            .await?
+            .ok_or(AuthError::InvalidToken)?;
+
+        // 会话还在不等于身份还能用：停用 / 退役之后在途令牌必须立刻失效。
+        if !actor.can_authenticate() {
+            return Err(AuthError::AccountSuspended);
+        }
+
+        Ok(AuthedActor(actor))
     }
 }
 

@@ -266,16 +266,75 @@ fn a5_ai_actor_is_first_class() {
 
 /// A6 · AIActor 不得被迫伪装成 Human Account
 ///
-/// 存在一条不需要 email / username / password 的认证路径。
+/// 法源: 06 §4 —— 非人主体拥有独立 ActorIdentity，不必伪造 Email、Username
+/// 或口令。这在 Runtime 上意味着一条**完整可走通**的认证路径，而不是一个
+/// 从未被构造的枚举变体。
+///
+/// 这条断言不看文件名，看三件事：能不能建、能不能认证、路上碰没碰 human。
 #[test]
-#[ignore = "V2 Stage 2 —— 无 AIActor 认证路径，建非人主体只能去注册一个 user"]
 fn a6_ai_actor_needs_no_human_account() {
-    let has_path = sources()
-        .iter()
-        .any(|(f, _)| f.contains("ai_actor_auth") || f.contains("actor_assertion"));
+    let all = sources();
+    let joined: String = all.iter().map(|(_, b)| b.as_str()).collect();
+
+    // ① `AiActor` 必须在**生产代码**里被真正构造，而不是只活在单测里。
+    //    这正是本条曾经失败的原因：枚举变体在，构造点一个也没有。
+    let constructed_in_production = all.iter().any(|(f, body)| {
+        if f.contains("test") {
+            return false;
+        }
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        production.contains("ActorKind::AiActor") && !f.ends_with("actor_identity.rs")
+    });
     assert!(
-        has_path,
-        "缺少 AIActor 原生认证路径（RFC 7523 JWT Bearer Assertion）"
+        constructed_in_production,
+        "`ActorKind::AiActor` 只是个枚举变体 —— 没有任何生产路径会构造它，\
+         等于建一个非人主体只能去注册一个假的人类账户"
+    );
+
+    // ② 存在认证入口。
+    assert!(
+        joined.contains("fn authenticate")
+            && joined.contains("AiActorService")
+            && joined.contains("fn issue_challenge"),
+        "缺少 AIActor 的挑战—应答认证入口"
+    );
+
+    // ③ 这条路径不得经过任何人类账户结构。
+    //
+    // 断言的是**代码**，不是散文：模块注释里写「本路径不碰 human_account」
+    // 是对的，不该因此变红。所以先剥掉注释行。
+    let svc = read("src/services/ai_actor.rs");
+    let svc_code: String = svc
+        .lines()
+        .map(|l| match l.find("//") {
+            Some(i) => &l[..i],
+            None => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    for forbidden in [
+        "human_account",
+        "HumanAccount",
+        "password",
+        "email",
+        "username",
+    ] {
+        assert!(
+            !svc_code.contains(forbidden),
+            "AIActor 认证路径的代码里出现了 `{forbidden}` —— \
+             它必须完全不依赖人类账户结构"
+        );
+    }
+
+    // ④ Agent 令牌不得被人类端点接受。
+    let jwt = read("src/utils/jwt.rs");
+    assert!(
+        jwt.contains("SubjectType::Agent"),
+        "AuthedUser / AuthedActor 必须按 subject_type 区分主体，\
+         否则 Agent 令牌会悄悄拿到人类端点的访问权"
     );
 }
 
@@ -1899,5 +1958,143 @@ fn j7_no_duplicated_path_segments() {
                 pair[0]
             );
         }
+    }
+}
+
+/// J8 · AIActor 认证的 13 项冻结面
+///
+/// 法源: V3《24｜Authentication & Sessions》§2 —— 在这 13 项完成 Machine
+/// Contract Alignment 之前，signed proof **不得**被描述为完整的 Public
+/// Authentication Method。
+///
+/// 这条测试就是那份 Alignment：每一项都要能在 Runtime 里指出落点。少一项，
+/// 文档里那句「支持 AIActor 认证」就是过度声称。
+#[test]
+fn j8_ai_actor_auth_surface_is_frozen() {
+    let model = read("src/models/ai_actor.rs");
+    let svc = read("src/services/ai_actor.rs");
+    let registry = read("contracts/standards.yaml");
+
+    // ① credential representation / ② verification key format
+    assert!(
+        model.contains("ED25519_PUBLIC_KEY_LEN: usize = 32"),
+        "公钥长度未冻结"
+    );
+    assert!(
+        svc.contains("URL_SAFE_NO_PAD"),
+        "密钥/签名编码未冻结为 base64url-no-pad"
+    );
+
+    // ③ algorithm allowlist —— 必须是**单元素**。
+    //    可协商的算法列表是签名协议里最经典的一类漏洞。
+    assert!(
+        model.contains("ALLOWED_ALGORITHMS: [&str; 1]"),
+        "算法白名单必须是单元素数组 —— 一旦可协商就会被降级"
+    );
+
+    // ④ signed payload / ⑤ canonicalization —— 只能有一处构造。
+    assert!(
+        model.contains("fn canonical_payload"),
+        "缺少唯一的被签名内容构造函数"
+    );
+    let builders =
+        svc.matches("canonical_payload(").count() + model.matches("fn canonical_payload").count();
+    assert!(
+        builders >= 2,
+        "服务层必须调用同一个 canonical_payload，不得自己拼被签名内容"
+    );
+    assert!(
+        !svc.contains("serde_json::to_string(&payload") && !model.contains("serde_json::to_vec"),
+        "被签名内容不得来自 JSON 序列化 —— JSON 没有唯一字节表示"
+    );
+
+    // ⑦ domain separation —— 带版本号，否则改了 payload 结构新旧签名互通。
+    assert!(
+        model.contains("AI_ACTOR_AUTH_DOMAIN") && model.contains("soulauth-ai-actor-auth/v"),
+        "缺少带版本的域分隔常量"
+    );
+
+    // ⑧ challenge —— 服务端签发的 CSPRNG 随机数。
+    assert!(
+        svc.contains("fill_bytes") && svc.contains("fn issue_challenge"),
+        "挑战必须由服务端用 CSPRNG 签发"
+    );
+    assert!(
+        field_exists("ai_actor_challenge", "nonce"),
+        "缺少 ai_actor_challenge.nonce"
+    );
+
+    // ⑨ timestamp / ⑩ expiry
+    for f in ["issued_at", "expires_at"] {
+        assert!(
+            field_exists("ai_actor_challenge", f),
+            "挑战缺少 `{f}` —— 时间戳与有效期都必须落库并由服务端决定"
+        );
+    }
+    assert!(
+        model.contains("CHALLENGE_TTL_SECONDS"),
+        "挑战有效期未冻结为常量"
+    );
+
+    // ⑪ replay semantics —— 一次性，且必须是**条件更新**而不是先读后写。
+    assert!(
+        field_exists("ai_actor_challenge", "consumed"),
+        "挑战缺少 consumed 标记"
+    );
+    assert!(
+        svc.contains("consumed = false"),
+        "消费挑战必须用条件更新（WHERE consumed = false），先读后判有并发窗口"
+    );
+    // 消费必须发生在验签之前，否则失败的尝试不烧挑战，nonce 就成了爆破靶子。
+    let consume_at = svc
+        .find("ai_actor_consume_challenge")
+        .expect("找不到消费挑战的查询");
+    let verify_at = svc.find("fn verify_with").map(|_| {
+        svc.find("Self::verify_with(&credential.public_key")
+            .expect("找不到验签调用点")
+    });
+    if let Some(verify_at) = verify_at {
+        assert!(
+            consume_at < verify_at,
+            "挑战必须在验签**之前**被消费 —— 反过来会留下并发窗口"
+        );
+    }
+
+    // ⑫ actor binding —— nonce 绑定 actor，且 actor 进入被签名内容。
+    assert!(
+        field_exists("ai_actor_challenge", "actor_identity_id"),
+        "挑战必须绑定到具体 actor"
+    );
+
+    // ⑬ error contract —— 走统一 AuthError，不自造形状。
+    assert!(
+        !svc.contains("StatusCode::"),
+        "AIActor 服务不得自己产出 HTTP 状态码，错误一律走 AuthError"
+    );
+
+    // 凭证不得与人类凭证混在同一张表 —— 那会让「AIActor 无需 HumanAccount」
+    // 在存储层重新失效。
+    assert!(
+        field_exists("ai_actor_credential", "public_key"),
+        "缺少 ai_actor_credential.public_key"
+    );
+    for secret in ["password_hash", "secret", "private_key"] {
+        assert!(
+            !field_exists("ai_actor_credential", secret),
+            "ai_actor_credential 不得存放 `{secret}` —— SoulAuth 只持有公钥"
+        );
+    }
+
+    // 注册表必须把「这不是哪些标准」写明白：消费方最容易把它当成
+    // RFC 7523 / mTLS / client credentials。
+    assert!(
+        registry.contains("soulauth-ai-actor-auth/v1") && registry.contains("not_this"),
+        "standards.yaml 必须声明该机制**不是**哪些既有标准"
+    );
+    for rfc in ["7523", "8705"] {
+        assert!(
+            registry.contains(&format!("RFC {rfc}")),
+            "standards.yaml 的 not_this 里缺少对 RFC {rfc} 的澄清"
+        );
     }
 }

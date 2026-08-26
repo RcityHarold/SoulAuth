@@ -1,3 +1,4 @@
+pub mod actors;
 pub mod audit;
 pub mod auth;
 pub mod bootstrap;

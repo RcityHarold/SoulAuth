@@ -1,4 +1,5 @@
 pub mod account_lockout;
+pub mod ai_actor;
 pub mod audit;
 pub mod audit_logger;
 pub mod auth;

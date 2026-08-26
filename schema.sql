@@ -397,3 +397,55 @@ DEFINE FIELD IF NOT EXISTS endpoint ON rate_limit TYPE option<string>;
 DEFINE FIELD IF NOT EXISTS blocked_until ON rate_limit TYPE option<datetime>;
 DEFINE FIELD IF NOT EXISTS updated_at ON rate_limit TYPE option<datetime>;
 DEFINE INDEX IF NOT EXISTS rate_limit_updated ON rate_limit FIELDS updated_at;
+
+-- ═══════════════════ AIActor 凭证与挑战 ═══════════════════
+--
+-- 非人主体的认证路径。它**不经过** `user` 与 `human_account`：一个 Agent
+-- 拥有独立的 `actor_identity`，凭证是一枚 Ed25519 公钥，认证是对服务端签发的
+-- 一次性挑战做签名。没有邮箱，没有口令，没有 MFA。
+
+DEFINE TABLE ai_actor_credential SCHEMAFULL;
+
+DEFINE FIELD actor_identity_id ON ai_actor_credential TYPE record<actor_identity>;
+
+-- base64url-no-pad 的 32 字节 Ed25519 公钥。
+--
+-- 这里存的是**公钥**，与库里其它密材性质不同：泄露它不产生任何冒充能力，
+-- 因为私钥从未进入 SoulAuth。
+DEFINE FIELD public_key ON ai_actor_credential TYPE string;
+
+-- 取值受代码侧 ALLOWED_ALGORITHMS 约束（当前只有 `ed25519`）。
+DEFINE FIELD algorithm ON ai_actor_credential TYPE string;
+
+-- 运维标签，不参与认证判定。
+DEFINE FIELD label ON ai_actor_credential TYPE string;
+
+-- `active` | `revoked`。未知取值在代码侧 fail-closed 成 revoked。
+DEFINE FIELD status ON ai_actor_credential TYPE string;
+DEFINE FIELD created_at ON ai_actor_credential TYPE number;
+DEFINE FIELD revoked_at ON ai_actor_credential TYPE option<number>;
+DEFINE FIELD last_used_at ON ai_actor_credential TYPE option<number>;
+
+-- 同一枚公钥不得注册两次：否则两个 Actor 共用一把钥匙，归因就失效了。
+DEFINE INDEX ai_actor_credential_key_idx ON ai_actor_credential COLUMNS public_key UNIQUE;
+DEFINE INDEX ai_actor_credential_actor_idx ON ai_actor_credential COLUMNS actor_identity_id;
+
+DEFINE TABLE ai_actor_challenge SCHEMAFULL;
+
+DEFINE FIELD actor_identity_id ON ai_actor_challenge TYPE record<actor_identity>;
+
+-- base64url-no-pad 的 32 字节随机数。
+--
+-- 这里**不存指纹**，与 session / refresh token 的处理相反 —— 挑战不是凭证：
+-- 它公开发给调用方，本身不授予任何权限，能证明身份的是对它的签名。
+DEFINE FIELD nonce ON ai_actor_challenge TYPE string;
+
+DEFINE FIELD issued_at ON ai_actor_challenge TYPE number;
+DEFINE FIELD expires_at ON ai_actor_challenge TYPE number;
+
+-- 一次性。消费走条件更新（`WHERE consumed = false RETURN VALUE`），
+-- 与授权码、刷新令牌是同一套抗并发写法。
+DEFINE FIELD consumed ON ai_actor_challenge TYPE bool DEFAULT false;
+
+DEFINE INDEX ai_actor_challenge_nonce_idx ON ai_actor_challenge COLUMNS nonce UNIQUE;
+DEFINE INDEX ai_actor_challenge_expiry_idx ON ai_actor_challenge COLUMNS expires_at;

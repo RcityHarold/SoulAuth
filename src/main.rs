@@ -242,6 +242,13 @@ async fn main() -> anyhow::Result<()> {
         auth_cache.clone(),
     )?);
 
+    // AIActor 认证服务。它只依赖库与配置 —— 不碰 AuthService，因为非人主体的
+    // 认证路径与人类那条完全不共用（无口令、无 MFA、无账号锁定）。
+    let ai_actor_service = Arc::new(services::ai_actor::AiActorService::new(
+        shared_db.clone(),
+        config.clone(),
+    ));
+
     // 后台清理任务
     let cleanup_limiter = rate_limiter.clone();
     let cleanup_lockout = lockout_service.clone();
@@ -293,6 +300,9 @@ async fn main() -> anyhow::Result<()> {
         // 因此不需要额外的开关或权限守卫。
         .nest("/api/bootstrap", routes::bootstrap::router())
         .nest("/api/rbac", routes::rbac::router())
+        // 非人主体。`/challenge` 与 `/authenticate` 是公开的，与人类的
+        // `/api/auth/login` 同级；其余端点要 `soulauth:actors.*` 权限。
+        .nest("/api/actors", routes::actors::router())
         // 自助与管理分开挂载：`/api/me/*` 是「我自己的」，`/api/users/*` 是
         // 「按 id 管别人的」。合在一个前缀下才有了之前的 `/api/users/users/...`。
         .nest("/api/me", routes::user_management::self_service_router())
@@ -322,6 +332,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(config.clone()))
         .layer(Extension(oidc_service))
         .layer(Extension(oidc_client_service))
+        .layer(Extension(ai_actor_service))
         .layer(build_cors_layer(&config));
 
     let addr: SocketAddr = config
