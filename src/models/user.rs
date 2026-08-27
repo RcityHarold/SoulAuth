@@ -26,7 +26,8 @@ pub struct User {
     #[surreal(rename = "verified")]
     #[serde(rename = "verified")]
     pub is_email_verified: bool,
-    pub verification_token: Option<String>,
+    /// 邮箱验证令牌的 SHA-256 指纹。
+    pub verification_token_hash: Option<String>,
     /// 验证令牌的过期时间（Unix 秒）。以前的验证令牌永不过期。
     #[serde(default)]
     pub verification_token_expires_at: Option<i64>,
@@ -251,8 +252,8 @@ impl From<User> for UserResponse {
     fn from(user: User) -> Self {
         let account_status = AccountStatus::parse(&user.account_status);
 
-        let created_at = DateTime::<Utc>::from_timestamp(user.created_at, 0)
-            .unwrap_or_else(Utc::now);
+        let created_at =
+            DateTime::<Utc>::from_timestamp(user.created_at, 0).unwrap_or_else(Utc::now);
         let last_login_at = user
             .last_login_at
             .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0));
@@ -278,7 +279,6 @@ impl From<User> for UserResponse {
         }
     }
 }
-
 
 #[cfg(test)]
 mod account_status_tests {
@@ -322,7 +322,7 @@ mod account_status_tests {
                 created_at: 0,
                 updated_at: 0,
                 is_email_verified: true,
-                verification_token: None,
+                verification_token_hash: None,
                 verification_token_expires_at: None,
                 account_status: status.to_string(),
                 membership_level: "FREE".to_string(),
@@ -364,7 +364,12 @@ mod account_status_tests {
             AccountStatus::Suspended,
             AccountStatus::Deleted,
         ] {
-            assert_eq!(AccountStatus::parse(v.as_str()), v, "{} did not round-trip", v.as_str());
+            assert_eq!(
+                AccountStatus::parse(v.as_str()),
+                v,
+                "{} did not round-trip",
+                v.as_str()
+            );
         }
     }
 }

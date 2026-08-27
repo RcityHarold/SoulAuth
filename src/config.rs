@@ -59,6 +59,15 @@ pub struct Config {
     /// 只有当服务确实跑在受控反向代理之后时才应打开：否则客户端可以任意伪造
     /// 来源 IP，从而绕过限流与 IP 维度的账号锁定。
     pub trust_proxy_headers: bool,
+    /// 首个管理员的引导令牌。
+    ///
+    /// 不设置 → 每次启动随机生成一枚并打印到日志（单实例开发的默认路径）。
+    /// 设为具体值 → 用它（多副本或自动化部署需要各副本一致时）。
+    /// 设为空串 → 完全关闭这条路径。
+    ///
+    /// 无论取哪种，系统里一旦存在管理员，端点就永久拒绝服务 —— 它是一次性的
+    /// 开机门，不是可反复调用的提权入口。
+    pub bootstrap_token: Option<String>,
     /// CORS 白名单。为空表示只允许 `app_url` 自身。
     pub cors_allowed_origins: Vec<String>,
     /// OIDC ID Token 的 RSA 私钥（PEM，PKCS#8 或 PKCS#1）。
@@ -109,6 +118,15 @@ fn optional(name: &str) -> Option<String> {
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+/// 同 [`optional`]，但**保留空串**。
+///
+/// 绝大多数配置项把「设成空串」和「没设置」当同一回事，所以 `optional` 直接
+/// 把空串滤掉了。引导令牌不行：那里空串表示「关闭这条路径」，与「没设置」
+/// （随机生成一枚）语义相反，滤掉就把显式关闭变成了显式开启。
+fn optional_raw(name: &str) -> Option<String> {
+    env::var(name).ok().map(|value| value.trim().to_string())
 }
 
 fn parse_with_default<T: std::str::FromStr>(
@@ -243,6 +261,9 @@ impl Config {
             app_url,
             email_verification_enabled: parse_bool("EMAIL_VERIFICATION_ENABLED", false),
             trust_proxy_headers: parse_bool("TRUST_PROXY_HEADERS", false),
+            // 用 optional() 而不是 unwrap_or_default()：这里必须能区分
+            // 「没设置」（随机生成）与「设成空串」（关闭），两者语义相反。
+            bootstrap_token: optional_raw("SOULAUTH_BOOTSTRAP_TOKEN"),
             cors_allowed_origins,
             oidc_rsa_private_key_pem: optional("OIDC_RSA_PRIVATE_KEY_PEM"),
             oidc_rsa_private_key_path: optional("OIDC_RSA_PRIVATE_KEY_PATH"),
@@ -254,7 +275,10 @@ impl Config {
             session_cache_ttl_seconds: parse_with_default("AUTH_SESSION_CACHE_TTL_SECONDS", 5u64)?,
             lockout_max_attempts: parse_with_default("LOCKOUT_MAX_ATTEMPTS", 5u32)?,
             lockout_duration_minutes: parse_with_default("LOCKOUT_DURATION_MINUTES", 15u32)?,
-            lockout_reset_window_minutes: parse_with_default("LOCKOUT_RESET_WINDOW_MINUTES", 60u32)?,
+            lockout_reset_window_minutes: parse_with_default(
+                "LOCKOUT_RESET_WINDOW_MINUTES",
+                60u32,
+            )?,
             lockout_user_enabled: parse_bool("LOCKOUT_USER_ENABLED", true),
             lockout_ip_enabled: parse_bool("LOCKOUT_IP_ENABLED", true),
         };
@@ -282,8 +306,14 @@ impl Config {
             });
         }
 
-        check_oauth_base_url("GOOGLE_OAUTH_BASE_URL", config.google_oauth_base_url.as_deref())?;
-        check_oauth_base_url("GITHUB_OAUTH_BASE_URL", config.github_oauth_base_url.as_deref())?;
+        check_oauth_base_url(
+            "GOOGLE_OAUTH_BASE_URL",
+            config.google_oauth_base_url.as_deref(),
+        )?;
+        check_oauth_base_url(
+            "GITHUB_OAUTH_BASE_URL",
+            config.github_oauth_base_url.as_deref(),
+        )?;
 
         // 半配置状态要当场拦下：配了 provider 却没有回调地址，重定向 URI 会被
         // 拼成没有前缀的残缺地址，登录到第一步才失败，而且报错指向 OAuth 库。
@@ -365,21 +395,24 @@ impl Config {
     /// 直接丢弃 cookie，OIDC 流程走不下去）。这里按部署协议决定：
     /// `app_url` 是 https 就带，否则不带。
     pub fn cookies_secure(&self) -> bool {
-        self.app_url.trim().to_ascii_lowercase().starts_with("https://")
+        self.app_url
+            .trim()
+            .to_ascii_lowercase()
+            .starts_with("https://")
     }
 
     /// 未登录用户从 `/api/oidc/authorize` 被引导去的登录页。
     pub fn login_page_url(&self) -> String {
-        self.login_page_url.clone().unwrap_or_else(|| {
-            format!("{}/login", self.app_url.trim_end_matches('/'))
-        })
+        self.login_page_url
+            .clone()
+            .unwrap_or_else(|| format!("{}/login", self.app_url.trim_end_matches('/')))
     }
 
     /// 验证邮件里链接指向的前端页面。
     pub fn verify_email_page_url(&self) -> String {
-        self.verify_email_page_url.clone().unwrap_or_else(|| {
-            format!("{}/verify-email", self.app_url.trim_end_matches('/'))
-        })
+        self.verify_email_page_url
+            .clone()
+            .unwrap_or_else(|| format!("{}/verify-email", self.app_url.trim_end_matches('/')))
     }
 
     /// CORS 允许的来源列表：显式白名单优先，否则回落到自身 `app_url`。
@@ -422,6 +455,7 @@ impl Config {
             app_url: "https://auth.example".to_string(),
             email_verification_enabled: false,
             trust_proxy_headers: false,
+            bootstrap_token: None,
             cors_allowed_origins: Vec::new(),
             oidc_rsa_private_key_pem: None,
             oidc_rsa_private_key_path: None,
@@ -455,8 +489,14 @@ mod tests {
     #[test]
     fn host_of_handles_ordinary_hosts() {
         assert_eq!(host_of("http://localhost:8080"), Some("localhost"));
-        assert_eq!(host_of("https://auth.example.com"), Some("auth.example.com"));
-        assert_eq!(host_of("https://auth.example.com/a/b"), Some("auth.example.com"));
+        assert_eq!(
+            host_of("https://auth.example.com"),
+            Some("auth.example.com")
+        );
+        assert_eq!(
+            host_of("https://auth.example.com/a/b"),
+            Some("auth.example.com")
+        );
         assert_eq!(host_of("not-a-url"), None);
         assert_eq!(host_of("https://"), None);
     }
@@ -494,11 +534,17 @@ mod tests {
         config.oidc_rsa_private_key_pem = None;
         config.oidc_rsa_private_key_path = None;
         config.mfa_encryption_key = Some("k".to_string());
-        assert!(config.check_production_secrets().is_err(), "缺 OIDC 私钥应拒绝启动");
+        assert!(
+            config.check_production_secrets().is_err(),
+            "缺 OIDC 私钥应拒绝启动"
+        );
 
         config.oidc_rsa_private_key_pem = Some("pem".to_string());
         config.mfa_encryption_key = None;
-        assert!(config.check_production_secrets().is_err(), "缺 MFA 密钥应拒绝启动");
+        assert!(
+            config.check_production_secrets().is_err(),
+            "缺 MFA 密钥应拒绝启动"
+        );
 
         config.mfa_encryption_key = Some("k".to_string());
         assert!(config.check_production_secrets().is_ok());
@@ -507,7 +553,11 @@ mod tests {
     #[test]
     fn loopback_deployments_still_start_without_those_keys() {
         // 本地开发要能一条命令跑起来，否则这道闸门会被人用环境变量绕过去。
-        for url in ["http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"] {
+        for url in [
+            "http://localhost:8080",
+            "http://127.0.0.1:8080",
+            "http://[::1]:8080",
+        ] {
             let mut config = Config::test_default();
             config.app_url = url.to_string();
             config.oidc_rsa_private_key_pem = None;
@@ -563,7 +613,6 @@ mod tests {
             ..Config::test_default()
         }
     }
-
 
     #[test]
     fn cookies_are_secure_only_over_https() {

@@ -2,7 +2,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use surrealdb::types::SurrealValue;
 
-
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub enum ActivityCategory {
     Authentication,
@@ -60,9 +59,11 @@ impl From<UserActivityRow> for UserActivityResponse {
         // 投影出来的形如 `user_activity:⟨uuid⟩` / `user:`uuid``，这里只取键。
         let strip = |value: Option<String>| {
             value
-                .map(|v| crate::utils::record_id::normalize_record_id_key(
-                    v.split_once(':').map(|(_, key)| key).unwrap_or(&v),
-                ))
+                .map(|v| {
+                    crate::utils::record_id::normalize_record_id_key(
+                        v.split_once(':').map(|(_, key)| key).unwrap_or(&v),
+                    )
+                })
                 .unwrap_or_default()
         };
 
@@ -80,7 +81,6 @@ impl From<UserActivityRow> for UserActivityResponse {
         }
     }
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ActivityLogRequest {

@@ -144,6 +144,15 @@ mail_count() {
 }
 
 # 最后一封信的解码正文
+# bearer 凭证的落库指纹。必须与 `src/utils/crypto.rs::hash_bearer` 逐字节一致：
+# SHA-256 → base64url-no-pad。库里存的是它，测试要按它查。
+bearer_hash() {
+    python3 -c "
+import base64, hashlib, sys
+print(base64.urlsafe_b64encode(hashlib.sha256(sys.argv[1].encode()).digest()).decode().rstrip('='))
+" "$1"
+}
+
 mail_body() {
     python3 -c "
 import email, sys
@@ -223,7 +232,9 @@ start_app() {
         BIND_ADDR="127.0.0.1:${APP_PORT}" \
         RUST_LOG=soulauth=warn \
         exec ./target/debug/soulauth
-    ) > "$WORK/app.log" 2>&1 &
+    # 追加而不是覆盖：测试全程会多次 restart_app，用 `>` 的话前面组的错误
+    # 会被后面的重启冲掉 —— 排查时看到"日志无错误"是假象，实际是日志没了。
+    ) >> "$WORK/app.log" 2>&1 &
     APP_PID=$!
     disown "$APP_PID" 2>/dev/null   # 免得 kill -9 时 shell 打一行 "Killed ..." 混进输出
     wait_for "${APP}/api/oidc/jwks" "SoulAuth" || { cat "$WORK/app.log"; exit 2; }
@@ -258,8 +269,11 @@ user_id_of() {
 }
 
 grant_admin() {
-    sql "CREATE user_role CONTENT { user_id: type::record('user','$1'), role_id: role:admin,
-         assigned_at: 0, assigned_by: user:system }" > /dev/null
+    # 角色分配挂在身份根上（Stage 3 起 user_role.user_id 是 record<actor_identity>），
+    # 所以这里要先由 user 行取出它的 subject_id。
+    sql "CREATE user_role CONTENT {
+           user_id: (SELECT VALUE subject_id FROM type::record('user','$1'))[0],
+           role_id: role:admin, assigned_at: 0, assigned_by: actor_identity:system }" > /dev/null
 }
 
 # ───────────────────────────── 前置检查 ─────────────────────────────
@@ -302,7 +316,51 @@ eq 200 "$(req GET /api/auth/me -H "authorization: bearer $ADMIN_TOKEN")" "小写
 eq 401 "$(req GET /api/auth/me -H "authorization: Basic $ADMIN_TOKEN")" "Basic 方案被拒绝"
 eq 401 "$(req GET /api/auth/me)" "无令牌 401"
 
-group "3. 权限名前缀与 RBAC 守卫"
+group "3. 引导路径（首个管理员）"
+
+# 公开文档 03｜Quickstart 的验收标准：
+#   「一个全新的 SoulAuth 实例，应该让开发者在不直接修改数据库的情况下，
+#     从零走到第一份经过验证的 Actor 身份。」
+# 这一组就是那条标准的可执行形式。测试库是 memory 后端，每次全新，
+# 因此此刻系统里确实还没有任何管理员。
+
+# 令牌只从启动日志取 —— 这同时验证了它的交付方式，而不只是验证端点本身。
+BOOT_TOKEN="$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log" | head -1)"
+[ -n "$BOOT_TOKEN" ] && ok "启动日志打印了引导令牌" ||
+    bad "启动日志打印了引导令牌" "$(grep -i bootstrap "$WORK/app.log" | head -3)"
+
+# 错误令牌必须被拒，且要留审计。
+eq 401 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d '{"token":"wrong","email":"nope@test.local","username":"nope","password":"CorrectHorse42!"}')" \
+    "错误引导令牌被拒"
+
+# 密码策略不因为「这是第一个用户」而放宽。
+eq 400 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"boot@test.local\",\"username\":\"boot\",\"password\":\"short\"}")" \
+    "引导路径同样执行密码策略"
+
+eq 200 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"boot@test.local\",\"username\":\"bootadmin\",\"password\":\"CorrectHorse42!\"}")" \
+    "引导创建首个管理员"
+has '"is_admin":true' "$(body)" "引导响应直接断言 is_admin"
+
+# 引导后该账号登录，确认权限真的生效（令牌不带角色，必须重新登录）。
+req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d '{"email":"boot@test.local","password":"CorrectHorse42!"}' > /dev/null
+BOOT_TOKEN_USER="$(jget token)"
+eq 200 "$(req GET /api/users -H "Authorization: Bearer ${BOOT_TOKEN_USER}")" \
+    "引导出的管理员可访问受保护端点"
+
+# 门是一次性的：已有管理员之后，正确令牌同样被拒。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d "{\"token\":\"${BOOT_TOKEN}\",\"email\":\"second@test.local\",\"username\":\"second\",\"password\":\"CorrectHorse42!\"}")" \
+    "已有管理员后正确令牌也被拒"
+# 且与错误令牌返回同一状态码 —— 否则失效令牌就成了「实例是否已初始化」的探针。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+    -d '{"token":"wrong","email":"third@test.local","username":"third","password":"CorrectHorse42!"}')" \
+    "已初始化后错误令牌返回同一状态码，不构成探测信道"
+
+group "4. 权限名前缀与 RBAC 守卫"
 
 ADMIN_UID="$(user_id_of admin@test.local)"
 grant_admin "$ADMIN_UID"
@@ -314,15 +372,15 @@ UNPREFIXED="$(sql_count "SELECT count() FROM permission WHERE !string::starts_wi
 eq 0 "$UNPREFIXED" "无未加前缀的残留权限"
 
 eq 200 "$(req GET /api/rbac/roles -H "Authorization: Bearer $ADMIN_TOKEN")"          "管理员可读角色（soulauth:roles.read）"
-eq 200 "$(req GET '/api/users/users?limit=2' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读用户（soulauth:users.read）"
+eq 200 "$(req GET '/api/users?limit=2' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读用户（soulauth:users.read）"
 eq 200 "$(req GET '/api/audit/dashboard?days=1' -H "Authorization: Bearer $ADMIN_TOKEN")" "管理员可读审计（soulauth:audit.read）"
 eq 200 "$(req GET /api/oidc/clients -H "Authorization: Bearer $ADMIN_TOKEN")"        "管理员可读 OIDC 客户端"
 
 PLAIN_TOKEN="$(signup plain@test.local plaintest)"
-eq 403 "$(req GET /api/users/users -H "Authorization: Bearer $PLAIN_TOKEN")" "无权限用户被拒"
+eq 403 "$(req GET /api/users -H "Authorization: Bearer $PLAIN_TOKEN")" "无权限用户被拒"
 has 'soulauth:users.read' "$(body)" "拒绝信息里带命名空间前缀"
 
-group "4. RBAC 授予与撤销的往返"
+group "5. RBAC 授予与撤销的往返"
 
 req POST /api/rbac/roles -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
     -d '{"name":"itest","display_name":"IT","description":"d"}' > /dev/null
@@ -339,7 +397,7 @@ eq 204 "$(req POST /api/rbac/roles/itest/permissions/remove -H "Authorization: B
 eq 0 "$(sql_count "SELECT count() FROM role_permission WHERE role_id IN (SELECT VALUE id FROM role WHERE name='itest') GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
 
-group "5. OIDC 客户端与生命周期上限"
+group "6. OIDC 客户端与生命周期上限"
 
 mk_client() {
     req POST /api/oidc/clients -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
@@ -360,7 +418,7 @@ eq 404 "$(req DELETE /api/oidc/clients/no-such-client -H "Authorization: Bearer 
 eq 404 "$(req POST /api/oidc/clients/no-such-client/regenerate-secret -H "Authorization: Bearer $ADMIN_TOKEN")" \
     "为不存在的客户端轮换密钥 404（非 200 + 假密钥）"
 
-group "6. OIDC 授权码流程与 sid"
+group "7. OIDC 授权码流程与 sid"
 
 mk_client flow; CLIENT_ID="$(jget client_id)"
 VERIFIER='ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~'
@@ -405,12 +463,28 @@ eq 200 "$(exchange "$CODE" "$VERIFIER")" "授权码兑换成功"
 ID_TOKEN="$(jget id_token)"; REFRESH="$(jget refresh_token)"
 
 claim() {
+    # 键缺失与 JSON null 都算「没有这个 claim」。
+    #
+    # `.get(k, '')` 只处理前者：不带 email scope 时 `email` 是 Rust 的
+    # `Option::None`，序列化成 JSON null，`.get()` 取到 None 打印成字符串
+    # "None" —— 断言「不含 email」于是拿到 "None" 而非空串，误报失败。
     python3 -c "
 import base64,json
 p='$1'.split('.')[1]; p+='='*(-len(p)%4)
-print(json.loads(base64.urlsafe_b64decode(p)).get('$2',''))" 2>/dev/null
+v=json.loads(base64.urlsafe_b64decode(p)).get('$2')
+print('' if v is None else v)" 2>/dev/null
 }
 eq "$EXPECT_SID" "$(claim "$ID_TOKEN" sid)" "ID Token 的 sid 等于认证会话主键"
+
+# 这条流程申请的是 scope=openid（见上面的 AUTHZ）。ID Token 曾经无条件放
+# email 与 preferred_username，而同一台服务器的 UserInfo 是按 scope 裁剪的 ——
+# 同一份 claim 两套披露规则。这里把「只申请 openid 就什么身份属性都不给」钉死。
+eq "" "$(claim "$ID_TOKEN" email)"              "scope=openid 的 ID Token 不含 email"
+eq "" "$(claim "$ID_TOKEN" email_verified)"     "scope=openid 的 ID Token 不含 email_verified"
+eq "" "$(claim "$ID_TOKEN" preferred_username)" "scope=openid 的 ID Token 不含 preferred_username"
+# 协议骨架不受 scope 约束，必须始终存在。
+[ -n "$(claim "$ID_TOKEN" sub)" ] && ok "scope=openid 的 ID Token 仍有 sub" ||
+    bad "scope=openid 的 ID Token 仍有 sub" "sub 为空"
 eq 300 "$(( $(claim "$ID_TOKEN" exp) - $(claim "$ID_TOKEN" iat) ))" "ID Token 寿命为 300 秒"
 has 'RS256' "$(python3 -c "
 import base64,json
@@ -427,7 +501,7 @@ eq 200 "$(req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urle
     --data-urlencode "client_id=$CLIENT_ID")" "刷新令牌兑换成功"
 eq "$EXPECT_SID" "$(claim "$(jget id_token)" sid)" "刷新后的 ID Token 保留同一 sid"
 
-group "7. 认证会话缺失时拒签 ID Token（fail-closed）"
+group "8. 认证会话缺失时拒签 ID Token（fail-closed）"
 
 REFRESH2="$(jget refresh_token)"
 sql "UPDATE oidc_refresh_token SET auth_session_ref = NONE WHERE client_id = '$CLIENT_ID'" > /dev/null
@@ -437,7 +511,7 @@ eq 400 "$(req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urle
     --data-urlencode "client_id=$CLIENT_ID")" "无会话引用时刷新被拒"
 has 'Missing auth session reference' "$(body)" "拒绝原因明确"
 
-group "8. OAuth 登录 CSRF 绑定"
+group "9. OAuth 登录 CSRF 绑定"
 
 restart_app   # 前面用掉了登录配额
 
@@ -457,7 +531,7 @@ eq 400 "$(req GET '/api/auth/callback/google?code=x')" "缺 state —— 拒绝"
 STATUS="$(req GET "$CB" -H "Cookie: soulauth_oauth_state=${NONCE}")"
 has 'OAuth error' "$(body)" "nonce 匹配后越过 state 校验，止于上游兑换失败"
 
-group "9. 账号锁定：并发失败登录不丢计数"
+group "10. 账号锁定：并发失败登录不丢计数"
 
 restart_app
 sql "DELETE account_lockout" > /dev/null
@@ -480,7 +554,7 @@ STATUS_L="$(sql "SELECT VALUE status FROM account_lockout WHERE identifier='admi
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
 eq Locked "$STATUS_L" "达到阈值后置为 Locked"
 
-group "10. 限流按路由模板计数"
+group "11. 限流按路由模板计数"
 
 restart_app
 
@@ -493,7 +567,7 @@ BLOCKED="$(printf '%s' "$CODES" | tr ' ' '\n' | grep -c 429)"
     ok "带路径参数的端点会被限流（每次 token 不同，共拦下 ${BLOCKED} 次）" ||
     bad "带路径参数的端点会被限流" "6 次请求无一被拦：$CODES"
 
-group "11. 邮件投递：注册验证信"
+group "12. 邮件投递：注册验证信"
 
 # 这条链此前从未被验证过 —— 没有 SMTP 就只能标「无法实测」。
 # 这里起一个零依赖的收信端（tests/smtp_sink.py），把整条
@@ -528,9 +602,12 @@ esac
 VTOKEN="$(printf '%s' "$VBODY" | grep -oE 'token=[A-Za-z0-9-]+' | head -1 | cut -d= -f2)"
 [ -n "$VTOKEN" ] && ok "验证链接里带 token" || bad "验证链接里带 token" "$VBODY"
 
-DBTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='mail@test.local'" |
+# 库里存的是指纹，不是令牌本身。这条断言因此反过来：
+# 明文一个字都不许留，而指纹必须与邮件里那枚对得上（对得上才说明链接可用）。
+DBHASH="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='mail@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r and r[0] else '')")"
-eq "$DBTOKEN" "$VTOKEN" "邮件里的 token 与库中一致（能对上才说明链接可用）"
+eq "$(bearer_hash "$VTOKEN")" "$DBHASH" "库里的指纹与邮件令牌对得上"
+[ "$DBHASH" != "$VTOKEN" ] && ok "验证令牌不以明文落库" || bad "验证令牌明文落库" "$DBHASH"
 
 eq 401 "$(req GET /api/auth/verify-email/deadbeef-not-a-real-token)" "伪造的验证 token 被拒"
 eq 200 "$(req GET "/api/auth/verify-email/${VTOKEN}")" "真实 token 完成验证"
@@ -539,7 +616,7 @@ VERIFIED="$(sql "SELECT VALUE verified FROM user WHERE email='mail@test.local'" 
     python3 -c "import json,sys;r=json.load(sys.stdin);print(str(r[0]).lower() if r else 'none')")"
 eq true "$VERIFIED" "验证状态确实落库"
 
-group "12. 邮件投递：密码重置信"
+group "13. 邮件投递：密码重置信"
 
 # 第 9 组是故意把 127.0.0.1 打到 IP 锁定的。锁定记录在库里，重启服务不会清，
 # 而被锁时登录返回 429 —— 不清掉的话，本组的登录断言全成假阳性。
@@ -578,7 +655,7 @@ eq 401 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
 
 kill -9 "$SINK_PID" 2>/dev/null; SINK_PID=""
 
-group "13. OAuth 回调：换到令牌之后的整段"
+group "14. OAuth 回调：换到令牌之后的整段"
 
 # 这一段此前完全没有覆盖：第 8 组只验到「拿假 code 去换令牌然后失败」，
 # 再往后 —— 取用户信息、按邮箱验证状态放行、建号还是关联既有账号 ——
@@ -674,7 +751,7 @@ STATUS="$(oauth_callback google definitely-not-a-code)"
 
 kill -9 "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
-group "14. 登出与会话吊销"
+group "15. 登出与会话吊销"
 
 # 「登出返回 200」什么也证明不了 —— 要证明的是**那个令牌真的不能再用了**。
 # 这一段直接关系 OS 接入：OS 拿 sid 指向的会话做判断，注销做不干净就是安全洞。
@@ -706,7 +783,7 @@ eq 200 "$(req POST /api/auth/logout-all -H "Authorization: Bearer ${TOK_B}")" "�
 eq 401 "$(req GET /api/auth/me -H "Authorization: Bearer ${TOK_B}")" "发起方令牌失效"
 eq 401 "$(req GET /api/auth/me -H "Authorization: Bearer ${TOK_C}")" "另一条会话的令牌同样失效"
 
-group "15. MFA 全生命周期（真实 TOTP）"
+group "16. MFA 全生命周期（真实 TOTP）"
 
 # 之前只有单测级的 last_totp_step 水位线，整条链路没端到端跑过。
 # 这里用 RFC 6238 算真码（tests/totp.py，已用标准向量自校）。
@@ -794,7 +871,7 @@ eq 200 "$(req POST /api/auth/mfa/disable -H "Authorization: Bearer ${TOK_MFA}" \
 req GET /api/auth/mfa/status -H "Authorization: Bearer ${TOK_MFA}" > /dev/null
 eq false "$(jget enabled)" "关闭后状态归位"
 
-group "16. 用户资料与偏好"
+group "17. 用户资料与偏好"
 
 restart_app
 sql "DELETE account_lockout" > /dev/null
@@ -806,42 +883,42 @@ ADMIN_UID="$(user_id_of admin@test.local)"
 
 # 已知缺陷：资料/偏好在 POST 建立之前读取返回 404 而不是空对象。
 # 这里把现状钉住 —— 哪天改成返回空对象，这条会红，提醒同步前端与文档。
-eq 404 "$(req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}")" \
+eq 404 "$(req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}")" \
     "尚未建立时读资料 → 404（现状，非空对象）"
 
-eq 200 "$(req POST /api/users/profile -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req POST /api/me/profile -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"display_name":"Plain User","bio":"hello"}')" "建立资料"
-req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'Plain User' "$(body)" "读回自己的资料"
 
-eq 200 "$(req PUT /api/users/profile -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req PUT /api/me/profile -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"display_name":"Renamed","bio":"updated"}')" "更新资料"
-req GET /api/users/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/profile -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'Renamed' "$(body)" "更新确实落库（不是只返回成功）"
 
-eq 200 "$(req POST /api/users/preferences -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req POST /api/me/preferences -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"language":"zh-CN","timezone":"Asia/Shanghai"}')" "建立偏好"
-eq 200 "$(req PUT /api/users/preferences -H "Authorization: Bearer ${TOK_P}" \
+eq 200 "$(req PUT /api/me/preferences -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"language":"en-US","timezone":"UTC"}')" "更新偏好"
-req GET /api/users/preferences -H "Authorization: Bearer ${TOK_P}" > /dev/null
+req GET /api/me/preferences -H "Authorization: Bearer ${TOK_P}" > /dev/null
 has 'en-US' "$(body)" "偏好更新落库"
 
-eq 200 "$(req GET /api/users/activity-log -H "Authorization: Bearer ${TOK_P}")" "可读自己的活动日志"
-eq 401 "$(req GET /api/users/profile)" "无令牌读资料 → 401"
+eq 200 "$(req GET /api/me/activity-log -H "Authorization: Bearer ${TOK_P}")" "可读自己的活动日志"
+eq 401 "$(req GET /api/me/profile)" "无令牌读资料 → 401"
 
 # 跨用户读取：本人之外一律要权限
-eq 200 "$(req GET "/api/users/users/${PLAIN_UID}/profile" -H "Authorization: Bearer ${TOK_A}")" \
+eq 200 "$(req GET "/api/users/${PLAIN_UID}/profile" -H "Authorization: Bearer ${TOK_A}")" \
     "管理员可读他人资料（users.read）"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/profile" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/profile" -H "Authorization: Bearer ${TOK_P}")" \
     "无 users.read 读不了他人资料"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/preferences" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/preferences" -H "Authorization: Bearer ${TOK_P}")" \
     "无 users.read 读不了他人偏好"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}/activity-log" -H "Authorization: Bearer ${TOK_P}")" \
+eq 403 "$(req GET "/api/users/${ADMIN_UID}/activity-log" -H "Authorization: Bearer ${TOK_P}")" \
     "无 audit.read 读不了他人活动日志"
-eq 200 "$(req GET "/api/users/users/${PLAIN_UID}" -H "Authorization: Bearer ${TOK_A}")" "管理员可按 id 读用户"
-eq 403 "$(req GET "/api/users/users/${ADMIN_UID}" -H "Authorization: Bearer ${TOK_P}")" "普通用户按 id 读不了他人"
+eq 200 "$(req GET "/api/users/${PLAIN_UID}" -H "Authorization: Bearer ${TOK_A}")" "管理员可按 id 读用户"
+eq 403 "$(req GET "/api/users/${ADMIN_UID}" -H "Authorization: Bearer ${TOK_P}")" "普通用户按 id 读不了他人"
 
-group "17. 账号状态与会员等级：越权与即时失效"
+group "18. 账号状态与会员等级：越权与即时失效"
 
 restart_app
 
@@ -851,15 +928,15 @@ VICTIM_UID="$(user_id_of victim@test.local)"
 [ -n "$VICTIM_TOKEN" ] && ok "受害账号建立并登录" || bad "受害账号建立并登录" "$(body)"
 
 # 越权：普通用户不得改任何人的状态，包括自己
-eq 403 "$(req PUT "/api/users/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
+eq 403 "$(req PUT "/api/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
     -H 'Content-Type: application/json' -d '{"status":"Active","reason":"self"}')" \
     "无 users.write 改不了自己的状态"
-eq 403 "$(req PUT "/api/users/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
+eq 403 "$(req PUT "/api/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${VICTIM_TOKEN}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO"}')" \
     "无 users.write 不能自封会员等级"
 
 # 会员等级由管理员改，且要真的落库
-eq 200 "$(req PUT "/api/users/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${TOK_A}" \
+eq 200 "$(req PUT "/api/users/${VICTIM_UID}/membership" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO"}')" "管理员可改会员等级"
 LEVEL="$(sql "SELECT VALUE membership_level FROM user WHERE email='victim@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
@@ -868,7 +945,7 @@ eq PRO "$LEVEL" "会员等级确实落库"
 # 停用之后，**已经签发的令牌必须立刻失效**。
 # 这是本组的核心：只清缓存而不在校验时看状态，被停用的人还能继续用到令牌自然过期。
 eq 200 "$(req GET /api/auth/me -H "Authorization: Bearer ${VICTIM_TOKEN}")" "停用前令牌可用"
-eq 200 "$(req PUT "/api/users/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${TOK_A}" \
+eq 200 "$(req PUT "/api/users/${VICTIM_UID}/status" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"status":"Suspended","reason":"itest"}')" "管理员停用该账号"
 # 停用后的判定用显式 if：`[ A ] || [ B ] && ok || bad` 在 shell 里是
 # 左结合的等优先级串联，读起来像三元表达式，实际语义靠碰巧。
@@ -890,7 +967,7 @@ eq 403 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"victim@test.local","password":"CorrectHorse42!"}')" \
     "未知账号状态按不可用处理（未列白名单即拒）"
 
-group "18. RBAC 用户侧授权与权限查询"
+group "19. RBAC 用户侧授权与权限查询"
 
 restart_app
 
@@ -915,13 +992,13 @@ eq 403 "$(req GET "/api/rbac/permissions/soulauth:users.read" -H "Authorization:
 eq 403 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_P}" \
     -H 'Content-Type: application/json' -d '{"role_name":"admin"}')" \
     "无 roles.write 不能给自己授 admin（提权面）"
-eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:admin GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:admin GROUP ALL")" \
     "越权尝试没有留下任何授权记录"
 
 # 管理员授角色，且要落库、可查、可撤
 eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/assign" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员给用户授角色"
-eq 1 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
+eq 1 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:user GROUP ALL")" \
     "授权确实落库"
 req GET "/api/rbac/users/${PLAIN_UID}/roles" -H "Authorization: Bearer ${TOK_A}" > /dev/null
 has 'user' "$(body)" "角色列表里能查到"
@@ -935,10 +1012,10 @@ eq 403 "$(req GET "/api/rbac/users/${ADMIN_UID}/roles" -H "Authorization: Bearer
 
 eq 204 "$(req POST "/api/rbac/users/${PLAIN_UID}/roles/remove" -H "Authorization: Bearer ${TOK_A}" \
     -H 'Content-Type: application/json' -d '{"role_name":"user"}')" "管理员撤销角色"
-eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = type::record('user','${PLAIN_UID}') AND role_id = role:user GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM user_role WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${PLAIN_UID}'))[0] AND role_id = role:user GROUP ALL")" \
     "撤销确实生效（不是只返回成功）"
 
-group "19. 限流跨副本合账"
+group "20. 限流跨副本合账"
 
 # 这条性质**只能用两个真实进程验**：单进程里怎么测都测不出「各副本各算各的」。
 # 起第二个副本，与第一个共用同一个数据库，配置完全一致 —— 就是生产上
@@ -999,7 +1076,7 @@ eq 0 "$(sql_count "SELECT count() FROM rate_limit WHERE endpoint = '/api/auth/me
 
 kill -9 "$APP2_PID" 2>/dev/null; APP2_PID=""
 
-group "20. 审计 / OIDC userinfo / 管理端剩余端点"
+group "21. 审计 / OIDC userinfo / 管理端剩余端点"
 
 # 这批端点此前只手工 curl 验过（当时还从中揪出过 security-report 的 500），
 # 一直没进自动化 = 没有回归保护。补上。
@@ -1081,7 +1158,7 @@ restart_app
 eq 200 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"plain@test.local","password":"CorrectHorse42!"}')" "被拒的调用没有改掉原密码"
 
-group "21. 不配第三方登录也能独立跑"
+group "22. 不配第三方登录也能独立跑"
 
 # 以前这四个凭证是硬必填，只用邮箱密码的部署被迫在配置里填 dummy ——
 # 而配置里的假数据一旦被当真就是事故。这组验「不填也能跑」。
@@ -1121,7 +1198,7 @@ has 'not enabled' "$(body)" "501 的说明是「本部署未启用」而非 OAut
 
 restart_app   # 交还给带 dummy 凭证的标准配置
 
-group "22. BFF 要走的那条路：confidential 客户端"
+group "23. BFF 要走的那条路：confidential 客户端"
 
 # 此前全部 OIDC 覆盖用的都是 public 客户端、换令牌不带 client_secret。
 # 而 SoulSeedOS 接入的实际形态是 BFF 持有 secret 的 confidential 客户端 ——
@@ -1225,7 +1302,7 @@ exchange "$(bff_code)" -H "Authorization: Basic ${BASIC}" \
     --data-urlencode "client_secret=${C_SECRET}" > /dev/null
 has 'invalid_request' "$(body)" "Basic 与表单同时带凭证 → invalid_request"
 
-group "23. 刷新令牌的轮换与复用检测（BFF 必须知道）"
+group "24. 刷新令牌的轮换与复用检测（BFF 必须知道）"
 
 # BFF 长期持有 refresh token，每 300 秒换一次 ID Token。这两条行为直接
 # 决定 BFF 该怎么写，写错的代价是把用户会话整个打掉。
@@ -1254,7 +1331,7 @@ NEW_ID="$(jget id_token)"
 eq 400 "$(refresh_with "$REFRESH")" "复用已轮换的刷新令牌 → 拒绝"
 eq 400 "$(refresh_with "$REFRESH2")" "复用检测触发后新令牌也失效（整个会话被吊销）"
 
-group "24. 安全回归：停用生效范围 / PKCE 下限 / 跨 provider 顶号"
+group "25. 安全回归：停用生效范围 / PKCE 下限 / 跨 provider 顶号"
 
 # 这一组的三条都对应**已实测复现过的缺陷**，且三条都曾经在这套用例全绿的情况下
 # 存在 —— 因为前面 24 组恰好没有在这些交界处取过样。所以它们不是"补充覆盖"，
@@ -1307,11 +1384,19 @@ req POST /api/oidc/token -H 'Content-Type: application/x-www-form-urlencoded' \
     --data-urlencode "client_id=${SC_ID}" --data-urlencode "client_secret=${SC_SECRET}" \
     --data-urlencode "code_verifier=${SV}" > /dev/null
 SUSP_AT="$(jget access_token)"; SUSP_RT="$(jget refresh_token)"
+# 这条流程申请的是 scope=openid+email，与前面 scope=openid 那条构成对照：
+# 申请了才给，没申请不给，且 email scope 不得顺带放行档案属性。
+# 必须在下一个请求之前取 —— jget 读的是最后一次响应。
+SUSP_IDT="$(jget id_token)"
 [ -n "$SUSP_AT" ] && [ -n "$SUSP_RT" ] && ok "停用前换到 OIDC 令牌" ||
     bad "停用前换到 OIDC 令牌" "$(body)"
 eq 200 "$(req GET /api/oidc/userinfo -H "Authorization: Bearer ${SUSP_AT}")" "停用前 userinfo 可用"
 
-eq 200 "$(req PUT "/api/users/users/${SUSP_UID}/status" -H "Authorization: Bearer ${TOK_ADMIN}" \
+[ -n "$(claim "$SUSP_IDT" email)" ] && ok "scope=openid+email 的 ID Token 含 email" ||
+    bad "scope=openid+email 的 ID Token 含 email" "email 为空"
+eq "" "$(claim "$SUSP_IDT" preferred_username)" "email scope 不放行 preferred_username"
+
+eq 200 "$(req PUT "/api/users/${SUSP_UID}/status" -H "Authorization: Bearer ${TOK_ADMIN}" \
     -H 'Content-Type: application/json' -d '{"status":"Suspended","reason":"regression"}')" \
     "管理员停用该账号"
 
@@ -1338,11 +1423,11 @@ AFTER_CODE="$(susp_code)"
 eq "" "$AFTER_CODE" "停用后浏览器 cookie 换不到新授权码"
 
 # 停用同时要把已发凭证一并作废，而不是只改字段等下次校验
-eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 session 行被清空"
-eq 0 "$(sql_count "SELECT count() FROM oidc_refresh_token WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM oidc_refresh_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 OIDC 刷新令牌被吊销"
-eq 0 "$(sql_count "SELECT count() FROM oidc_access_token WHERE user_id = type::record('user','${SUSP_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM oidc_access_token WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SUSP_UID}'))[0] GROUP ALL")" \
     "停用后该用户的 OIDC 访问令牌被吊销"
 
 # 被停用的账号也不该还能走密码重置（且必须与"账号不存在"同样静默，不能成为枚举信道）
@@ -1408,18 +1493,22 @@ eq 1 "$(link_count google 4100)" "Google 侧的关联未被改写"
 
 # 最直接的判据：这次登录建出来的会话属于谁
 # 最直接的判据：这次 GitHub 登录建出来的会话，到底挂在谁名下。
+#
+# 会话自 Stage 3 起挂在**身份根**上（session.user_id 是 record<actor_identity>），
+# 所以要先由 user 行取出它的 subject_id —— 直接按 type::record('user',...) 查
+# 会一条也数不到，看起来像顶号防护失效，实际是查错了表。
 # 用 type::record + count 这套本文件里到处在用的写法，不用 record 链接穿透
 # （`SELECT VALUE user_id.email` 在这里取不到值）。
 GH_UID="$(user_id_of collide-github@test.local)"
 GOOGLE_UID="$(user_id_of collide-google@test.local)"
-eq 1 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${GH_UID}') GROUP ALL")" \
+eq 1 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${GH_UID}'))[0] GROUP ALL")" \
     "GitHub 登录建立的会话挂在 GitHub 那个账号名下"
-eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${GOOGLE_UID}') GROUP ALL")" \
+eq 0 "$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${GOOGLE_UID}'))[0] GROUP ALL")" \
     "Google 那个账号没有因为 GitHub 登录而多出会话（顶号的判据）"
 
 kill -9 "$MOCK_PID" 2>/dev/null; MOCK_PID=""
 
-group "25. 回归：会话列表 / 审计窗口 / 验证信重发 / 回收"
+group "26. 回归：会话列表 / 审计窗口 / 验证信重发 / 回收"
 
 # 本组四条同样都对应实测复现过的缺陷，且都发生在前 24 组的取样盲区里。
 
@@ -1438,12 +1527,14 @@ SESS_UID="$(user_id_of sesslist@test.local)"
 # 再登录两次，凑够多条会话
 login_token sesslist@test.local "CorrectHorse42!" > /dev/null
 login_token sesslist@test.local "CorrectHorse42!" > /dev/null
-TOTAL_SESS="$(sql_count "SELECT count() FROM session WHERE user_id = type::record('user','${SESS_UID}') GROUP ALL")"
+TOTAL_SESS="$(sql_count "SELECT count() FROM session WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SESS_UID}'))[0] GROUP ALL")"
 [ "$TOTAL_SESS" -ge 3 ] && ok "库中已有 ${TOTAL_SESS} 条会话" || bad "库中已有多条会话" "只有 ${TOTAL_SESS} 条"
 
 # 把当前令牌以外的全部改成早已过期
+# 库里存的是指纹，所以"当前这条之外"要按指纹排除。
 sql "UPDATE session SET expires_at = 1000 \
-     WHERE user_id = type::record('user','${SESS_UID}') AND token != '${SESS_TOKEN}'" > /dev/null
+     WHERE user_id = (SELECT VALUE subject_id FROM type::record('user','${SESS_UID}'))[0] \
+       AND token_hash != '$(bearer_hash "$SESS_TOKEN")'" > /dev/null
 
 eq 200 "$(req GET /api/auth/sessions -H "Authorization: Bearer ${SESS_TOKEN}")" "GET /api/auth/sessions"
 LISTED="$(python3 -c "
@@ -1502,7 +1593,7 @@ VERIFY_EMAIL=true restart_app
 req POST /api/auth/register -H 'Content-Type: application/json' \
     -d '{"email":"resend@test.local","password":"CorrectHorse42!","username":"resenduser"}' > /dev/null
 sleep 2
-OLD_VTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='resend@test.local'" |
+OLD_VTOKEN="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
 [ -n "$OLD_VTOKEN" ] && ok "注册后签发了验证令牌" || bad "注册后签发了验证令牌" "未取到"
 
@@ -1519,11 +1610,15 @@ sleep 2
 eq "$((BEFORE_MAIL + 1))" "$(mail_count)" "确实又发出了一封"
 eq 'Verify your email address' "$(mail_header Subject)" "主题为邮箱验证"
 
-NEW_VTOKEN="$(sql "SELECT VALUE verification_token FROM user WHERE email='resend@test.local'" |
+# 比的是**指纹**换没换 —— 明文只存在于邮件里。
+NEW_VHASH="$(sql "SELECT VALUE verification_token_hash FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(r[0] if r else '')")"
-[ -n "$NEW_VTOKEN" ] && [ "$NEW_VTOKEN" != "$OLD_VTOKEN" ] && ok "换发了一枚新的验证令牌" ||
-    bad "换发了一枚新的验证令牌" "旧=${OLD_VTOKEN:0:8} 新=${NEW_VTOKEN:0:8}"
+[ -n "$NEW_VHASH" ] && [ "$NEW_VHASH" != "$OLD_VTOKEN" ] && ok "换发了一枚新的验证令牌" ||
+    bad "换发了一枚新的验证令牌" "旧=${OLD_VTOKEN:0:8} 新=${NEW_VHASH:0:8}"
 
+# 明文只能从信里取。这本身就是一条有价值的断言：库被读走也拿不到可用链接。
+NEW_VTOKEN="$(mail_body | grep -oE 'token=[A-Za-z0-9-]+' | head -1 | cut -d= -f2)"
+eq "$(bearer_hash "$NEW_VTOKEN")" "$NEW_VHASH" "信里的新令牌与库中指纹对应"
 eq 200 "$(req GET "/api/auth/verify-email/${NEW_VTOKEN}")" "用新令牌可以完成验证"
 eq true "$(sql "SELECT VALUE verified FROM user WHERE email='resend@test.local'" |
     python3 -c "import json,sys;r=json.load(sys.stdin);print(str(r[0]).lower() if r else '')")" \
@@ -1553,13 +1648,13 @@ restart_app
 NOW_TS="$(date +%s)"
 CLEAN_UID="$(user_id_of sesslist@test.local)"
 sql "CREATE session CONTENT {
-       user_id: type::record('user','${CLEAN_UID}'),
-       token: 'stale-token-for-cleanup-regression',
+       user_id: (SELECT VALUE subject_id FROM type::record('user','${CLEAN_UID}'))[0],
+       token_hash: 'stale-token-hash-for-cleanup-regression',
        expires_at: 1000, created_at: 1000,
        user_agent: 'itest', ip_address: '127.0.0.1'
      }" > /dev/null
 sql "CREATE password_reset_token CONTENT {
-       email: 'sesslist@test.local', token: 'stale-reset-token',
+       email: 'sesslist@test.local', token_hash: 'stale-reset-token-hash',
        expires_at: type::datetime('2020-01-01T00:00:00Z'),
        used: true, created_at: type::datetime('2020-01-01T00:00:00Z')
      }" > /dev/null
@@ -1584,7 +1679,7 @@ eq 0 "$(sql_count "SELECT count() FROM password_reset_token WHERE used = true GR
 # PendingDeletion 已从 AccountStatus 移除：管理员不能再设置它。
 # 它此前的行为与 Deleted 完全同义，却对外宣告了一条不存在的删除流水线。
 CONTRACT_UID="$(user_id_of sesslist@test.local)"
-STATUS_CODE="$(req PUT "/api/users/users/${CONTRACT_UID}/status" -H "Authorization: Bearer ${TOK_AUDIT}" \
+STATUS_CODE="$(req PUT "/api/users/${CONTRACT_UID}/status" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' -d '{"status":"PendingDeletion","reason":"x"}')"
 case "$STATUS_CODE" in
     400|422) ok "PendingDeletion 已不被接受（${STATUS_CODE}）" ;;
@@ -1609,25 +1704,25 @@ case "$LEGACY_CODE" in
 esac
 
 # membership_expiry 现在是时间点：非法字符串在反序列化阶段就被拒。
-BAD_EXPIRY="$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+BAD_EXPIRY="$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' -d '{"membership_level":"PRO","membership_expiry":"下个月"}')"
 case "$BAD_EXPIRY" in
     400|422) ok "非法的 membership_expiry 被拒（${BAD_EXPIRY}）" ;;
     *)       bad "非法的 membership_expiry 被拒" "竟然收下了：${BAD_EXPIRY}" ;;
 esac
 
-eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+eq 200 "$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' \
     -d '{"membership_level":"PRO","membership_expiry":"2030-01-01T00:00:00Z"}')" \
     "合法的 RFC3339 时间点被接受"
 
 # SoulAuth 不解释这个字段：即使已经"过期"，等级也不会被自动降级
 # （P0-DECISION-09 §4.7：membership 归 Entitlement 侧，不由本服务判断）。
-eq 200 "$(req PUT "/api/users/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
+eq 200 "$(req PUT "/api/users/${CONTRACT_UID}/membership" -H "Authorization: Bearer ${TOK_AUDIT}" \
     -H 'Content-Type: application/json' \
     -d '{"membership_level":"PRO","membership_expiry":"2020-01-01T00:00:00Z"}')" \
     "过去的时间点同样被接受（形状合法即可）"
-req GET "/api/users/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+req GET "/api/users/${CONTRACT_UID}" -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 has 'PRO' "$(body)" "已过期的会员等级不被本服务自动降级（解释权在消费方）"
 
 # ───────── 25.7 角色列表返回真实权限 / 拒绝实现不了的 grant ─────────
@@ -1733,12 +1828,12 @@ d=json.load(open('$WORK/body'))
 sys.exit(0 if isinstance(d,list) and d and 'name' in d[0] else 1)" \
   && ok "/api/rbac/roles 直接返回数组（信封已移除）" || bad "/api/rbac/roles 直接返回数组" "$(body | head -c 90)"
 
-req GET /api/users/users -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
+req GET /api/users -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 python3 -c "
 import json,sys
 d=json.load(open('$WORK/body'))
 sys.exit(0 if ('users' in d and 'data' not in d) else 1)" \
-  && ok "/api/users/users 返回裸对象" || bad "/api/users/users 返回裸对象" "$(body | head -c 90)"
+  && ok "/api/users 返回裸对象" || bad "/api/users 返回裸对象" "$(body | head -c 90)"
 
 req GET /api/ops/memberships/overview -H "Authorization: Bearer ${TOK_AUDIT}" > /dev/null
 python3 -c "
@@ -1747,21 +1842,34 @@ d=json.load(open('$WORK/body'))
 sys.exit(0 if ('total_users' in d and 'data' not in d) else 1)" \
   && ok "/api/ops 返回裸对象" || bad "/api/ops 返回裸对象" "$(body | head -c 90)"
 
-# 错误体统一为单字段 {"error": …}
+# 错误体统一为 {"error": <机器码>, "message": <人话>}
+#
+# `error` 必须是 snake_case 机器码而不是英文散文 —— 调用方按它分支。
 req GET /api/auth/me -H "Authorization: Bearer not-a-token" > /dev/null
 python3 -c "
-import json,sys
+import json,re,sys
 d=json.load(open('$WORK/body'))
-sys.exit(0 if (list(d.keys())==['error']) else 1)" \
-  && ok "错误体只有 error 一个字段" || bad "错误体形状" "$(body | head -c 90)"
+sys.exit(0 if {'error','message'} <= set(d) and re.fullmatch(r'[a-z0-9_]+', d['error']) else 1)" \
+  && ok "错误体是 error(码)+message(人话)" || bad "错误体形状" "$(body | head -c 120)"
 
 req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"nobody@test.local","password":"WrongPass99!"}' > /dev/null
 python3 -c "
 import json,sys
 d=json.load(open('$WORK/body'))
-sys.exit(0 if (list(d.keys())==['error']) else 1)" \
-  && ok "登录失败的错误体同样是单字段" || bad "登录失败错误体" "$(body | head -c 90)"
+sys.exit(0 if d.get('error')=='invalid_credentials' and 'message' in d else 1)" \
+  && ok "登录失败给出 invalid_credentials" || bad "登录失败错误体" "$(body | head -c 120)"
+
+# 曾经的空响应体：/api/rbac/* 与 /api/ops/* 用裸 StatusCode 当错误，
+# 权限不足时 403 不带任何内容。现在必须与全站同形。
+TOK_NOPERM="$(login_token plain@test.local "CorrectHorse42!")"
+req GET /api/rbac/roles -H "Authorization: Bearer ${TOK_NOPERM}" > /dev/null
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if d.get('error')=='missing_permission' and d.get('required_permission') else 1)" \
+  && ok "rbac 权限不足给出 missing_permission + required_permission" \
+  || bad "rbac 403 形状" "$(body | head -c 120)"
 
 # OIDC 是有意的例外：形状由规范规定
 req GET /api/oidc/.well-known/openid-configuration > /dev/null
@@ -1851,7 +1959,7 @@ req POST /api/security/unlock -H "Authorization: Bearer ${TOK_SEC}" \
 eq 200 "$(req POST /api/auth/login -H 'Content-Type: application/json' \
     -d '{"email":"relock@test.local","password":"CorrectHorse42!"}')" "解锁后可以重新登录"
 
-group "26. 运行期无 panic"
+group "27. 运行期无 panic"
 
 
 
@@ -1859,6 +1967,194 @@ group "26. 运行期无 panic"
 
 
 
+
+# ═════════ 30 AIActor 原生认证（挑战—应答） ═════════
+#
+# 这一组回答一个此前在 Runtime 上完全空白的问题：一个非人主体能不能不伪装成
+# 人类账户就完成认证。`ActorKind::AiActor` 一直只是个从未被构造的枚举变体。
+
+# 先复位，再取令牌。紧挨着的上一组是锁定测试，它会留下 account_lockout 记录
+# 与登录端点的限流计数 —— 不清掉的话这里 login_token 拿到空串，
+# 后面二十条断言全部级联成 401，看起来像 AIActor 路径坏了，其实是脏现场。
+# 这是本脚本各小节的既有惯例（见第 12/16/20 组）。
+sql "DELETE account_lockout" > /dev/null
+sql "DELETE rate_limit" > /dev/null 2>&1
+restart_app
+
+TOK_ADMIN_A="$(login_token admin@test.local "CorrectHorse42!")"
+TOK_NOPERM="$(login_token plain@test.local "CorrectHorse42!")"
+
+# Ed25519 密钥对（固定种子，可复现）。私钥只存在于这个脚本里 —— 与生产一致：
+# SoulAuth 永远不接触它。
+python3 - > "$WORK/agentkey.json" <<'PYKEY'
+import base64, hashlib, json, sys
+try:
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    from cryptography.hazmat.primitives import serialization
+except Exception:
+    json.dump({"skip": 1}, sys.stdout); sys.exit()
+seed = hashlib.sha256(b"soulauth-integration-agent").digest()
+sk = Ed25519PrivateKey.from_private_bytes(seed)
+pk = sk.public_key().public_bytes(
+    encoding=serialization.Encoding.Raw, format=serialization.PublicFormat.Raw)
+b64 = lambda b: base64.urlsafe_b64encode(b).decode().rstrip("=")
+json.dump({"public_key": b64(pk)}, sys.stdout)
+PYKEY
+
+# 签名工具：把 payload 原样喂给私钥。
+sign_payload() {
+    python3 - "$1" <<'PYSIG'
+import base64, hashlib, sys
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+seed = hashlib.sha256(b"soulauth-integration-agent").digest()
+sk = Ed25519PrivateKey.from_private_bytes(seed)
+print(base64.urlsafe_b64encode(sk.sign(sys.argv[1].encode())).decode().rstrip("="))
+PYSIG
+}
+
+if python3 -c "import json,sys; sys.exit(0 if 'skip' in json.load(open('$WORK/agentkey.json')) else 1)"; then
+    printf '  %s AIActor 组已跳过（缺 python cryptography）\n' "$(c_dim ○)"
+else
+
+AGENT_PK="$(python3 -c "import json;print(json.load(open('$WORK/agentkey.json'))['public_key'])")"
+
+# ── 注册 ──
+eq 403 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_NOPERM}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"it-agent\"}")" \
+    "无 actors.write 不能注册非人主体"
+
+eq 200 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"it-agent\"}")" \
+    "管理员可注册 AIActor"
+
+AGENT_ID="$(python3 -c "
+import json
+d=json.load(open('$WORK/body'))
+print(d['actor']['id'])" 2>/dev/null)"
+
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+sys.exit(0 if d['actor']['actor_kind']=='ai_actor' else 1)" \
+  && ok "新主体的 actor_kind 是 ai_actor" || bad "actor_kind" "$(body|head -c 120)"
+
+# 最要紧的存储层不变式：这个主体名下**没有** human_account。
+eq 0 "$(sql_count "SELECT count() FROM human_account WHERE actor_identity_id = ${AGENT_ID} GROUP ALL")" \
+    "AIActor 名下没有 human_account"
+
+# 同一枚公钥不得注册两次 —— 两个 Actor 共用一把钥匙会让审计归因失效。
+eq 400 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' \
+    -d "{\"public_key\":\"${AGENT_PK}\",\"label\":\"dup\"}")" \
+    "同一公钥不得重复注册"
+
+# 畸形公钥在注册时就被拒，而不是留到第一次认证才以"签名不通过"暴露。
+eq 400 "$(req POST /api/actors -H "Authorization: Bearer ${TOK_ADMIN_A}" \
+    -H 'Content-Type: application/json' -d '{"public_key":"not-base64!!","label":"x"}')" \
+    "畸形公钥在注册时被拒"
+
+# ── 认证 ──
+eq 200 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}")" "可领取挑战（公开端点）"
+NONCE="$(jget nonce)"
+PAYLOAD="$(jget payload)"
+
+# 服务端给出的 payload 必须与按规范拼出来的逐字节一致，否则每个 SDK 都得靠猜。
+python3 - "$APP" "$AGENT_ID" "$NONCE" "$PAYLOAD" <<'PYCHK'
+import sys
+app, actor, nonce, payload = sys.argv[1:5]
+expected = "soulauth-ai-actor-auth/v1\n" + app.rstrip("/") + "\n" + actor + "\n" + nonce
+sys.exit(0 if expected == payload else 1)
+PYCHK
+[ $? -eq 0 ] && ok "被签名内容与规范逐字节一致" || bad "canonical payload" "$PAYLOAD"
+
+SIG="$(sign_payload "$PAYLOAD")"
+eq 200 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${NONCE}\",\"algorithm\":\"ed25519\",\"signature\":\"${SIG}\"}")" \
+    "签名正确即可换到会话"
+AGENT_TOK="$(jget token)"
+
+# 挑战一次性。
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${NONCE}\",\"algorithm\":\"ed25519\",\"signature\":\"${SIG}\"}")" \
+    "重放同一 nonce 被拒"
+
+# 算法不接受协商。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N2="$(jget nonce)"; P2="$(jget payload)"; S2="$(sign_payload "$P2")"
+eq 400 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N2}\",\"algorithm\":\"rsa\",\"signature\":\"${S2}\"}")" \
+    "算法白名单外的取值被拒"
+
+# 错误签名被拒。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N3="$(jget nonce)"
+BAD_SIG="$(sign_payload "wrong-payload")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N3}\",\"algorithm\":\"ed25519\",\"signature\":\"${BAD_SIG}\"}")" \
+    "错误签名被拒"
+
+# 一次失败也会烧掉挑战：允许对同一枚 nonce 反复试签名等于把它变成爆破靶子。
+P3_RETRY="soulauth-ai-actor-auth/v1
+${APP}
+${AGENT_ID}
+${N3}"
+S3_RETRY="$(sign_payload "$P3_RETRY")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N3}\",\"algorithm\":\"ed25519\",\"signature\":\"${S3_RETRY}\"}")" \
+    "失败过的挑战不能再用正确签名补救"
+
+# ── 会话边界 ──
+eq 200 "$(req GET /api/actors/me -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 可以自省 /api/actors/me"
+
+# 整组里最要紧的一条：Agent 令牌不得在人类端点上通过。
+eq 403 "$(req GET /api/auth/me -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 令牌在人类端点上被明确拒绝"
+eq 403 "$(req GET /api/me/profile -H "Authorization: Bearer ${AGENT_TOK}")" \
+    "Agent 令牌拿不到人类档案"
+eq 403 "$(req GET /api/actors/me -H "Authorization: Bearer ${TOK_ADMIN_A}")" \
+    "人类令牌被 /api/actors/me 拒绝"
+
+# ── 密钥轮换与吊销 ──
+req GET "/api/actors/${AGENT_ID}/credentials" -H "Authorization: Bearer ${TOK_ADMIN_A}" > /dev/null
+CRED_ID="$(python3 -c "import json;print(json.load(open('$WORK/body'))[0]['id'])" 2>/dev/null)"
+
+python3 -c "
+import json,sys
+d=json.load(open('$WORK/body'))
+leaked = [k for c in d for k in c if 'private' in k or 'secret' in k]
+sys.exit(0 if not leaked else 1)" \
+  && ok "凭证列表不含任何私有材料" || bad "凭证列表泄露" "$(body|head -c 120)"
+
+eq 200 "$(req DELETE "/api/actors/${AGENT_ID}/credentials/${CRED_ID}" \
+    -H "Authorization: Bearer ${TOK_ADMIN_A}")" "可吊销密钥"
+
+# 吊销之后同一把钥匙再也认证不了。
+req POST /api/actors/challenge -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\"}" > /dev/null
+N4="$(jget nonce)"; P4="$(jget payload)"; S4="$(sign_payload "$P4")"
+eq 401 "$(req POST /api/actors/authenticate -H 'Content-Type: application/json' \
+    -d "{\"actor_id\":\"${AGENT_ID}\",\"nonce\":\"${N4}\",\"algorithm\":\"ed25519\",\"signature\":\"${S4}\"}")" \
+    "已吊销的密钥无法再认证"
+
+# 吊销是改状态而不是删记录 —— 否则历史审计追不回"这次用的是哪把钥匙"。
+eq 1 "$(sql_count "SELECT count() FROM ai_actor_credential WHERE status = 'revoked' GROUP ALL")" \
+    "吊销保留记录，只改状态"
+
+# 拿人类的 actor_id 走这条免口令路径必须失败，否则它就是人类认证的后门。
+HUMAN_ACTOR="$(sql "SELECT VALUE type::string(id) FROM actor_identity WHERE actor_kind = 'human' AND status = 'active' LIMIT 1" | grep -oP 'actor_identity:[A-Za-z0-9_-]+' | head -1)"
+if [ -n "$HUMAN_ACTOR" ]; then
+    eq 401 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
+        -d "{\"actor_id\":\"${HUMAN_ACTOR}\"}")" \
+        "人类主体不能走 AIActor 认证路径"
+fi
+
+fi
 
 PANICS="$(grep -c 'panicked' "$WORK/app.log" 2>/dev/null)"; PANICS="${PANICS:-0}"
 eq 0 "$PANICS" "服务日志中无 panic"

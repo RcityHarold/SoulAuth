@@ -25,17 +25,6 @@ UPSERT permission:users_write CONTENT {
     updated_at: 0
 };
 
-UPSERT permission:users_delete CONTENT {
-    name: "soulauth:users.delete",
-    display_name: "删除用户",
-    description: "删除用户账户",
-    resource: "users",
-    action: "delete",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
 -- 角色管理权限
 UPSERT permission:roles_read CONTENT {
     name: "soulauth:roles.read",
@@ -93,17 +82,6 @@ UPSERT permission:permissions_write CONTENT {
     updated_at: 0
 };
 
-UPSERT permission:permissions_delete CONTENT {
-    name: "soulauth:permissions.delete",
-    display_name: "删除权限",
-    description: "删除权限",
-    resource: "permissions",
-    action: "delete",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
 -- 安全管理权限
 UPSERT permission:security_read CONTENT {
     name: "soulauth:security.read",
@@ -140,50 +118,8 @@ UPSERT permission:audit_read CONTENT {
 };
 
 -- 用户档案管理权限
-UPSERT permission:profile_read CONTENT {
-    name: "soulauth:profile.read",
-    display_name: "查看用户档案",
-    description: "查看用户档案信息",
-    resource: "profile",
-    action: "read",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
-UPSERT permission:profile_write CONTENT {
-    name: "soulauth:profile.write",
-    display_name: "管理用户档案",
-    description: "创建和编辑用户档案",
-    resource: "profile",
-    action: "write",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
 
 -- 用户偏好设置权限
-UPSERT permission:preferences_read CONTENT {
-    name: "soulauth:preferences.read",
-    display_name: "查看用户偏好",
-    description: "查看用户偏好设置",
-    resource: "preferences",
-    action: "read",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
-
-UPSERT permission:preferences_write CONTENT {
-    name: "soulauth:preferences.write",
-    display_name: "管理用户偏好",
-    description: "创建和编辑用户偏好设置",
-    resource: "preferences",
-    action: "write",
-    is_system: true,
-    created_at: 0,
-    updated_at: 0
-};
 
 -- 创建系统角色
 -- 系统管理员角色
@@ -236,23 +172,25 @@ UPSERT role:user CONTENT {
     updated_at: 0
 };
 
--- 为系统用户创建记录（用于权限分配的授权者）
+-- 系统哨兵身份（权限分配的授权者）。
+--
+-- 它是一个真实存在的 actor_identity 记录，不是悬空引用：SurrealDB 在
+-- SCHEMAFULL 表上会具体化被引用的记录，写一个不存在的 id 会以
+-- 「Expected `string` but found `NONE`」失败 —— 集成测试第一次跑就撞上了。
+--
+-- 它不代表任何人。系统发起的授予没有人类操作者，记一个真实管理员反而是
+-- 伪造归因，所以用这条专门的哨兵。它 status 为 retired：既保留标识符，
+-- 又保证它永远不能通过 can_authenticate()。
+--
 -- 注意：UPSERT ... CONTENT 会整条替换记录，而 DEFAULT 只在创建时生效。
 -- 因此凡是 TYPE 非 option 的字段都必须在这里显式写出，
 -- 否则第二次导入时该字段变成 NONE，直接撞类型校验。
-UPSERT user:system CONTENT {
-    email: "system@internal",
-    username: "system",
-    username_normalized: "system",
-    password: NONE,
-    verified: true,
-    verification_token: NONE,
-    verification_token_expires_at: NONE,
-    account_status: "Active",
-    membership_level: "FREE",
-    membership_expiry: NONE,
-    last_login_at: NONE,
-    last_login_ip: NONE,
+UPSERT actor_identity:system CONTENT {
+    subject_key: "system",
+    actor_kind: "human",
+    identity_source: "local",
+    canonical_actor_ref: NONE,
+    status: "retired",
     created_at: 0,
     updated_at: 0
 };
@@ -262,112 +200,70 @@ UPSERT role_permission:admin__users_read CONTENT {
     role_id: role:admin,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__users_write CONTENT {
     role_id: role:admin,
     permission_id: permission:users_write,
     granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__users_delete CONTENT {
-    role_id: role:admin,
-    permission_id: permission:users_delete,
-    granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_read CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_write CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__roles_delete CONTENT {
     role_id: role:admin,
     permission_id: permission:roles_delete,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__permissions_read CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__permissions_write CONTENT {
     role_id: role:admin,
     permission_id: permission:permissions_write,
     granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__permissions_delete CONTENT {
-    role_id: role:admin,
-    permission_id: permission:permissions_delete,
-    granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__security_read CONTENT {
     role_id: role:admin,
     permission_id: permission:security_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__security_write CONTENT {
     role_id: role:admin,
     permission_id: permission:security_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__audit_read CONTENT {
     role_id: role:admin,
     permission_id: permission:audit_read,
     granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__profile_read CONTENT {
-    role_id: role:admin,
-    permission_id: permission:profile_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__profile_write CONTENT {
-    role_id: role:admin,
-    permission_id: permission:profile_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__preferences_read CONTENT {
-    role_id: role:admin,
-    permission_id: permission:preferences_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:admin__preferences_write CONTENT {
-    role_id: role:admin,
-    permission_id: permission:preferences_write,
-    granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为user_manager角色分配用户管理权限
@@ -375,49 +271,14 @@ UPSERT role_permission:user_manager__users_read CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:user_manager__users_write CONTENT {
     role_id: role:user_manager,
     permission_id: permission:users_write,
     granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__users_delete CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:users_delete,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__profile_read CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:profile_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__profile_write CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:profile_write,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__preferences_read CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:preferences_read,
-    granted_at: 0,
-    granted_by: user:system
-};
-
-UPSERT role_permission:user_manager__preferences_write CONTENT {
-    role_id: role:user_manager,
-    permission_id: permission:preferences_write,
-    granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为security_manager角色分配安全管理权限
@@ -425,21 +286,21 @@ UPSERT role_permission:security_manager__security_read CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:security_manager__security_write CONTENT {
     role_id: role:security_manager,
     permission_id: permission:security_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:security_manager__users_read CONTENT {
     role_id: role:security_manager,
     permission_id: permission:users_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- 为auditor角色分配审计权限
@@ -447,7 +308,7 @@ UPSERT role_permission:auditor__audit_read CONTENT {
     role_id: role:auditor,
     permission_id: permission:audit_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 -- ===============================
@@ -483,12 +344,57 @@ UPSERT role_permission:admin__oidc_clients_read CONTENT {
     role_id: role:admin,
     permission_id: permission:oidc_clients_read,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
 };
 
 UPSERT role_permission:admin__oidc_clients_write CONTENT {
     role_id: role:admin,
     permission_id: permission:oidc_clients_write,
     granted_at: 0,
-    granted_by: user:system
+    granted_by: actor_identity:system
+};
+
+-- ===============================
+-- AIActor 管理权限（新增）
+-- ===============================
+-- 注册一个非人主体、给它挂/吊销密钥，都是特权操作：拿到 actors.write 就等于
+-- 能凭空造出一个可认证的主体。默认只授予 admin。
+--
+-- 认证本身（挑战 / 应答两个端点）不需要任何权限 —— 那是 Agent 自己用私钥
+-- 证明身份，和人类走 /api/auth/login 一样是公开入口。
+
+UPSERT permission:actors_read CONTENT {
+    name: "soulauth:actors.read",
+    display_name: "查看 AIActor",
+    description: "查看已注册的非人主体及其验证密钥（只含公钥）",
+    resource: "actors",
+    action: "read",
+    is_system: true,
+    created_at: 0,
+    updated_at: 0
+};
+
+UPSERT permission:actors_write CONTENT {
+    name: "soulauth:actors.write",
+    display_name: "管理 AIActor",
+    description: "注册非人主体、增删其验证密钥、停用主体",
+    resource: "actors",
+    action: "write",
+    is_system: true,
+    created_at: 0,
+    updated_at: 0
+};
+
+UPSERT role_permission:admin__actors_read CONTENT {
+    role_id: role:admin,
+    permission_id: permission:actors_read,
+    granted_at: 0,
+    granted_by: actor_identity:system
+};
+
+UPSERT role_permission:admin__actors_write CONTENT {
+    role_id: role:admin,
+    permission_id: permission:actors_write,
+    granted_at: 0,
+    granted_by: actor_identity:system
 };

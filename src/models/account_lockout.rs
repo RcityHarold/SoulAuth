@@ -63,9 +63,9 @@ pub struct LockoutConfig {
 impl Default for LockoutConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 5,                    // 5次失败尝试
-            lockout_duration_minutes: 15,      // 锁定15分钟
-            reset_window_minutes: 60,          // 1小时内重置计数
+            max_attempts: 5,              // 5次失败尝试
+            lockout_duration_minutes: 15, // 锁定15分钟
+            reset_window_minutes: 60,     // 1小时内重置计数
             enable_ip_lockout: true,
             enable_user_lockout: true,
         }
@@ -147,7 +147,8 @@ impl AccountLockout {
 
     /// 检查失败尝试是否应该重置（基于时间窗口）
     pub fn should_reset_attempts(&self, config: &LockoutConfig) -> bool {
-        let reset_threshold = Utc::now() - chrono::Duration::minutes(config.reset_window_minutes as i64);
+        let reset_threshold =
+            Utc::now() - chrono::Duration::minutes(config.reset_window_minutes as i64);
         self.last_attempt_at < reset_threshold
     }
 }
@@ -209,7 +210,7 @@ mod tests {
     #[test]
     fn test_account_lockout_creation() {
         let lockout = AccountLockout::new("test_user".to_string(), LockoutType::User);
-        
+
         assert_eq!(lockout.identifier, "test_user");
         assert_eq!(lockout.lockout_type, LockoutType::User);
         assert_eq!(lockout.failed_attempts, 0);
@@ -239,7 +240,10 @@ mod tests {
 
         assert!(lockout.is_locked());
         assert!(!lockout.is_lock_expired());
-        assert_eq!(lockout.failed_attempts, LockoutConfig::default().max_attempts);
+        assert_eq!(
+            lockout.failed_attempts,
+            LockoutConfig::default().max_attempts
+        );
     }
 
     #[test]
@@ -256,11 +260,11 @@ mod tests {
     #[test]
     fn test_lock_expiration() {
         let mut lockout = AccountLockout::new("test_user".to_string(), LockoutType::User);
-        
+
         // 手动设置一个已过期的锁定
         lockout.status = LockoutStatus::Locked;
         lockout.locked_until = Some(Utc::now() - chrono::Duration::minutes(1));
-        
+
         assert!(lockout.is_lock_expired());
         assert!(!lockout.is_locked()); // 应该返回false因为锁定已过期
     }
@@ -270,7 +274,7 @@ mod tests {
         let normal_result = LockoutCheckResult::normal(3);
         assert!(!normal_result.is_locked);
         assert_eq!(normal_result.remaining_attempts, 3);
-        
+
         let locked_result = LockoutCheckResult::locked(LockoutType::User, Some(300));
         assert!(locked_result.is_locked);
         assert_eq!(locked_result.remaining_attempts, 0);

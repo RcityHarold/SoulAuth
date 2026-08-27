@@ -1,0 +1,114 @@
+# SoulAuth 本地开发编排。
+#
+# 状态：每次推送由 CI 执行（.github/workflows/ci.yml 的 `docker` job）——
+#    起服务、健康检查、从日志取引导令牌、建第一个管理员、登录、访问受保护端点，
+#    再重启一次确认 schema-init 在已初始化的库上仍然放行。
+#
+#    这个 job 存在的理由是一条流程要求，不是形式：本仓库出过一次「部署文档
+#    照着做跑不通」的问题，此后的约定是 —— 可执行文档必须真的被执行过。
+#    这份文件最初带着「未经运行验证」的横幅躺了一段时间，因为编写它的环境
+#    没有 Docker；而 runner 有，所以它现在由 CI 顶着。
+#
+# 用法：
+#     cp .env.example .env      # 至少填 JWT_SECRET
+#     docker compose up -d
+#     curl http://localhost:8080/health
+#     docker compose logs -f soulauth      # 引导令牌打印在这里
+#
+# 它解决的是公开文档 03｜Quickstart 的这条硬要求：
+#
+#     「第一次运行不需要，也不应该要求你直接连接 SurrealDB、
+#       手工创建表或修改数据库记录。」
+#
+# 因此 schema 导入由 schema-init 这个一次性服务完成，而不是要求开发者
+# 自己装 SurrealDB CLI 再跑两条 import。
+#
+# 生产部署不要用这份文件：这里的口令是开发默认值，SurrealDB 也没有 TLS。
+# 生产路径见 DEPLOYMENT.md。
+
+name: soulauth
+
+services:
+  surrealdb:
+    image: surrealdb/surrealdb:v3
+    command:
+      - start
+      - --bind=0.0.0.0:8000
+      - --user=root
+      - --pass=root
+      - file:/data/soulauth.db
+    volumes:
+      - surreal-data:/data
+    healthcheck:
+      # 用 CLI 自带的探针：这个镜像里没有 curl，也没有 shell 之外的工具。
+      test: ["CMD", "/surreal", "isready", "--endpoint", "http://127.0.0.1:8000"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 5s
+
+  # 一次性服务：把 schema 与种子数据导进去，成功后退出。
+  #
+  # 用 SurrealDB 官方镜像而不是在应用里做运行期 DDL —— 认证服务不应该拥有
+  # 改自己表结构的权限，那条边界在 DEPLOYMENT.md 里已经定了。
+  schema-init:
+    image: surrealdb/surrealdb:v3
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+    volumes:
+      - ./schema.sql:/sql/schema.sql:ro
+      - ./initial_data.sql:/sql/initial_data.sql:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      # 先探测再导入。
+      #
+      # schema.sql 里 195 条 DEFINE 只有 8 条带 IF NOT EXISTS，在已经初始化过的
+      # 库上重跑会报 "already exists" 而退出非零 —— 而下游的
+      # service_completed_successfully 会因此让每次重启后的 soulauth 都起不来。
+      # 所以这里不能无条件导入。
+      #
+      # 判据用种子里的 role:admin，与应用启动时 ensure_schema_initialised 的
+      # 判据一致：它同时覆盖「schema 没导」与「导错了 ns/db」两种失败。
+      #
+      # 注意参数是 --endpoint 而不是 --conn：后者是 SurrealDB 2.x 之前的写法，
+      # 在 3.x 上会报一句没什么帮助的错。
+      - |
+        set -e
+        SQL="--endpoint http://surrealdb:8000 --user root --pass root --namespace auth --database main"
+        if echo 'SELECT VALUE id FROM role:admin;' \
+             | /surreal sql $$SQL --json 2>/dev/null | grep -q 'role:admin'; then
+          echo "schema already present in auth/main; skipping import"
+          exit 0
+        fi
+        for f in schema initial_data; do
+          /surreal import $$SQL "/sql/$${f}.sql"
+        done
+        echo "schema and seed data imported into auth/main"
+    restart: "no"
+
+  soulauth:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      # 覆盖 .env 里指向宿主机的默认值：容器内要走服务名。
+      DATABASE_URL: surrealdb:8000
+      DATABASE_USER: root
+      DATABASE_PASS: root
+      DATABASE_NAMESPACE: auth
+      DATABASE_NAME: main
+      BIND_ADDR: 0.0.0.0:8080
+      # 环回地址 → 不触发生产闸门，OIDC 私钥与 MFA 密钥因此不是必填。
+      # 这正是开发默认值不能用于生产的原因。
+      APP_URL: http://localhost:8080
+    ports:
+      - "8080:8080"
+
+volumes:
+  surreal-data:

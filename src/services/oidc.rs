@@ -35,6 +35,38 @@ pub struct OidcService {
     signing_key: Arc<OidcSigningKey>,
 }
 
+/// 身份 claim 的披露判定。
+///
+/// # 为什么要收成一个类型
+///
+/// ID Token 与 UserInfo 输出的是同一批 claim，因此必须服从同一套披露规则。
+/// 此前两条通路各写各的：UserInfo 按 scope 裁剪，`generate_id_token` 却连
+/// `scope` 参数都没有，无条件放 `email` / `email_verified` /
+/// `preferred_username`。于是只申请 `openid` 的客户端，从 UserInfo 拿不到邮箱，
+/// 从 ID Token 却拿得到 —— 同一台服务器，同一份 claim，两套规则。
+///
+/// 把判定收在这里，两条通路就不可能再分叉：想改规则只有一个地方可改。
+///
+/// 注意它只管**身份属性**。`sub` / `iss` / `aud` / `exp` / `iat` /
+/// `auth_time` / `sid` 是协议骨架，任何 scope 下都必须存在，不归它管。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ClaimDisclosure {
+    /// `email` scope：放行 `email` 与 `email_verified`。
+    email: bool,
+    /// `profile` scope：放行 `preferred_username`、`updated_at` 等档案属性。
+    profile: bool,
+}
+
+impl ClaimDisclosure {
+    fn from_scope(scope: &str) -> Self {
+        let scopes: Vec<&str> = scope.split_whitespace().collect();
+        Self {
+            email: scopes.contains(&"email"),
+            profile: scopes.contains(&"profile"),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct OidcConfiguration {
     pub issuer: String,
@@ -53,7 +85,11 @@ pub struct OidcConfiguration {
 }
 
 impl OidcService {
-    pub fn new(db: Arc<Database>, config: Config, signing_key: Arc<OidcSigningKey>) -> Result<Self> {
+    pub fn new(
+        db: Arc<Database>,
+        config: Config,
+        signing_key: Arc<OidcSigningKey>,
+    ) -> Result<Self> {
         Ok(Self {
             db,
             config,
@@ -169,7 +205,7 @@ impl OidcService {
 
         let auth_code = OidcAuthorizationCode {
             id: None,
-            code: code.clone(),
+            code_hash: crate::utils::crypto::hash_bearer(&code),
             client_id: request.client_id.clone(),
             user_id: user_id.to_string(),
             redirect_uri: request.redirect_uri.clone(),
@@ -334,7 +370,10 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Missing refresh token"))?;
 
         let client = self.authenticate_client(request).await?;
-        if !client.allowed_grant_types.contains(&GrantType::RefreshToken) {
+        if !client
+            .allowed_grant_types
+            .contains(&GrantType::RefreshToken)
+        {
             return Err(anyhow!("Grant type not allowed for this client"));
         }
 
@@ -357,12 +396,15 @@ impl OidcService {
         }
 
         // 原子地标记旧刷新令牌为已使用，避免并发重放
-        if !self.consume_refresh_token(&stored_refresh_token.token).await? {
+        if !self
+            .consume_refresh_token_by_hash(&stored_refresh_token.token_hash)
+            .await?
+        {
             return Err(anyhow!("Refresh token already used"));
         }
 
         // 使旧的访问令牌失效
-        self.revoke_access_token(&stored_refresh_token.access_token)
+        self.revoke_access_token_by_hash(&stored_refresh_token.access_token_hash)
             .await?;
 
         // 刷新时不允许提权：新 scope 必须是原 scope 的子集
@@ -386,7 +428,7 @@ impl OidcService {
             None,
             stored_refresh_token.auth_session_ref.as_deref(),
         )
-            .await
+        .await
     }
 
     async fn generate_tokens(
@@ -413,7 +455,7 @@ impl OidcService {
 
         let oidc_access_token = OidcAccessToken {
             id: None,
-            token: access_token.clone(),
+            token_hash: crate::utils::crypto::hash_bearer(&access_token),
             token_type: "Bearer".to_string(),
             client_id: client.client_id.clone(),
             user_id: user_id.to_string(),
@@ -427,16 +469,19 @@ impl OidcService {
             .map_err(|e| anyhow!("save access token failed: {e}"))?;
 
         // 生成刷新令牌
-        let refresh_token = if client.allowed_grant_types.contains(&GrantType::RefreshToken) {
+        let refresh_token = if client
+            .allowed_grant_types
+            .contains(&GrantType::RefreshToken)
+        {
             let token = generate_random_string(48);
             let refresh_token_expires_at = now + client.refresh_token_lifetime;
 
             let oidc_refresh_token = OidcRefreshToken {
                 id: None,
-                token: token.clone(),
+                token_hash: crate::utils::crypto::hash_bearer(&token),
                 client_id: client.client_id.clone(),
                 user_id: user_id.to_string(),
-                access_token: access_token.clone(),
+                access_token_hash: crate::utils::crypto::hash_bearer(&access_token),
                 scope: scope.to_string(),
                 auth_session_ref: auth_session_ref.map(ToOwned::to_owned),
                 used: false,
@@ -453,9 +498,13 @@ impl OidcService {
         };
 
         // 生成 ID 令牌（如果 scope 包含 openid）。用户在上面已经取过并校验过状态。
+        //
+        // `scope` 必须传下去：它不只决定**发不发** ID Token，还决定里面**放什么**。
+        // 此前只用它判断了前者，于是只申请 `openid` 的客户端照样拿到邮箱与用户名 ——
+        // 而同一台服务器的 UserInfo 是按 scope 裁剪的。同一份 claim 两套披露规则。
         let id_token = if scope.split_whitespace().any(|value| value == "openid") {
             Some(
-                self.generate_id_token(client, &user, nonce, auth_session_ref)
+                self.generate_id_token(client, &user, nonce, auth_session_ref, scope)
                     .await?,
             )
         } else {
@@ -479,12 +528,19 @@ impl OidcService {
     /// 链路都要求 `auth_session_ref`，缺了下游只能编或留空，两者都比失败更糟。
     ///
     /// 影响：升级前签发的刷新令牌没有该字段，首次刷新会失败，用户需重新登录一次。
+    /// 签发 ID Token。
+    ///
+    /// 身份 claim 的披露由 [`ClaimDisclosure`] 判定，与 UserInfo 同一处口径。
+    ///
+    /// `sub`、`iss`、`aud`、`exp`、`iat`、`auth_time`、`sid` 是协议骨架，
+    /// 不受 scope 约束；`email` / `profile` 这类身份属性受约束。
     async fn generate_id_token(
         &self,
         client: &OidcClient,
         user: &User,
         nonce: Option<&str>,
         auth_session_ref: Option<&str>,
+        scope: &str,
     ) -> Result<String> {
         let sid = auth_session_ref
             .map(str::trim)
@@ -494,6 +550,8 @@ impl OidcService {
 
         let now = Utc::now().timestamp();
         let exp = now + client.id_token_lifetime;
+
+        let disclose = ClaimDisclosure::from_scope(scope);
 
         let claims = IdTokenClaims {
             iss: self.issuer(),
@@ -506,10 +564,10 @@ impl OidcService {
             auth_time: user.last_login_at.unwrap_or(now),
             sid,
             nonce: nonce.map(|n| n.to_string()),
-            email: Some(user.email.clone()),
-            email_verified: Some(user.is_email_verified),
+            email: disclose.email.then(|| user.email.clone()),
+            email_verified: disclose.email.then_some(user.is_email_verified),
             name: None, // 需要从用户档案获取
-            preferred_username: Some(user.username.clone()),
+            preferred_username: disclose.profile.then(|| user.username.clone()),
             profile: None,
             picture: None,
         };
@@ -534,8 +592,9 @@ impl OidcService {
         // `aud` 不设置即表示不校验（jsonwebtoken 只在 `validation.aud` 存在时比对）。
         validation.validate_exp = false;
 
-        let token_data = decode::<IdTokenClaims>(id_token, self.signing_key.decoding_key(), &validation)
-            .map_err(|e| anyhow!("Invalid id_token_hint: {e}"))?;
+        let token_data =
+            decode::<IdTokenClaims>(id_token, self.signing_key.decoding_key(), &validation)
+                .map_err(|e| anyhow!("Invalid id_token_hint: {e}"))?;
 
         Ok((token_data.claims.sub, token_data.claims.aud))
     }
@@ -554,20 +613,19 @@ impl OidcService {
 
         // 停用之后，此前签发的 access token 不该还能换出身份。
         let user = self.load_active_user(&token.user_id).await?;
-        let include_email = scopes.contains(&"email");
-        let include_profile = scopes.contains(&"profile");
+        let disclose = ClaimDisclosure::from_scope(&token.scope);
 
         Ok(UserInfoResponse {
             sub: crate::utils::record_id::record_id_key_to_string(
                 user.id.as_ref().ok_or_else(|| anyhow!("User has no id"))?,
             ),
-            email: include_email.then(|| user.email.clone()),
-            email_verified: include_email.then_some(user.is_email_verified),
+            email: disclose.email.then(|| user.email.clone()),
+            email_verified: disclose.email.then_some(user.is_email_verified),
             name: None, // 需要从用户档案获取
-            preferred_username: include_profile.then(|| user.username.clone()),
+            preferred_username: disclose.profile.then(|| user.username.clone()),
             profile: None,
             picture: None,
-            updated_at: include_profile.then_some(user.updated_at),
+            updated_at: disclose.profile.then_some(user.updated_at),
         })
     }
 
@@ -614,7 +672,10 @@ impl OidcService {
             Some("S256") => {
                 let hash = Sha256::digest(code_verifier.as_bytes());
                 let encoded = general_purpose::URL_SAFE_NO_PAD.encode(hash);
-                Ok(constant_time_eq(encoded.as_bytes(), code_challenge.as_bytes()))
+                Ok(constant_time_eq(
+                    encoded.as_bytes(),
+                    code_challenge.as_bytes(),
+                ))
             }
             Some(other) => Err(anyhow!("Unsupported code challenge method: {}", other)),
             None => Err(anyhow!("Missing code_challenge_method; S256 is required")),
@@ -667,13 +728,27 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Client not found"))
     }
 
+    /// 由**身份根**引用取回 user 行。
+    ///
+    /// 授权码与令牌里的 `user_id` 自 Stage 3 起存的是 actor ref，所以这里按
+    /// `subject_id` 反查。按 `user.id` 查会一行也找不到 —— 授权码签发成功、
+    /// 兑换却返回 400，集成测试抓到的正是这个。
+    ///
+    /// 兼容旧值：Stage 3 之前签发、仍在有效期内的授权码与刷新令牌里存的是
+    /// user id。两种都试，直到那批令牌自然过期。
     async fn get_user_by_id(&self, user_id: &str) -> Result<User> {
+        // 传进来的可能是 actor ref（Stage 3 起的新令牌）或 user id（旧令牌），
+        // 两种前缀都要能剥掉。
+        let key = crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id));
         let users: Vec<User> = self
             .db
             .query_take0_vec(
-                "oidc_get_user_by_id",
-                "SELECT * FROM user WHERE id = type::record('user', $user_key) LIMIT 1",
-                serde_json::json!({ "user_key": normalize_user_id(user_id) }),
+                "oidc_get_user_by_actor_ref",
+                "SELECT * FROM user \
+                 WHERE subject_id = type::record('actor_identity', $user_key) \
+                    OR id = type::record('user', $user_key) \
+                 LIMIT 1",
+                serde_json::json!({ "user_key": key }),
             )
             .await?;
 
@@ -701,9 +776,9 @@ impl OidcService {
     async fn save_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
         let query = r#"
             CREATE oidc_authorization_code CONTENT {
-                code: $code,
+                code_hash: $code_hash,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
+                user_id: (SELECT VALUE subject_id FROM type::record('user', $user_key))[0],
                 redirect_uri: $redirect_uri,
                 scope: $scope,
                 -- `Option::None` 经 JSON 绑定会变成 NULL，而 `option<string>` 列
@@ -725,7 +800,7 @@ impl OidcService {
                 "oidc_save_authorization_code",
                 query,
                 serde_json::json!({
-                    "code": code.code,
+                    "code_hash": code.code_hash,
                     "client_id": code.client_id,
                     "user_key": normalize_user_id(&code.user_id),
                     "redirect_uri": code.redirect_uri,
@@ -745,11 +820,12 @@ impl OidcService {
         Ok(())
     }
 
+    /// 按**指纹**取授权码。入参仍是来件原文，指纹在这里算。
     async fn get_authorization_code(&self, code: &str) -> Result<OidcAuthorizationCode> {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                code,
+                code_hash,
                 client_id,
                 type::string(user_id) AS user_id,
                 redirect_uri,
@@ -763,7 +839,7 @@ impl OidcService {
                 expires_at,
                 created_at
             FROM oidc_authorization_code
-            WHERE code = $code
+            WHERE code_hash = $code_hash
             LIMIT 1
         "#;
 
@@ -772,7 +848,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_authorization_code",
                 query,
-                serde_json::json!({ "code": code }),
+                serde_json::json!({ "code_hash": crate::utils::crypto::hash_bearer(code) }),
             )
             .await?;
 
@@ -788,13 +864,13 @@ impl OidcService {
 
     async fn update_authorization_code(&self, code: &OidcAuthorizationCode) -> Result<()> {
         let query =
-            "UPDATE oidc_authorization_code SET used = true WHERE code = $code AND used = false RETURN VALUE code";
+            "UPDATE oidc_authorization_code SET used = true WHERE code_hash = $code_hash AND used = false RETURN VALUE code_hash";
         let mut result = self
             .db
             .raw_query(
                 "oidc_update_authorization_code",
                 query,
-                serde_json::json!({ "code": code.code }),
+                serde_json::json!({ "code_hash": code.code_hash }),
             )
             .await?;
 
@@ -809,10 +885,10 @@ impl OidcService {
     async fn save_access_token(&self, token: &OidcAccessToken) -> Result<()> {
         let query = r#"
             CREATE oidc_access_token CONTENT {
-                token: $access_token_value,
+                token_hash: $access_token_hash,
                 token_type: $token_type,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
+                user_id: type::record('actor_identity', $user_key),
                 scope: $scope,
                 expires_at: $expires_at,
                 created_at: $created_at
@@ -824,10 +900,10 @@ impl OidcService {
                 "oidc_save_access_token",
                 query,
                 serde_json::json!({
-                    "access_token_value": token.token,
+                    "access_token_hash": token.token_hash,
                     "token_type": token.token_type,
                     "client_id": token.client_id,
-                    "user_key": normalize_user_id(&token.user_id),
+                    "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
                     "scope": token.scope,
                     "expires_at": token.expires_at,
                     "created_at": token.created_at,
@@ -842,7 +918,7 @@ impl OidcService {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                token,
+                token_hash,
                 token_type,
                 client_id,
                 type::string(user_id) AS user_id,
@@ -850,7 +926,7 @@ impl OidcService {
                 expires_at,
                 created_at
             FROM oidc_access_token
-            WHERE token = $access_token_value
+            WHERE token_hash = $access_token_hash
             LIMIT 1
         "#;
 
@@ -859,7 +935,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_access_token",
                 query,
-                serde_json::json!({ "access_token_value": token }),
+                serde_json::json!({ "access_token_hash": crate::utils::crypto::hash_bearer(token) }),
             )
             .await?;
 
@@ -873,12 +949,16 @@ impl OidcService {
             .ok_or_else(|| anyhow!("Access token not found"))
     }
 
-    async fn revoke_access_token(&self, token: &str) -> Result<()> {
+    /// 按指纹吊销访问令牌。
+    ///
+    /// 收指纹而不是原文：唯一调用方是刷新流程，它手上只有刷新令牌记录里
+    /// 存的那份指纹，原文早就交给客户端了。
+    async fn revoke_access_token_by_hash(&self, token_hash: &str) -> Result<()> {
         self.db
             .raw_query(
                 "oidc_revoke_access_token",
-                "DELETE oidc_access_token WHERE token = $access_token_value",
-                serde_json::json!({ "access_token_value": token }),
+                "DELETE oidc_access_token WHERE token_hash = $access_token_hash",
+                serde_json::json!({ "access_token_hash": token_hash }),
             )
             .await?;
 
@@ -888,10 +968,10 @@ impl OidcService {
     async fn save_refresh_token(&self, token: &OidcRefreshToken) -> Result<()> {
         let query = r#"
             CREATE oidc_refresh_token CONTENT {
-                token: $refresh_token_value,
+                token_hash: $refresh_token_hash,
                 client_id: $client_id,
-                user_id: type::record('user', $user_key),
-                access_token: $access_token,
+                user_id: type::record('actor_identity', $user_key),
+                access_token_hash: $access_token_hash,
                 scope: $scope,
                 auth_session_ref: $auth_session_ref ?? NONE,
                 used: $used,
@@ -905,10 +985,10 @@ impl OidcService {
                 "oidc_save_refresh_token",
                 query,
                 serde_json::json!({
-                    "refresh_token_value": token.token,
+                    "refresh_token_hash": token.token_hash,
                     "client_id": token.client_id,
-                    "user_key": normalize_user_id(&token.user_id),
-                    "access_token": token.access_token,
+                    "user_key": crate::utils::record_id::normalize_actor_id(&token.user_id),
+                    "access_token_hash": token.access_token_hash,
                     "auth_session_ref": token.auth_session_ref,
                     "scope": token.scope,
                     "used": token.used,
@@ -925,17 +1005,17 @@ impl OidcService {
         let query = r#"
             SELECT
                 type::string(id) AS id,
-                token,
+                token_hash,
                 client_id,
                 type::string(user_id) AS user_id,
-                access_token,
+                access_token_hash,
                 scope,
                 auth_session_ref,
                 used,
                 expires_at,
                 created_at
             FROM oidc_refresh_token
-            WHERE token = $refresh_token_value
+            WHERE token_hash = $refresh_token_hash
             LIMIT 1
         "#;
 
@@ -944,7 +1024,7 @@ impl OidcService {
             .raw_query(
                 "oidc_get_refresh_token",
                 query,
-                serde_json::json!({ "refresh_token_value": token }),
+                serde_json::json!({ "refresh_token_hash": crate::utils::crypto::hash_bearer(token) }),
             )
             .await?;
 
@@ -959,15 +1039,16 @@ impl OidcService {
     }
 
     /// 原子地把刷新令牌标记为已使用；返回 false 表示已经被别的请求消费掉了。
-    async fn consume_refresh_token(&self, token: &str) -> Result<bool> {
-        let query = "UPDATE oidc_refresh_token SET used = true WHERE token = $refresh_token_value AND used = false RETURN VALUE token";
+    /// 按指纹原子地把刷新令牌标记为已用。收指纹，理由同 `revoke_access_token_by_hash`。
+    async fn consume_refresh_token_by_hash(&self, token_hash: &str) -> Result<bool> {
+        let query = "UPDATE oidc_refresh_token SET used = true WHERE token_hash = $refresh_token_hash AND used = false RETURN VALUE token_hash";
 
         let mut result = self
             .db
             .raw_query(
                 "oidc_consume_refresh_token",
                 query,
-                serde_json::json!({ "refresh_token_value": token }),
+                serde_json::json!({ "refresh_token_hash": token_hash }),
             )
             .await?;
 
@@ -983,20 +1064,24 @@ impl OidcService {
     ) -> Result<()> {
         let bindings = serde_json::json!({
             "client_id": client_id,
-            "user_key": normalize_user_id(user_id),
+            // 调用方可能传 user id（路由层从 session 拿的），也可能传 actor ref
+            // （复用检测从存储的令牌读回的）。两种前缀都剥掉成裸 key，
+            // 由 SQL 那边同时按两种解释匹配 —— 在 Rust 侧猜是哪一种不可靠，
+            // 猜错的后果是令牌族没被吊销，而那是个安全缺陷。
+            "user_key": crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id)),
         });
 
         self.db
             .raw_query(
                 "oidc_revoke_access_tokens_for_client",
-                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id = type::record('user', $user_key)",
+                "DELETE oidc_access_token WHERE client_id = $client_id AND user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_refresh_tokens_for_client",
-                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id = type::record('user', $user_key)",
+                "DELETE oidc_refresh_token WHERE client_id = $client_id AND user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings,
             )
             .await?;
@@ -1006,19 +1091,21 @@ impl OidcService {
 
     /// 吊销某用户在**所有**客户端上的令牌（全局登出）。
     pub async fn revoke_all_tokens_for_user(&self, user_id: &str) -> Result<()> {
-        let bindings = serde_json::json!({ "user_key": normalize_user_id(user_id) });
+        let bindings = serde_json::json!({
+            "user_key": crate::utils::record_id::normalize_actor_id(&normalize_user_id(user_id)),
+        });
 
         self.db
             .raw_query(
                 "oidc_revoke_all_access_tokens",
-                "DELETE oidc_access_token WHERE user_id = type::record('user', $user_key)",
+                "DELETE oidc_access_token WHERE user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings.clone(),
             )
             .await?;
         self.db
             .raw_query(
                 "oidc_revoke_all_refresh_tokens",
-                "DELETE oidc_refresh_token WHERE user_id = type::record('user', $user_key)",
+                "DELETE oidc_refresh_token WHERE user_id IN [type::record('actor_identity', $user_key), (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]]",
                 bindings,
             )
             .await?;
@@ -1099,7 +1186,8 @@ fn generate_random_string(length: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        constant_time_eq, hash_client_secret, verify_client_secret_hash, OidcService,
+        constant_time_eq, hash_client_secret, verify_client_secret_hash, ClaimDisclosure,
+        OidcService,
     };
     use base64::{engine::general_purpose, Engine as _};
     use sha2::{Digest, Sha256};
@@ -1129,7 +1217,9 @@ mod tests {
         let verifier = "plain-verifier-abcdefghijklmnopqrstuvwxyz012345";
         let err = OidcService::verify_pkce_value(verifier, Some("plain"), verifier)
             .expect_err("plain must be rejected");
-        assert!(err.to_string().contains("Unsupported code challenge method"));
+        assert!(err
+            .to_string()
+            .contains("Unsupported code challenge method"));
     }
 
     #[test]
@@ -1180,5 +1270,44 @@ mod tests {
         assert!(constant_time_eq(b"abc", b"abc"));
         assert!(!constant_time_eq(b"abc", b"abd"));
         assert!(!constant_time_eq(b"abc", b"abcd"));
+    }
+
+    #[test]
+    fn openid_alone_discloses_no_identity_attributes() {
+        // 这是回归测试：ID Token 曾经无条件放 email 与 preferred_username，
+        // 而 UserInfo 是裁剪的。只申请 openid 的客户端不该拿到任何身份属性。
+        let d = ClaimDisclosure::from_scope("openid");
+        assert!(!d.email);
+        assert!(!d.profile);
+    }
+
+    #[test]
+    fn each_scope_opens_only_its_own_claims() {
+        let d = ClaimDisclosure::from_scope("openid email");
+        assert!(d.email);
+        assert!(!d.profile, "email scope 不得顺带放行档案属性");
+
+        let d = ClaimDisclosure::from_scope("openid profile");
+        assert!(!d.email, "profile scope 不得顺带放行邮箱");
+        assert!(d.profile);
+
+        let d = ClaimDisclosure::from_scope("openid email profile");
+        assert!(d.email);
+        assert!(d.profile);
+    }
+
+    #[test]
+    fn scope_matching_is_exact_and_whitespace_tolerant() {
+        // 子串匹配会让 `emailish` 或 `not-profile` 意外放行。
+        assert!(!ClaimDisclosure::from_scope("openid emailish").email);
+        assert!(!ClaimDisclosure::from_scope("openid xprofile").profile);
+        // scope 是空格分隔的列表，多余空白不应改变判定。
+        let d = ClaimDisclosure::from_scope("  openid   email  ");
+        assert!(d.email);
+        assert!(!d.profile);
+        // 空 scope 什么都不放行。
+        let d = ClaimDisclosure::from_scope("");
+        assert!(!d.email);
+        assert!(!d.profile);
     }
 }

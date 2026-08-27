@@ -1,19 +1,14 @@
-use axum::{
-    extract::Query,
-    response::Json,
-    routing::get,
-    Extension, Router,
-};
+use axum::{extract::Query, response::Json, routing::get, Extension, Router};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    error::{Result as ApiResult, AuthError},
+    error::{AuthError, Result as ApiResult},
+    require_permission,
     services::{audit::AuditService, database::Database},
     utils::jwt::AuthedUser,
-    require_permission,
 };
 
 pub fn audit_routes() -> Router {
@@ -298,30 +293,30 @@ pub async fn get_audit_dashboard(
 
     let days = clamp_days(query.days, 7);
     let start_time = Utc::now() - Duration::days(days);
-    
+
     tracing::info!("Generating audit dashboard for {} days", days);
 
     // Get total users
     let total_users = get_total_users(&db).await?;
-    
+
     // Get active sessions
     let active_sessions = get_active_sessions_count(&db).await?;
-    
+
     // Get failed logins in period
     let failed_logins = get_failed_logins_count(&db, start_time).await?;
-    
+
     // Get locked accounts
     let locked_accounts = get_locked_accounts_count(&db).await?;
-    
+
     // Get security events count
     let security_events = get_security_events_count(&db, start_time).await?;
-    
+
     // Get top activities using audit service
     let top_activities = get_top_activities(&db, start_time).await?;
-    
+
     // Get login trends (daily aggregation)
     let login_trends = get_login_trends(&db, start_time, days).await?;
-    
+
     // Get security trends
     let security_trends = get_security_trends(&db, start_time, days).await?;
 
@@ -346,11 +341,15 @@ pub async fn get_security_metrics(
     Query(query): Query<AuditQuery>,
 ) -> ApiResult<Json<SecurityMetrics>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, crate::models::permission::names::SECURITY_READ);
+    require_permission!(
+        &db,
+        &user_id,
+        crate::models::permission::names::SECURITY_READ
+    );
 
     let hours = clamp_hours(query.hours, 24);
     let start_time = Utc::now() - Duration::hours(hours);
-    
+
     tracing::info!("Generating security metrics for {} hours", hours);
 
     let audit_service = AuditService::new(db.as_ref().clone());
@@ -385,7 +384,7 @@ pub async fn get_activity_summary(
 
     let days = clamp_days(query.days, 7);
     let start_time = Utc::now() - Duration::days(days);
-    
+
     tracing::info!("Generating activity summary for {} days", days);
 
     let audit_service = AuditService::new(db.as_ref().clone());
@@ -394,7 +393,9 @@ pub async fn get_activity_summary(
     let by_category = audit_service.get_activities_by_category(start_time).await?;
     let by_status = audit_service.get_activities_by_status(start_time).await?;
     let top_users = audit_service.get_top_active_users(start_time).await?;
-    let hourly_distribution = audit_service.get_hourly_activity_distribution(start_time).await?;
+    let hourly_distribution = audit_service
+        .get_hourly_activity_distribution(start_time)
+        .await?;
 
     let summary = ActivitySummary {
         period: format!("Last {} days", days),
@@ -413,8 +414,12 @@ pub async fn get_system_health(
     authed_user: AuthedUser,
 ) -> ApiResult<Json<SystemHealth>> {
     let user_id = authed_user.id()?;
-    require_permission!(&db, &user_id, crate::models::permission::names::SECURITY_READ);
-    
+    require_permission!(
+        &db,
+        &user_id,
+        crate::models::permission::names::SECURITY_READ
+    );
+
     tracing::info!("Checking system health");
 
     let database_status = check_database_health(&db).await?;
@@ -445,7 +450,7 @@ pub async fn generate_security_report(
 
     let days = clamp_days(query.days, 30);
     let start_time = Utc::now() - Duration::days(days);
-    
+
     tracing::info!("Generating comprehensive security report for {} days", days);
 
     let audit_service = AuditService::new(db.as_ref().clone());
@@ -454,7 +459,9 @@ pub async fn generate_security_report(
     let authentication_analysis = generate_authentication_analysis(&db, start_time).await?;
     let security_incidents = get_security_incidents(&db, start_time).await?;
     let user_behavior_analysis = generate_user_behavior_analysis(&db, start_time).await?;
-    let recommendations = audit_service.generate_security_recommendations(start_time).await?;
+    let recommendations = audit_service
+        .generate_security_recommendations(start_time)
+        .await?;
 
     let report = SecurityReport {
         generated_at: Utc::now(),
@@ -472,25 +479,29 @@ pub async fn generate_security_report(
 // Helper functions for data aggregation (implementation details)
 async fn get_total_users(db: &Database) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM user WHERE account_status != 'Deleted' GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .await
         .and_then(|response| response.check())
         .map_err(|e| {
             tracing::error!("Failed to get total users: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("total").map_err(|e| {
         tracing::error!("Failed to extract total users count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
 async fn get_active_sessions_count(db: &Database) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM session WHERE expires_at > $now GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("now", Utc::now().timestamp()))
         .await
         .and_then(|response| response.check())
@@ -498,18 +509,20 @@ async fn get_active_sessions_count(db: &Database) -> ApiResult<i64> {
             tracing::error!("Failed to get active sessions: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("total").map_err(|e| {
         tracing::error!("Failed to extract active sessions count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
 async fn get_failed_logins_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
         .and_then(|response| response.check())
@@ -517,18 +530,20 @@ async fn get_failed_logins_count(db: &Database, start_time: DateTime<Utc>) -> Ap
             tracing::error!("Failed to get failed logins count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("total").map_err(|e| {
         tracing::error!("Failed to extract failed logins count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
 async fn get_locked_accounts_count(db: &Database) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("now", Utc::now()))
         .await
         .and_then(|response| response.check())
@@ -536,18 +551,20 @@ async fn get_locked_accounts_count(db: &Database) -> ApiResult<i64> {
             tracing::error!("Failed to get locked accounts count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("total").map_err(|e| {
         tracing::error!("Failed to extract locked accounts count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
 async fn get_security_events_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
     let query = "SELECT count() as total FROM user_activity WHERE category = 'Security' AND timestamp >= $start_time GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
         .and_then(|response| response.check())
@@ -555,18 +572,23 @@ async fn get_security_events_count(db: &Database, start_time: DateTime<Utc>) -> 
             tracing::error!("Failed to get security events count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("total").map_err(|e| {
         tracing::error!("Failed to extract security events count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
-async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResult<Vec<ActivityMetric>> {
+async fn get_top_activities(
+    db: &Database,
+    start_time: DateTime<Utc>,
+) -> ApiResult<Vec<ActivityMetric>> {
     let query = "SELECT action, count() as count FROM user_activity WHERE timestamp >= $start_time GROUP BY action ORDER BY count DESC LIMIT 10";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
         .and_then(|response| response.check())
@@ -574,7 +596,7 @@ async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResu
             tracing::error!("Failed to get top activities: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     // 每行是对象而非元组；原来的元组解析会失败，把 /api/audit/dashboard 打成 500。
     let rows: Vec<serde_json::Value> = result.take(0).map_err(|e| {
         tracing::error!("Failed to extract top activities: {}", e);
@@ -585,7 +607,10 @@ async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResu
         .iter()
         .map(|r| {
             (
-                r.get("action").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                r.get("action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
                 r.get("count").and_then(|v| v.as_i64()).unwrap_or(0),
             )
         })
@@ -593,13 +618,18 @@ async fn get_top_activities(db: &Database, start_time: DateTime<Utc>) -> ApiResu
 
     let total: i64 = activities.iter().map(|(_, count)| count).sum();
 
-    Ok(activities.into_iter().map(|(action, count)| {
-        ActivityMetric {
+    Ok(activities
+        .into_iter()
+        .map(|(action, count)| ActivityMetric {
             action,
             count,
-            percentage: if total > 0 { (count as f64 / total as f64) * 100.0 } else { 0.0 },
-        }
-    }).collect())
+            percentage: if total > 0 {
+                (count as f64 / total as f64) * 100.0
+            } else {
+                0.0
+            },
+        })
+        .collect())
 }
 
 async fn get_login_trends(
@@ -679,8 +709,11 @@ async fn get_security_trends(
 // Helper functions - simplified implementations for now
 
 async fn get_total_activities_count(db: &Database, start_time: DateTime<Utc>) -> ApiResult<i64> {
-    let query = "SELECT count() as count FROM user_activity WHERE timestamp >= $start_time GROUP ALL";
-    let mut result = db.client.query(query)
+    let query =
+        "SELECT count() as count FROM user_activity WHERE timestamp >= $start_time GROUP ALL";
+    let mut result = db
+        .client
+        .query(query)
         .bind(("start_time", start_time.timestamp()))
         .await
         .and_then(|response| response.check())
@@ -688,31 +721,35 @@ async fn get_total_activities_count(db: &Database, start_time: DateTime<Utc>) ->
             tracing::error!("Failed to get total activities count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("count").map_err(|e| {
         tracing::error!("Failed to extract total activities count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
 async fn check_database_health(db: &Database) -> ApiResult<DatabaseHealth> {
     let start = std::time::Instant::now();
-    
+
     // Simple health check
     //
     // 这里也要 `.check()`：`query().await` 成功只说明请求送到了，语句本身失败
     // （比如鉴权态过期）仍然会被算成"连接正常"，健康检查就永远报绿。
     let query = "INFO FOR DB";
-    let result = db.client.query(query).await.and_then(|response| response.check());
+    let result = db
+        .client
+        .query(query)
+        .await
+        .and_then(|response| response.check());
 
     let response_time_ms = start.elapsed().as_millis() as i64;
     let connected = result.is_ok();
     if let Err(error) = &result {
         tracing::warn!(%error, "Database health check failed");
     }
-    
+
     // SurrealDB 的 HTTP 客户端不暴露连接池指标，原来那两个"连接池"字段
     // 一直是写死的 1/10，已删除，避免把假数字当监控数据看。
     Ok(DatabaseHealth {
@@ -723,7 +760,9 @@ async fn check_database_health(db: &Database) -> ApiResult<DatabaseHealth> {
 
 async fn get_pending_lockouts_count(db: &Database) -> ApiResult<i64> {
     let query = "SELECT count() as count FROM account_lockout WHERE status = 'Locked' AND locked_until > $now GROUP ALL";
-    let mut result = db.client.query(query)
+    let mut result = db
+        .client
+        .query(query)
         .bind(("now", Utc::now()))
         .await
         .and_then(|response| response.check())
@@ -731,12 +770,12 @@ async fn get_pending_lockouts_count(db: &Database) -> ApiResult<i64> {
             tracing::error!("Failed to get pending lockouts count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
         })?;
-    
+
     let count: Option<i64> = result.take("count").map_err(|e| {
         tracing::error!("Failed to extract pending lockouts count: {}", e);
         AuthError::DatabaseError("Query execution failed".to_string())
     })?;
-    
+
     Ok(count.unwrap_or(0))
 }
 
@@ -958,12 +997,7 @@ async fn generate_user_behavior_analysis(
         )
         .await?;
 
-    let mut buckets: [(&str, i64); 4] = [
-        ("1", 0),
-        ("2-5", 0),
-        ("6-20", 0),
-        ("20+", 0),
-    ];
+    let mut buckets: [(&str, i64); 4] = [("1", 0), ("2-5", 0), ("6-20", 0), ("20+", 0)];
     for row in &per_user_logins {
         let count = row.get("count").and_then(|v| v.as_i64()).unwrap_or(0);
         let idx = match count {

@@ -1,4 +1,7 @@
-use crate::{config::Config, error::{AuthError, Result}};
+use crate::{
+    config::Config,
+    error::{AuthError, Result},
+};
 use lettre::{
     message::{header::ContentType, Mailbox},
     transport::smtp::authentication::Credentials,
@@ -49,7 +52,9 @@ impl EmailService {
             builder.build()
         } else {
             let mut builder = SmtpTransport::starttls_relay(&self.config.smtp_host)
-                .map_err(|e| AuthError::ServerError(format!("Failed to create SMTP transport: {}", e)))?
+                .map_err(|e| {
+                    AuthError::ServerError(format!("Failed to create SMTP transport: {}", e))
+                })?
                 .port(self.config.smtp_port)
                 .timeout(Some(Duration::from_secs(60)));
             if let Some(creds) = creds {
@@ -81,10 +86,14 @@ impl EmailService {
     }
 
     pub async fn send_verification_email(&self, to_email: &str, token: &str) -> Result<()> {
-        let from_address = self.config.smtp_from.parse::<Mailbox>()
+        let from_address = self
+            .config
+            .smtp_from
+            .parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid from address: {}", e)))?;
-        
-        let to_address = to_email.parse::<Mailbox>()
+
+        let to_address = to_email
+            .parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid to address: {}", e)))?;
 
         // 指向前端页面，由它去调 `GET /api/auth/verify-email/{token}`。
@@ -92,10 +101,7 @@ impl EmailService {
         // ——而且响应体里还带着刚签发的访问令牌。
         let page = self.config.verify_email_page_url();
         let separator = if page.contains('?') { '&' } else { '?' };
-        let verification_link = format!(
-            "{page}{separator}token={}",
-            urlencoding::encode(token)
-        );
+        let verification_link = format!("{page}{separator}token={}", urlencoding::encode(token));
 
         let email = Message::builder()
             .from(from_address)
@@ -117,10 +123,14 @@ impl EmailService {
     }
 
     pub async fn send_password_reset_email(&self, to_email: &str, token: &str) -> Result<()> {
-        let from_address = self.config.smtp_from.parse::<Mailbox>()
+        let from_address = self
+            .config
+            .smtp_from
+            .parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid from address: {}", e)))?;
-        
-        let to_address = to_email.parse::<Mailbox>()
+
+        let to_address = to_email
+            .parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid to address: {}", e)))?;
 
         let reset_link = format!("{}/reset-password/{}", self.config.app_url, token);

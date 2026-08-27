@@ -201,7 +201,10 @@ mod tests {
     #[test]
     fn legacy_plaintext_is_passed_through() {
         let c = cipher();
-        assert_eq!(c.decrypt("JBSWY3DPEHPK3PXP").expect("legacy"), "JBSWY3DPEHPK3PXP");
+        assert_eq!(
+            c.decrypt("JBSWY3DPEHPK3PXP").expect("legacy"),
+            "JBSWY3DPEHPK3PXP"
+        );
         assert!(!SecretCipher::is_encrypted("JBSWY3DPEHPK3PXP"));
     }
 
@@ -251,5 +254,40 @@ mod tests {
             derive_key_from_jwt_secret("secret-a"),
             derive_key_from_jwt_secret("secret-b")
         );
+    }
+}
+
+/// 长效 bearer 凭证的落库指纹。
+///
+/// 会话 JWT、OIDC 访问/刷新令牌、授权码此前都是**明文**落库：拿到一次数据库
+/// 读权限就等于拿到全站在线用户的可用令牌。现在库里只留指纹，比对时把来件
+/// 同样算一遍。
+///
+/// 用 SHA-256 而不是 Argon2 是刻意的：这些值都是 48 字符随机串或已签名 JWT，
+/// 熵足够高，不存在离线爆破空间；而它们在每个请求上都要查一次，慢哈希会
+/// 直接压垮鉴权路径。口令与备用码走的仍然是 Argon2。
+///
+/// 编码沿用 PKCE 校验那套 base64url-no-pad，全仓一种写法。
+pub fn hash_bearer(secret: &str) -> String {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    URL_SAFE_NO_PAD.encode(Sha256::digest(secret.as_bytes()))
+}
+
+#[cfg(test)]
+mod bearer_hash_tests {
+    use super::hash_bearer;
+
+    #[test]
+    fn is_deterministic_and_collision_free_on_close_inputs() {
+        assert_eq!(hash_bearer("abc"), hash_bearer("abc"));
+        assert_ne!(hash_bearer("abc"), hash_bearer("abd"));
+    }
+
+    #[test]
+    fn output_never_contains_the_input() {
+        // 防止有人把它换成「加个前缀」之类的伪实现。
+        let secret = "sk-live-0123456789abcdef";
+        assert!(!hash_bearer(secret).contains(secret));
+        assert_eq!(hash_bearer(secret).len(), 43); // 32 字节 base64url-no-pad
     }
 }

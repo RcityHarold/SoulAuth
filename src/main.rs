@@ -4,7 +4,12 @@ use std::{
     time::Instant,
 };
 
-use axum::{http::HeaderValue, middleware, routing::{get, Router}, Extension, Json};
+use axum::{
+    http::HeaderValue,
+    middleware,
+    routing::{get, Router},
+    Extension, Json,
+};
 use tokio::time::{interval, Duration};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tracing::{error, info, warn};
@@ -21,14 +26,14 @@ use crate::{
     config::Config,
     services::{
         account_lockout::AccountLockoutService,
-        auth::AuthService,
         audit_logger::AuditLogger,
+        auth::AuthService,
         auth_cache::AuthCache,
         database::Database,
         oidc::OidcService,
         oidc_client_management::OidcClientService,
         oidc_keys::OidcSigningKey,
-        rate_limiter::{RateLimiter, RateLimitRules},
+        rate_limiter::{RateLimitRules, RateLimiter},
     },
     utils::rate_limit_middleware::rate_limit_layer,
 };
@@ -66,6 +71,8 @@ pub struct AppState {
     pub config: Config,
     pub rate_limiter: Arc<RateLimiter>,
     pub lockout_service: Arc<AccountLockoutService>,
+    /// 首个管理员的引导门。见 `routes::bootstrap`。
+    pub bootstrap: Arc<routes::bootstrap::BootstrapGate>,
 }
 
 fn build_cors_layer(config: &Config) -> CorsLayer {
@@ -83,7 +90,10 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
         })
         .collect();
 
-    info!("CORS allowed origins: {:?}", config.effective_cors_origins());
+    info!(
+        "CORS allowed origins: {:?}",
+        config.effective_cors_origins()
+    );
 
     CorsLayer::new()
         .allow_origin(AllowOrigin::list(origins))
@@ -105,7 +115,8 @@ fn build_cors_layer(config: &Config) -> CorsLayer {
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "soulauth=debug,tower_http=info".to_string()),
+            std::env::var("RUST_LOG")
+                .unwrap_or_else(|_| "soulauth=debug,tower_http=info".to_string()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -129,6 +140,37 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let shared_db = Arc::new(db.clone());
+
+    // 引导门：只在系统里还没有任何管理员时才有意义。
+    //
+    // 令牌打印在启动日志里，是这条路径唯一的交付方式 —— 它替代了此前
+    // 「手工往 user_role 里插一条记录」的做法，那条做法要求开发者绕过公开接口
+    // 直接改库，而公开文档 03 / 10 把这一点定成了硬性禁止。
+    let bootstrap = Arc::new(routes::bootstrap::BootstrapGate::new(
+        config.bootstrap_token.as_deref(),
+    ));
+    if routes::bootstrap::admin_exists(&shared_db)
+        .await
+        .unwrap_or(false)
+    {
+        info!("Bootstrap path closed: an administrator already exists");
+    } else if let Some(token) = bootstrap.token() {
+        // 用 warn 而不是 info：这行必须在默认日志级别下可见，否则开发者
+        // 拿不到令牌，这条路径等于不存在。
+        warn!(
+            "No administrator found. Bootstrap token for this process: {}\n         \
+             Create the first administrator:\n         \
+             curl -X POST {}/api/bootstrap/admin -H 'Content-Type: application/json' \\\n         \
+               -d '{{\"token\":\"{}\",\"email\":\"you@example.com\",\
+\"username\":\"admin\",\"password\":\"<at least {} chars>\"}}'",
+            token,
+            config.app_url.trim_end_matches('/'),
+            token,
+            config.password_min_length
+        );
+    } else {
+        info!("Bootstrap path disabled by configuration (SOULAUTH_BOOTSTRAP_TOKEN is empty)");
+    }
 
     let rate_limiter = Arc::new(
         RateLimiter::new()
@@ -200,6 +242,13 @@ async fn main() -> anyhow::Result<()> {
         auth_cache.clone(),
     )?);
 
+    // AIActor 认证服务。它只依赖库与配置 —— 不碰 AuthService，因为非人主体的
+    // 认证路径与人类那条完全不共用（无口令、无 MFA、无账号锁定）。
+    let ai_actor_service = Arc::new(services::ai_actor::AiActorService::new(
+        shared_db.clone(),
+        config.clone(),
+    ));
+
     // 后台清理任务
     let cleanup_limiter = rate_limiter.clone();
     let cleanup_lockout = lockout_service.clone();
@@ -242,12 +291,22 @@ async fn main() -> anyhow::Result<()> {
         config: config.clone(),
         rate_limiter: rate_limiter.clone(),
         lockout_service: lockout_service.clone(),
+        bootstrap: bootstrap.clone(),
     });
 
     let app = Router::new()
         .nest("/api/auth", routes::auth::router())
+        // 引导路径。它自己判断「是否已有管理员」，已初始化后永久拒绝，
+        // 因此不需要额外的开关或权限守卫。
+        .nest("/api/bootstrap", routes::bootstrap::router())
         .nest("/api/rbac", routes::rbac::router())
-        .nest("/api/users", routes::user_management::router())
+        // 非人主体。`/challenge` 与 `/authenticate` 是公开的，与人类的
+        // `/api/auth/login` 同级；其余端点要 `soulauth:actors.*` 权限。
+        .nest("/api/actors", routes::actors::router())
+        // 自助与管理分开挂载：`/api/me/*` 是「我自己的」，`/api/users/*` 是
+        // 「按 id 管别人的」。合在一个前缀下才有了之前的 `/api/users/users/...`。
+        .nest("/api/me", routes::user_management::self_service_router())
+        .nest("/api/users", routes::user_management::admin_router())
         .nest("/api/ops", routes::ops::router())
         .nest("/api/security", routes::security::router())
         .nest("/api/audit", routes::audit::audit_routes())
@@ -273,11 +332,13 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(config.clone()))
         .layer(Extension(oidc_service))
         .layer(Extension(oidc_client_service))
+        .layer(Extension(ai_actor_service))
         .layer(build_cors_layer(&config));
 
-    let addr: SocketAddr = config.bind_addr.parse().map_err(|e| {
-        anyhow::anyhow!("Invalid BIND_ADDR `{}`: {e}", config.bind_addr)
-    })?;
+    let addr: SocketAddr = config
+        .bind_addr
+        .parse()
+        .map_err(|e| anyhow::anyhow!("Invalid BIND_ADDR `{}`: {e}", config.bind_addr))?;
     info!("Server listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())

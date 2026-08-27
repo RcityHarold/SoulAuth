@@ -91,12 +91,7 @@ pub(crate) struct BrowserSession {
 /// `secure` 由部署协议决定（见 `Config::cookies_secure`）：以前这里恒定带
 /// `Secure`，导致 `http://localhost` 本地开发时浏览器直接丢弃 cookie，
 /// OIDC 流程根本走不通。
-pub(crate) fn build_cookie(
-    name: &str,
-    value: &str,
-    max_age_seconds: i64,
-    secure: bool,
-) -> String {
+pub(crate) fn build_cookie(name: &str, value: &str, max_age_seconds: i64, secure: bool) -> String {
     let secure_attr = if secure { "; Secure" } else { "" };
     format!(
         "{}={}; Path=/; Max-Age={}; HttpOnly{}; SameSite=Lax",
@@ -180,12 +175,13 @@ async fn browser_session_is_active(db: &Arc<Database>, session_key: &str) -> boo
         .await;
 
     match rows {
-        Ok(rows) => rows
-            .first()
-            .and_then(|row| row.get("count"))
-            .and_then(|count| count.as_u64())
-            .unwrap_or(0)
-            > 0,
+        Ok(rows) => {
+            rows.first()
+                .and_then(|row| row.get("count"))
+                .and_then(|count| count.as_u64())
+                .unwrap_or(0)
+                > 0
+        }
         Err(e) => {
             tracing::error!(error = %e, "Failed to verify browser session; treating as invalid");
             false
@@ -206,7 +202,9 @@ fn create_oidc_return_token_with_ttl(
     ttl_seconds: i64,
 ) -> Result<String, AuthError> {
     if !is_valid_oidc_return_target(target) {
-        return Err(AuthError::BadRequest("Invalid OIDC return target".to_string()));
+        return Err(AuthError::BadRequest(
+            "Invalid OIDC return target".to_string(),
+        ));
     }
 
     sign_oidc_return_token_unchecked(target, jwt_secret, ttl_seconds)
@@ -232,10 +230,7 @@ fn sign_oidc_return_token_unchecked(
     .map_err(|e| AuthError::TokenError(e.to_string()))
 }
 
-pub(crate) fn decode_oidc_return_token(
-    token: &str,
-    jwt_secret: &str,
-) -> Result<String, AuthError> {
+pub(crate) fn decode_oidc_return_token(token: &str, jwt_secret: &str) -> Result<String, AuthError> {
     let mut validation = Validation::default();
     validation.leeway = 0;
     let token_data = decode::<OidcReturnClaims>(
@@ -265,7 +260,9 @@ pub(crate) fn create_oauth_state_token(
 ) -> Result<IssuedOAuthState, AuthError> {
     if let Some(target) = return_target {
         if !is_valid_oidc_return_target(target) {
-            return Err(AuthError::BadRequest("Invalid OIDC return target".to_string()));
+            return Err(AuthError::BadRequest(
+                "Invalid OIDC return target".to_string(),
+            ));
         }
     }
 
@@ -360,7 +357,10 @@ pub fn discovery_routes() -> Router {
 
 pub fn oidc_routes() -> Router {
     Router::new()
-        .route("/.well-known/openid-configuration", get(openid_configuration))
+        .route(
+            "/.well-known/openid-configuration",
+            get(openid_configuration),
+        )
         .route("/jwks", get(jwks))
         .route("/authorize", get(authorize))
         .route("/token", post(token))
@@ -588,7 +588,9 @@ async fn validate_authorize_request(
     let response_types = parse_response_types(&request.response_type)?;
     for response_type in response_types {
         if !client.allowed_response_types.contains(&response_type) {
-            return Err(AuthError::BadRequest("Response type not allowed".to_string()));
+            return Err(AuthError::BadRequest(
+                "Response type not allowed".to_string(),
+            ));
         }
     }
 
@@ -605,7 +607,9 @@ fn parse_response_types(response_type: &str) -> Result<Vec<ResponseType>, AuthEr
         .map(|value| match value {
             "code" => Ok(ResponseType::Code),
             "id_token" => Ok(ResponseType::IdToken),
-            _ => Err(AuthError::BadRequest("Unsupported response type".to_string())),
+            _ => Err(AuthError::BadRequest(
+                "Unsupported response type".to_string(),
+            )),
         })
         .collect::<Result<Vec<_>, _>>()?;
 
@@ -648,7 +652,11 @@ async fn create_authorize_response(
         .await
     {
         Ok(code) => {
-            let separator = if request.redirect_uri.contains('?') { '&' } else { '?' };
+            let separator = if request.redirect_uri.contains('?') {
+                '&'
+            } else {
+                '?'
+            };
             let mut redirect_url = format!(
                 "{}{}code={}",
                 request.redirect_uri,
@@ -759,11 +767,9 @@ async fn token(
     }
 
     match oidc_service.exchange_code_for_tokens(&request).await {
-        Ok(token_response) => (
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(token_response),
-        )
-            .into_response(),
+        Ok(token_response) => {
+            ([(header::CACHE_CONTROL, "no-store")], Json(token_response)).into_response()
+        }
         Err(e) => {
             tracing::warn!(error = %e, "OIDC token exchange failed");
             // 按 RFC 6749 §5.2 返回标准错误体，而不是把它塞进 message 字符串里。
@@ -880,7 +886,7 @@ async fn logout(
             SOULAUTH_SESSION_COOKIE,
             config.cookies_secure(),
         ))
-            .map_err(|e| AuthError::BadRequest(format!("Invalid session cookie: {e}")))?,
+        .map_err(|e| AuthError::BadRequest(format!("Invalid session cookie: {e}")))?,
     );
     Ok(response)
 }
@@ -918,7 +924,12 @@ mod tests {
 
     #[test]
     fn build_cookie_encodes_value_and_sets_browser_security_attributes() {
-        let cookie = build_cookie(OIDC_RETURN_COOKIE, "/api/oidc/authorize?state=a b", 60, true);
+        let cookie = build_cookie(
+            OIDC_RETURN_COOKIE,
+            "/api/oidc/authorize?state=a b",
+            60,
+            true,
+        );
 
         assert_eq!(
             cookie,
@@ -996,7 +1007,8 @@ mod tests {
 
     #[test]
     fn signed_return_cookie_round_trips_internal_authorize_target() {
-        let target = "/api/oidc/authorize?client_id=client&redirect_uri=https%3A%2F%2Fapp.example%2Fcb";
+        let target =
+            "/api/oidc/authorize?client_id=client&redirect_uri=https%3A%2F%2Fapp.example%2Fcb";
         let token = create_oidc_return_token(target, "test-secret").expect("token");
 
         let decoded = decode_oidc_return_token(&token, "test-secret").expect("target");

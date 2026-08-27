@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 use surrealdb::types::SurrealValue;
+use validator::Validate;
 
 /// MFA设置状态
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, SurrealValue)]
@@ -140,9 +140,9 @@ mod tests {
     #[test]
     fn test_backup_codes_generation() {
         let codes = UserMfa::generate_backup_codes();
-        
+
         assert_eq!(codes.len(), 8);
-        
+
         // 检查每个代码都是8位大写字母数字
         for code in codes {
             assert_eq!(code.len(), 8);
@@ -154,7 +154,7 @@ mod tests {
     #[test]
     fn test_enable_totp_request_validation() {
         use validator::Validate;
-        
+
         let valid_request = EnableTotpRequest {
             totp_code: "123456".to_string(),
         };

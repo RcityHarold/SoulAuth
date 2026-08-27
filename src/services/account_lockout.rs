@@ -14,7 +14,7 @@ use crate::{
 };
 use chrono::Utc;
 use std::sync::Arc;
-use tracing::{info, warn, debug};
+use tracing::{debug, info, warn};
 
 /// 撞上写冲突时的最大重试次数。
 const WRITE_CONFLICT_RETRIES: usize = 5;
@@ -78,7 +78,11 @@ impl AccountLockoutService {
             actions::ACCOUNT_LOCKED,
             ActivityCategory::Security,
             ActivityStatus::Warning,
-            if is_ip { identifier.to_string() } else { String::new() },
+            if is_ip {
+                identifier.to_string()
+            } else {
+                String::new()
+            },
             String::new(),
         )
         .with_details(serde_json::json!({
@@ -110,7 +114,9 @@ impl AccountLockoutService {
                 }
 
                 // 检查是否应该重置失败尝试计数
-                if lockout.should_reset_attempts(&self.config) && lockout.status == LockoutStatus::Normal {
+                if lockout.should_reset_attempts(&self.config)
+                    && lockout.status == LockoutStatus::Normal
+                {
                     lockout.failed_attempts = 0;
                     lockout.updated_at = Utc::now();
                     self.save_lockout_record(&lockout).await?;
@@ -122,7 +128,10 @@ impl AccountLockoutService {
                         lockout.remaining_lockout_seconds(),
                     ))
                 } else {
-                    let remaining = self.config.max_attempts.saturating_sub(lockout.failed_attempts);
+                    let remaining = self
+                        .config
+                        .max_attempts
+                        .saturating_sub(lockout.failed_attempts);
                     Ok(LockoutCheckResult::normal(remaining))
                 }
             }
@@ -140,7 +149,10 @@ impl AccountLockoutService {
             return Ok(LockoutCheckResult::normal(self.config.max_attempts));
         }
 
-        match self.get_lockout_record(ip_address, LockoutType::IpAddress).await {
+        match self
+            .get_lockout_record(ip_address, LockoutType::IpAddress)
+            .await
+        {
             Ok(mut lockout) => {
                 // 检查锁定是否已过期
                 if lockout.is_lock_expired() && lockout.status != LockoutStatus::Normal {
@@ -150,7 +162,9 @@ impl AccountLockoutService {
                 }
 
                 // 检查是否应该重置失败尝试计数
-                if lockout.should_reset_attempts(&self.config) && lockout.status == LockoutStatus::Normal {
+                if lockout.should_reset_attempts(&self.config)
+                    && lockout.status == LockoutStatus::Normal
+                {
                     lockout.failed_attempts = 0;
                     lockout.updated_at = Utc::now();
                     self.save_lockout_record(&lockout).await?;
@@ -162,7 +176,10 @@ impl AccountLockoutService {
                         lockout.remaining_lockout_seconds(),
                     ))
                 } else {
-                    let remaining = self.config.max_attempts.saturating_sub(lockout.failed_attempts);
+                    let remaining = self
+                        .config
+                        .max_attempts
+                        .saturating_sub(lockout.failed_attempts);
                     Ok(LockoutCheckResult::normal(remaining))
                 }
             }
@@ -354,7 +371,10 @@ impl AccountLockoutService {
     pub async fn reset_ip_attempts(&self, ip_address: &str) -> Result<()> {
         info!("Resetting failed attempts for IP: {}", ip_address);
 
-        match self.get_lockout_record(ip_address, LockoutType::IpAddress).await {
+        match self
+            .get_lockout_record(ip_address, LockoutType::IpAddress)
+            .await
+        {
             Ok(mut lockout) => {
                 lockout.unlock_account();
                 self.save_lockout_record(&lockout).await?;
@@ -392,7 +412,10 @@ impl AccountLockoutService {
     pub async fn unlock_ip(&self, ip_address: &str) -> Result<bool> {
         info!("Manually unlocking IP: {}", ip_address);
 
-        match self.get_lockout_record(ip_address, LockoutType::IpAddress).await {
+        match self
+            .get_lockout_record(ip_address, LockoutType::IpAddress)
+            .await
+        {
             Ok(mut lockout) => {
                 if lockout.is_locked() {
                     lockout.unlock_account();
@@ -441,8 +464,7 @@ impl AccountLockoutService {
         // `Utc::now().to_string()` 产出 "2026-08-05 08:43:36.837 UTC"，
         // 不是 RFC3339，`type::datetime()` 转不了 —— 定时清理任务因此每小时报错一次。
         let now = Utc::now();
-        let stale_before =
-            now - chrono::Duration::minutes(self.config.reset_window_minutes as i64);
+        let stale_before = now - chrono::Duration::minutes(self.config.reset_window_minutes as i64);
 
         let _result = self
             .db
@@ -462,7 +484,11 @@ impl AccountLockoutService {
     }
 
     /// 从数据库获取锁定记录
-    async fn get_lockout_record(&self, identifier: &str, lockout_type: LockoutType) -> Result<AccountLockout> {
+    async fn get_lockout_record(
+        &self,
+        identifier: &str,
+        lockout_type: LockoutType,
+    ) -> Result<AccountLockout> {
         // 时间列必须投影成字符串：SDK 无法把原生 `Value::Datetime` 转成
         // `serde_json::Value`（报 "Expected any, got datetime"）。
         let query = r#"
@@ -505,9 +531,7 @@ impl AccountLockoutService {
             .next()
             .map(serde_json::from_value::<AccountLockout>)
             .transpose()
-            .map_err(|e| {
-                AuthError::DatabaseError(format!("Failed to parse lockout record: {e}"))
-            })?
+            .map_err(|e| AuthError::DatabaseError(format!("Failed to parse lockout record: {e}")))?
             .ok_or(AuthError::UserNotFound)
     }
 
@@ -596,7 +620,7 @@ mod tests {
     #[tokio::test]
     async fn test_lockout_config_default() {
         let config = LockoutConfig::default();
-        
+
         assert_eq!(config.max_attempts, 5);
         assert_eq!(config.lockout_duration_minutes, 15);
         assert_eq!(config.reset_window_minutes, 60);
@@ -609,7 +633,7 @@ mod tests {
         let normal = LockoutCheckResult::normal(3);
         assert!(!normal.is_locked);
         assert_eq!(normal.remaining_attempts, 3);
-        
+
         let locked = LockoutCheckResult::locked(LockoutType::User, Some(300));
         assert!(locked.is_locked);
         assert_eq!(locked.remaining_lockout_seconds, Some(300));

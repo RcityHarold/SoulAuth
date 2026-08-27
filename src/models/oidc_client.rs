@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use validator::Validate;
 use surrealdb::types::SurrealValue;
+use validator::Validate;
 
 #[derive(Debug, Serialize, Deserialize, Clone, SurrealValue)]
 pub struct OidcClient {
@@ -93,7 +93,11 @@ impl Default for CreateOidcClientRequest {
             client_type: ClientType::Confidential,
             redirect_uris: Vec::new(),
             post_logout_redirect_uris: Some(Vec::new()),
-            allowed_scopes: Some(vec!["openid".to_string(), "profile".to_string(), "email".to_string()]),
+            allowed_scopes: Some(vec![
+                "openid".to_string(),
+                "profile".to_string(),
+                "email".to_string(),
+            ]),
             allowed_grant_types: Some(vec![GrantType::AuthorizationCode, GrantType::RefreshToken]),
             allowed_response_types: Some(vec![ResponseType::Code]),
             require_pkce: Some(true),

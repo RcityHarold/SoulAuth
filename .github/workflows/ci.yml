@@ -35,6 +35,16 @@ jobs:
       - name: cargo test
         run: cargo test
 
+      # 架构一致性读数。已成立的不变式随 `cargo test` 一起跑（上一步已覆盖）；
+      # 这一步单独把**尚未成立**的那些跑出来，只报告不阻断 —— 它们按定义就是红的，
+      # 拿它当门禁等于让 CI 长期红，那样很快就没人看了。
+      #
+      # 每完成一个 V2 Stage，删掉 tests/conformance.rs 里对应的 #[ignore]，
+      # 那条就转由上一步的 `cargo test` 硬性把守。
+      - name: architecture conformance (剩余工作量)
+        continue-on-error: true
+        run: cargo test --test conformance -- --ignored --test-threads=1
+
   integration:
     name: integration suite
     runs-on: ubuntu-latest
@@ -64,3 +74,88 @@ jobs:
         if: failure()
         run: |
           echo "集成脚本默认在退出时清理现场；失败时用 KEEP_WORK=1 本地复跑可保留日志。"
+
+  docker:
+    name: docker compose （可执行文档）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 这个 job 存在的理由只有一个：`docker-compose.yml` 与 `Dockerfile`
+      # 曾经带着「未经运行验证」的横幅躺在仓库里 —— 编写它们的环境没有 Docker。
+      #
+      # 本仓库的规矩是「可执行的文档必须真的被执行过」，而一个没人跑通过的
+      # 部署路径比没有部署路径更糟：它看起来可用，直到有人照着做。
+      # runner 自带 Docker，那就在这里跑。
+      #
+      # 走的是 Quickstart 的完整路径：起服务 → 健康检查 → 从日志取引导令牌 →
+      # 建第一个管理员 → 登录 → 用令牌访问受保护端点。任何一步断掉都变红。
+
+      - name: 准备 .env
+        # compose 里 `env_file: - .env` 是硬要求，文件不存在时 compose 直接失败。
+        # 这里只填必填项，其余走 compose 内的 environment 覆盖。
+        run: |
+          cat > .env <<'ENV'
+          JWT_SECRET=ci-only-secret-at-least-32-characters-long
+          APP_URL=http://localhost:8080
+          SMTP_HOST=127.0.0.1
+          SMTP_FROM=noreply@example.com
+          ENV
+
+      - name: docker compose up
+        # 只等 `soulauth` 一个服务。`--wait` 对一次性服务（schema-init 导完就退出）
+        # 的处理在不同 compose 版本上不一致，而 soulauth 依赖它
+        # `service_completed_successfully` —— soulauth 起来了就说明导入成功了。
+        run: docker compose up -d --build --wait --wait-timeout 600 soulauth
+
+      - name: /health
+        run: |
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors \
+            http://localhost:8080/health
+
+      # 引导令牌只在启动日志里出现一次，而且是 warn 级别 ——
+      # 顺带验证了它在容器的默认日志级别下确实可见。
+      - name: 从日志取引导令牌并建管理员
+        run: |
+          set -euo pipefail
+          for i in $(seq 30); do
+            TOKEN="$(docker compose logs soulauth 2>&1 \
+              | grep -oP 'Bootstrap token for this process: \K\S+' | head -1 || true)"
+            [ -n "${TOKEN:-}" ] && break
+            sleep 2
+          done
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::启动日志里没有引导令牌"; docker compose logs soulauth | tail -40; exit 1
+          fi
+
+          curl -fsS -X POST http://localhost:8080/api/bootstrap/admin \
+            -H 'Content-Type: application/json' \
+            -d "{\"token\":\"${TOKEN}\",\"email\":\"ci@example.com\",\"username\":\"ciadmin\",\"password\":\"CorrectHorse42!\"}" \
+            | tee /tmp/bootstrap.json
+          grep -q '"is_admin":true' /tmp/bootstrap.json
+
+      - name: 登录并访问受保护端点
+        run: |
+          set -euo pipefail
+          TOK="$(curl -fsS -X POST http://localhost:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"CorrectHorse42!"}' \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+          curl -fsS http://localhost:8080/api/users -H "Authorization: Bearer $TOK" >/dev/null
+          echo "引导出的管理员可访问受保护端点"
+
+      # 重跑一次必须仍然成功：schema-init 在已初始化的库上会被 `already exists`
+      # 顶回来，如果它没有先探测就导入，第二次 `up` 起就起不来了。
+      - name: 重启后仍然可用
+        run: |
+          docker compose restart soulauth
+          curl -fsS --retry 12 --retry-delay 5 --retry-all-errors \
+            http://localhost:8080/health
+
+      - name: 失败时导出日志
+        if: failure()
+        run: docker compose logs --tail 200
+
+      - name: 收尾
+        if: always()
+        run: docker compose down -v

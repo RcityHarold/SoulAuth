@@ -1,17 +1,17 @@
 use anyhow::Result;
 use chrono::Utc;
-use std::sync::Arc;
 use serde_json::json;
-use tracing::{error, info};
+use std::sync::Arc;
 use surrealdb_types::SurrealValue;
+use tracing::{error, info};
 
 use crate::{
     error::AuthError,
     models::{
-        role::{Role, CreateRoleRequest, UpdateRoleRequest, RoleResponse},
-        permission::{Permission, CreatePermissionRequest, PermissionResponse},
-        user_role::{UserRole, RolePermission, UserRoleResponse, RoleWithPermissions},
+        permission::{CreatePermissionRequest, Permission, PermissionResponse},
+        role::{CreateRoleRequest, Role, RoleResponse, UpdateRoleRequest},
         user::User,
+        user_role::{RolePermission, RoleWithPermissions, UserRole, UserRoleResponse},
     },
     services::database::Database,
 };
@@ -26,7 +26,9 @@ fn validate_rbac_name(kind: &str, name: &str) -> Result<String, AuthError> {
     let trimmed = name.trim();
 
     if trimmed.is_empty() {
-        return Err(AuthError::ValidationError(format!("{kind} name is required")));
+        return Err(AuthError::ValidationError(format!(
+            "{kind} name is required"
+        )));
     }
     if trimmed.chars().count() > 64 {
         return Err(AuthError::ValidationError(format!(
@@ -57,12 +59,18 @@ impl RBACService {
     }
 
     // 角色管理
-    pub async fn create_role(&self, mut request: CreateRoleRequest, created_by: &User) -> Result<RoleResponse, AuthError> {
+    pub async fn create_role(
+        &self,
+        mut request: CreateRoleRequest,
+        created_by: &User,
+    ) -> Result<RoleResponse, AuthError> {
         request.name = validate_rbac_name("Role", &request.name)?;
 
         // 检查角色名是否已存在
         if self.get_role_by_name(&request.name).await?.is_some() {
-            return Err(AuthError::ValidationError("Role name already exists".to_string()));
+            return Err(AuthError::ValidationError(
+                "Role name already exists".to_string(),
+            ));
         }
 
         let now = Utc::now().timestamp();
@@ -77,7 +85,9 @@ impl RBACService {
         };
 
         let query = "CREATE role CONTENT $role";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("role", role.clone()))
             .await
@@ -93,10 +103,15 @@ impl RBACService {
         })?;
 
         if created_role.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to create role".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to create role".to_string(),
+            ));
         }
 
-        info!("Role '{}' created by user '{}'", request.name, created_by.email);
+        info!(
+            "Role '{}' created by user '{}'",
+            request.name, created_by.email
+        );
         Ok(created_role[0].clone().into())
     }
 
@@ -122,18 +137,31 @@ impl RBACService {
         Ok(roles.into_iter().next())
     }
 
-    pub async fn update_role(&self, role_name: &str, request: UpdateRoleRequest, updated_by: &User) -> Result<RoleResponse, AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+    pub async fn update_role(
+        &self,
+        role_name: &str,
+        request: UpdateRoleRequest,
+        updated_by: &User,
+    ) -> Result<RoleResponse, AuthError> {
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound("Role not found".to_string()))?;
 
         if role.is_system {
-            return Err(AuthError::ValidationError("Cannot update system role".to_string()));
+            return Err(AuthError::ValidationError(
+                "Cannot update system role".to_string(),
+            ));
         }
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
 
         if request.display_name.is_none() && request.description.is_none() {
-            return Err(AuthError::ValidationError("No fields to update".to_string()));
+            return Err(AuthError::ValidationError(
+                "No fields to update".to_string(),
+            ));
         }
 
         // 全部走绑定参数：以前这里把 display_name / description 直接内插进 SurrealQL，
@@ -169,10 +197,15 @@ impl RBACService {
         })?;
 
         if updated_role.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to update role".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to update role".to_string(),
+            ));
         }
 
-        info!("Role '{}' updated by user '{}'", role_name, updated_by.email);
+        info!(
+            "Role '{}' updated by user '{}'",
+            role_name, updated_by.email
+        );
         // 同 list_roles：不补的话，改一次角色名就会拿到一个"权限为空"的响应，
         // 而权限其实一条没少。
         let mut responses: Vec<RoleResponse> = vec![updated_role[0].clone().into()];
@@ -181,18 +214,27 @@ impl RBACService {
     }
 
     pub async fn delete_role(&self, role_name: &str, deleted_by: &User) -> Result<(), AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound("Role not found".to_string()))?;
 
         if role.is_system {
-            return Err(AuthError::ValidationError("Cannot delete system role".to_string()));
+            return Err(AuthError::ValidationError(
+                "Cannot delete system role".to_string(),
+            ));
         }
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
 
         // 检查是否有用户使用此角色
-        let user_count_query = "SELECT count() as count FROM user_role WHERE role_id = $role_id GROUP ALL";
-        let mut response = self.db.client
+        let user_count_query =
+            "SELECT count() as count FROM user_role WHERE role_id = $role_id GROUP ALL";
+        let mut response = self
+            .db
+            .client
             .query(user_count_query)
             .bind(("role_id", role_id.clone()))
             .await
@@ -210,14 +252,17 @@ impl RBACService {
         if !count_result.is_empty() {
             if let Some(count) = count_result[0].get("count") {
                 if count.as_u64().unwrap_or(0) > 0 {
-                    return Err(AuthError::ValidationError("Cannot delete role that is assigned to users".to_string()));
+                    return Err(AuthError::ValidationError(
+                        "Cannot delete role that is assigned to users".to_string(),
+                    ));
                 }
             }
         }
 
         // 删除角色的权限关联
         let delete_permissions_query = "DELETE FROM role_permission WHERE role_id = $role_id";
-        self.db.client
+        self.db
+            .client
             .query(delete_permissions_query)
             .bind(("role_id", role_id.clone()))
             .await
@@ -241,11 +286,18 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        info!("Role '{}' deleted by user '{}'", role_name, deleted_by.email);
+        info!(
+            "Role '{}' deleted by user '{}'",
+            role_name, deleted_by.email
+        );
         Ok(())
     }
 
-    pub async fn list_roles(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<RoleResponse>, AuthError> {
+    pub async fn list_roles(
+        &self,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<Vec<RoleResponse>, AuthError> {
         // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
         let page = page.unwrap_or(1).max(1);
         let limit = limit.unwrap_or(50).clamp(1, 200);
@@ -365,12 +417,18 @@ impl RBACService {
         Ok(())
     }
 
-    pub async fn create_permission(&self, mut request: CreatePermissionRequest, created_by: &User) -> Result<PermissionResponse, AuthError> {
+    pub async fn create_permission(
+        &self,
+        mut request: CreatePermissionRequest,
+        created_by: &User,
+    ) -> Result<PermissionResponse, AuthError> {
         request.name = validate_rbac_name("Permission", &request.name)?;
 
         // 检查权限名是否已存在
         if self.get_permission_by_name(&request.name).await?.is_some() {
-            return Err(AuthError::ValidationError("Permission name already exists".to_string()));
+            return Err(AuthError::ValidationError(
+                "Permission name already exists".to_string(),
+            ));
         }
 
         let now = Utc::now().timestamp();
@@ -387,7 +445,9 @@ impl RBACService {
         };
 
         let query = "CREATE permission CONTENT $permission";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("permission", permission.clone()))
             .await
@@ -403,16 +463,26 @@ impl RBACService {
         })?;
 
         if created_permission.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to create permission".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to create permission".to_string(),
+            ));
         }
 
-        info!("Permission '{}' created by user '{}'", request.name, created_by.email);
+        info!(
+            "Permission '{}' created by user '{}'",
+            request.name, created_by.email
+        );
         Ok(created_permission[0].clone().into())
     }
 
-    pub async fn get_permission_by_name(&self, name: &str) -> Result<Option<Permission>, AuthError> {
+    pub async fn get_permission_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<Permission>, AuthError> {
         let query = "SELECT * FROM permission WHERE name = $name";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("name", name.to_owned()))
             .await
@@ -430,7 +500,11 @@ impl RBACService {
         Ok(permissions.into_iter().next())
     }
 
-    pub async fn list_permissions(&self, page: Option<u32>, limit: Option<u32>) -> Result<Vec<PermissionResponse>, AuthError> {
+    pub async fn list_permissions(
+        &self,
+        page: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<Vec<PermissionResponse>, AuthError> {
         // 同 `list_users`：page=0 会下溢，limit 不封顶等于允许全表拉取。
         let page = page.unwrap_or(1).max(1);
         let limit = limit.unwrap_or(50).clamp(1, 200);
@@ -454,23 +528,88 @@ impl RBACService {
             AuthError::DatabaseError(e.to_string())
         })?;
 
-        Ok(permissions.into_iter().map(|permission| permission.into()).collect())
+        Ok(permissions
+            .into_iter()
+            .map(|permission| permission.into())
+            .collect())
     }
 
-
     // 用户角色分配
-    pub async fn assign_role_to_user(&self, user_id: &str, role_name: &str, assigned_by: &User) -> Result<(), AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+    pub async fn assign_role_to_user(
+        &self,
+        user_id: &str,
+        role_name: &str,
+        assigned_by: &User,
+    ) -> Result<(), AuthError> {
+        // `assigned_by` 也是外键，同样指身份根。
+        let assigned_by_id = assigned_by
+            .id
+            .as_ref()
+            .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
+        let assigned_by_thing = self
+            .db
+            .actor_ref_of_user(&crate::utils::record_id::record_id_key_to_string(
+                assigned_by_id,
+            ))
+            .await?;
+        self.assign_role(user_id, role_name, &assigned_by_thing, &assigned_by.email)
+            .await
+    }
+
+    /// 由系统自身发起的角色授予（没有人类操作者）。
+    ///
+    /// 目前唯一的调用方是首个管理员的引导路径。那一刻系统里还没有任何可以充当
+    /// 操作者的账号，记一个真实用户 ID 反而是伪造归因，所以 `assigned_by` 落在
+    /// `user:system` 上 —— 与部署文档里那段手工 SQL 用的是同一个约定。
+    pub async fn assign_role_as_system(
+        &self,
+        user_id: &str,
+        role_name: &str,
+    ) -> Result<(), AuthError> {
+        // 哨兵引用 `actor_identity:system`。
+        //
+        // 它是种子数据里一条**真实存在**的记录，不是悬空引用 —— 我最初以为
+        // 「类型对上即可、记录不必存在」，集成测试当场证否：SurrealDB 在
+        // SCHEMAFULL 表上会具体化被引用的记录，缺字段就以
+        // 「Expected `string` but found `NONE`」拒绝整条导入。
+        //
+        // 那条哨兵的 status 是 retired：既占住标识符，又永远过不了
+        // can_authenticate()。
+        //
+        // 用哨兵而不是某个真实管理员：这次授予没有人类操作者，记一个真实 id
+        // 反而是伪造归因。种子数据里的 granted_by 用的是同一个约定。
+        let system = surrealdb::types::RecordId::new("actor_identity", "system");
+        self.assign_role(user_id, role_name, &system, "system")
+            .await
+    }
+
+    /// 授予角色的共享实现。
+    ///
+    /// 拆出来是为了让引导路径不必伪造一个 `User` 才能调用 —— 那样既要给领域
+    /// 类型加 `Default`，又会让一个空壳对象在日志和归因里冒充真实操作者。
+    async fn assign_role(
+        &self,
+        user_id: &str,
+        role_name: &str,
+        assigned_by_thing: &surrealdb::types::RecordId,
+        actor_label: &str,
+    ) -> Result<(), AuthError> {
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
-        let assigned_by_thing = assigned_by.id.as_ref()
-            .ok_or_else(|| AuthError::DatabaseError("Assigned by user ID not found".to_string()))?;
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        // 角色分配挂在**身份根**上，不是 user 行（Stage 3 起外键指 actor_identity）。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
 
         // 检查用户是否已经有此角色
         let check_query = "SELECT * FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(check_query)
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
@@ -487,7 +626,9 @@ impl RBACService {
         })?;
 
         if !existing.is_empty() {
-            return Err(AuthError::ValidationError("User already has this role".to_string()));
+            return Err(AuthError::ValidationError(
+                "User already has this role".to_string(),
+            ));
         }
 
         let user_role = UserRole {
@@ -499,7 +640,9 @@ impl RBACService {
         };
 
         let query = "CREATE user_role CONTENT $user_role";
-        let mut create_response = self.db.client
+        let mut create_response = self
+            .db
+            .client
             .query(query)
             .bind(("user_role", user_role.clone()))
             .await
@@ -515,22 +658,38 @@ impl RBACService {
         })?;
 
         if created.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to persist user role".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to persist user role".to_string(),
+            ));
         }
 
-        info!("Role '{}' assigned to user '{}' by '{}'", role_name, user_id, assigned_by.email);
+        info!(
+            "Role '{}' assigned to user '{}' by '{}'",
+            role_name, user_id, actor_label
+        );
         Ok(())
     }
 
-    pub async fn remove_role_from_user(&self, user_id: &str, role_name: &str, removed_by: &User) -> Result<(), AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+    pub async fn remove_role_from_user(
+        &self,
+        user_id: &str,
+        role_name: &str,
+        removed_by: &User,
+    ) -> Result<(), AuthError> {
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let user_thing = crate::utils::record_id::user_record_id(user_id);
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        // 与写入侧同源：写的是 actor ref，删的时候按 user ref 找就一条也删不掉。
+        let user_thing = self.db.actor_ref_of_user(user_id).await?;
 
         let delete_query = "DELETE FROM user_role WHERE user_id = $user_id AND role_id = $role_id";
-        self.db.client
+        self.db
+            .client
             .query(delete_query)
             .bind(("user_id", user_thing.clone()))
             .bind(("role_id", role_id.clone()))
@@ -541,7 +700,10 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        info!("Role '{}' removed from user '{}' by '{}'", role_name, user_id, removed_by.email);
+        info!(
+            "Role '{}' removed from user '{}' by '{}'",
+            role_name, user_id, removed_by.email
+        );
         Ok(())
     }
 
@@ -560,10 +722,12 @@ impl RBACService {
         let query = r#"
             SELECT string::replace(type::string(role_id), 'role:', '') as role_id, assigned_at
             FROM user_role
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
         "#;
 
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("user_key", user_id.clone()))
             .await
@@ -585,7 +749,8 @@ impl RBACService {
             });
         }
 
-        let mut assigned_at_map: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+        let mut assigned_at_map: std::collections::HashMap<String, i64> =
+            std::collections::HashMap::new();
         let mut role_ids: Vec<surrealdb::types::RecordId> = Vec::new();
         for data in &role_data {
             let role_id_str = data.role_id.trim();
@@ -606,7 +771,9 @@ impl RBACService {
         }
 
         let role_query = "SELECT * FROM role WHERE id IN $role_ids";
-        let mut role_response = self.db.client
+        let mut role_response = self
+            .db
+            .client
             .query(role_query)
             .bind(("role_ids", role_ids))
             .await
@@ -623,12 +790,18 @@ impl RBACService {
 
         let mut roles_with_permissions = Vec::new();
         for role in roles {
-            let role_id = role.id.clone().ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+            let role_id = role
+                .id
+                .clone()
+                .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
             let role_id_str = crate::utils::record_id::record_id_key_to_string(&role_id);
             let role_name = role.name.clone();
             let permissions = self.get_role_permissions(&role_name).await?;
 
-            let assigned_at = assigned_at_map.get(role_id_str.as_str()).copied().unwrap_or(0);
+            let assigned_at = assigned_at_map
+                .get(role_id_str.as_str())
+                .copied()
+                .unwrap_or(0);
             roles_with_permissions.push(RoleWithPermissions {
                 id: role_id_str,
                 name: role_name,
@@ -646,14 +819,20 @@ impl RBACService {
     }
 
     pub async fn get_role_permissions(&self, role_name: &str) -> Result<Vec<String>, AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
 
         // SurrealDB 2.x does not support JOIN; use subqueries
         let ids_query = "SELECT VALUE permission_id FROM role_permission WHERE role_id = $role_id";
-        let mut ids_response = self.db.client
+        let mut ids_response = self
+            .db
+            .client
             .query(ids_query)
             .bind(("role_id", role_id.clone()))
             .await
@@ -663,17 +842,20 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        let permission_ids: Vec<surrealdb::types::RecordId> = ids_response.take(0).map_err(|e| {
-            error!("Failed to parse role permission ids: {}", e);
-            AuthError::DatabaseError(e.to_string())
-        })?;
+        let permission_ids: Vec<surrealdb::types::RecordId> =
+            ids_response.take(0).map_err(|e| {
+                error!("Failed to parse role permission ids: {}", e);
+                AuthError::DatabaseError(e.to_string())
+            })?;
 
         if permission_ids.is_empty() {
             return Ok(Vec::new());
         }
 
         let names_query = "SELECT name FROM permission WHERE id IN $permission_ids";
-        let mut names_response = self.db.client
+        let mut names_response = self
+            .db
+            .client
             .query(names_query)
             .bind(("permission_ids", permission_ids))
             .await
@@ -697,21 +879,48 @@ impl RBACService {
         Ok(permissions)
     }
 
-    pub async fn assign_permission_to_role(&self, role_name: &str, permission_name: &str, granted_by: &User) -> Result<(), AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+    pub async fn assign_permission_to_role(
+        &self,
+        role_name: &str,
+        permission_name: &str,
+        granted_by: &User,
+    ) -> Result<(), AuthError> {
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
-        
-        let permission = self.get_permission_by_name(permission_name).await?
-            .ok_or_else(|| AuthError::NotFound(format!("Permission '{}' not found", permission_name)))?;
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let permission_id = permission.id.ok_or_else(|| AuthError::DatabaseError("Permission ID not found".to_string()))?;
-        let granted_by_thing = granted_by.id.as_ref()
+        let permission = self
+            .get_permission_by_name(permission_name)
+            .await?
+            .ok_or_else(|| {
+                AuthError::NotFound(format!("Permission '{}' not found", permission_name))
+            })?;
+
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        let permission_id = permission
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Permission ID not found".to_string()))?;
+        // `granted_by` 是外键，Stage 3 起指身份根。漏改这一处会让整条
+        // role_permission 写入以 500 失败 —— 集成测试「给角色授权限」抓到了。
+        let granted_by_id = granted_by
+            .id
+            .as_ref()
             .ok_or_else(|| AuthError::DatabaseError("Granted by user ID not found".to_string()))?;
+        let granted_by_thing = self
+            .db
+            .actor_ref_of_user(&crate::utils::record_id::record_id_key_to_string(
+                granted_by_id,
+            ))
+            .await?;
 
         // 检查是否已经分配
         let check_query = "SELECT * FROM role_permission WHERE role_id = $role_id AND permission_id = $permission_id";
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(check_query)
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
@@ -728,7 +937,9 @@ impl RBACService {
         })?;
 
         if !existing.is_empty() {
-            return Err(AuthError::ValidationError("Role already has this permission".to_string()));
+            return Err(AuthError::ValidationError(
+                "Role already has this permission".to_string(),
+            ));
         }
 
         let role_permission = RolePermission {
@@ -736,11 +947,13 @@ impl RBACService {
             role_id,
             permission_id,
             granted_at: Utc::now().timestamp(),
-            granted_by: granted_by_thing.clone(),
+            granted_by: granted_by_thing,
         };
 
         let query = "CREATE role_permission CONTENT $role_permission";
-        let mut create_response = self.db.client
+        let mut create_response = self
+            .db
+            .client
             .query(query)
             .bind(("role_permission", role_permission.clone()))
             .await
@@ -756,25 +969,46 @@ impl RBACService {
         })?;
 
         if created.is_empty() {
-            return Err(AuthError::DatabaseError("Failed to persist role permission".to_string()));
+            return Err(AuthError::DatabaseError(
+                "Failed to persist role permission".to_string(),
+            ));
         }
 
-        info!("Permission '{}' assigned to role '{}' by '{}'", permission_name, role_name, granted_by.email);
+        info!(
+            "Permission '{}' assigned to role '{}' by '{}'",
+            permission_name, role_name, granted_by.email
+        );
         Ok(())
     }
 
-    pub async fn remove_permission_from_role(&self, role_name: &str, permission_name: &str, removed_by: &User) -> Result<(), AuthError> {
-        let role = self.get_role_by_name(role_name).await?
+    pub async fn remove_permission_from_role(
+        &self,
+        role_name: &str,
+        permission_name: &str,
+        removed_by: &User,
+    ) -> Result<(), AuthError> {
+        let role = self
+            .get_role_by_name(role_name)
+            .await?
             .ok_or_else(|| AuthError::NotFound(format!("Role '{}' not found", role_name)))?;
-        
-        let permission = self.get_permission_by_name(permission_name).await?
-            .ok_or_else(|| AuthError::NotFound(format!("Permission '{}' not found", permission_name)))?;
 
-        let role_id = role.id.ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
-        let permission_id = permission.id.ok_or_else(|| AuthError::DatabaseError("Permission ID not found".to_string()))?;
+        let permission = self
+            .get_permission_by_name(permission_name)
+            .await?
+            .ok_or_else(|| {
+                AuthError::NotFound(format!("Permission '{}' not found", permission_name))
+            })?;
+
+        let role_id = role
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Role ID not found".to_string()))?;
+        let permission_id = permission
+            .id
+            .ok_or_else(|| AuthError::DatabaseError("Permission ID not found".to_string()))?;
 
         let delete_query = "DELETE FROM role_permission WHERE role_id = $role_id AND permission_id = $permission_id";
-        self.db.client
+        self.db
+            .client
             .query(delete_query)
             .bind(("role_id", role_id.clone()))
             .bind(("permission_id", permission_id.clone()))
@@ -785,27 +1019,35 @@ impl RBACService {
                 AuthError::DatabaseError(e.to_string())
             })?;
 
-        info!("Permission '{}' removed from role '{}' by '{}'", permission_name, role_name, removed_by.email);
+        info!(
+            "Permission '{}' removed from role '{}' by '{}'",
+            permission_name, role_name, removed_by.email
+        );
         Ok(())
     }
 
     // 权限检查
-    pub async fn check_user_permission(&self, user_id: &str, permission_name: &str) -> Result<bool, AuthError> {
+    pub async fn check_user_permission(
+        &self,
+        user_id: &str,
+        permission_name: &str,
+    ) -> Result<bool, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        
+
         let query = r#"
             SELECT count() as count
             FROM role_permission
             WHERE role_id IN (
                 SELECT VALUE role_id
                 FROM user_role
-                WHERE user_id = type::record('user', $user_key)
+                WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
             )
               AND permission_id IN (SELECT VALUE id FROM permission WHERE name = $permission_name)
             GROUP ALL
         "#;
 
-        let mut response = self.db
+        let mut response = self
+            .db
             .raw_query(
                 "check_user_permission",
                 query,
@@ -829,7 +1071,8 @@ impl RBACService {
             return Ok(false);
         }
 
-        let count = count_result[0].get("count")
+        let count = count_result[0]
+            .get("count")
             .and_then(|c| c.as_u64())
             .unwrap_or(0);
 
@@ -838,16 +1081,17 @@ impl RBACService {
 
     pub async fn check_user_role(&self, user_id: &str, role_name: &str) -> Result<bool, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        
+
         let query = r#"
             SELECT count() as count
             FROM user_role
-            WHERE user_id = type::record('user', $user_key)
+            WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
               AND role_id IN (SELECT VALUE id FROM role WHERE name = $role_name)
             GROUP ALL
         "#;
 
-        let mut response = self.db
+        let mut response = self
+            .db
             .raw_query(
                 "check_user_role",
                 query,
@@ -871,7 +1115,8 @@ impl RBACService {
             return Ok(false);
         }
 
-        let count = count_result[0].get("count")
+        let count = count_result[0]
+            .get("count")
             .and_then(|c| c.as_u64())
             .unwrap_or(0);
 
@@ -880,7 +1125,7 @@ impl RBACService {
 
     pub async fn get_user_permissions(&self, user_id: &str) -> Result<Vec<String>, AuthError> {
         let user_id = crate::utils::record_id::normalize_user_id(user_id);
-        
+
         let query = r#"
             SELECT name
             FROM permission
@@ -889,12 +1134,14 @@ impl RBACService {
                 WHERE role_id IN (
                     SELECT VALUE role_id
                     FROM user_role
-                    WHERE user_id = type::record('user', $user_key)
+                    WHERE user_id = (SELECT VALUE subject_id FROM type::record('user', $user_key))[0]
                 )
             )
         "#;
 
-        let mut response = self.db.client
+        let mut response = self
+            .db
+            .client
             .query(query)
             .bind(("user_key", user_id))
             .await
@@ -929,16 +1176,30 @@ mod name_validation_tests {
     fn rejects_names_that_cannot_be_addressed_later() {
         // 建得出来、按名字找不回去 —— 所有 /roles/{name} 形式的接口都拿它没办法。
         for bad in ["", "   ", "has space", "tab\there", "换行\n"] {
-            assert!(validate_rbac_name("Role", bad).is_err(), "should reject {bad:?}");
+            assert!(
+                validate_rbac_name("Role", bad).is_err(),
+                "should reject {bad:?}"
+            );
         }
-        assert!(validate_rbac_name("Role", &"x".repeat(65)).is_err(), "过长应拒绝");
+        assert!(
+            validate_rbac_name("Role", &"x".repeat(65)).is_err(),
+            "过长应拒绝"
+        );
     }
 
     #[test]
     fn accepts_seeded_shapes_including_the_namespace_prefix() {
         // 种子数据里的真实形状必须能通过，否则 initial_data.sql 与代码就对不上了。
-        for ok in ["admin", "user_manager", "soulauth:users.read", "soulauth:oidc_clients.write"] {
-            assert!(validate_rbac_name("Permission", ok).is_ok(), "should accept {ok}");
+        for ok in [
+            "admin",
+            "user_manager",
+            "soulauth:users.read",
+            "soulauth:oidc_clients.write",
+        ] {
+            assert!(
+                validate_rbac_name("Permission", ok).is_ok(),
+                "should accept {ok}"
+            );
         }
         assert_eq!(validate_rbac_name("Role", "  admin  ").unwrap(), "admin");
     }

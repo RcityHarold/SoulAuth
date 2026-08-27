@@ -63,9 +63,9 @@ C=$(curl -sS --max-time 10 -o "$WORK/r" -w '%{http_code}' -X POST "http://127.0.
 step "7②" "授予 admin 角色"
 curl -sS --max-time 10 -u "$DATABASE_USER:$DATABASE_PASS" \
   -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
-  --data "LET \$u = (SELECT VALUE id FROM user WHERE email = 'admin@your-domain.com')[0];
-          CREATE user_role CONTENT { user_id: \$u, role_id: role:admin,
-            assigned_at: 0, assigned_by: user:system };" \
+  --data "LET \$a = (SELECT VALUE subject_id FROM user WHERE email = 'admin@your-domain.com')[0];
+          CREATE user_role CONTENT { user_id: \$a, role_id: role:admin,
+            assigned_at: 0, assigned_by: actor_identity:system };" \
   "http://$DATABASE_URL/sql" > "$WORK/g" 2>&1
 python3 -c "
 import json

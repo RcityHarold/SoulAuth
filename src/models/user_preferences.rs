@@ -86,7 +86,8 @@ pub struct UserPreferencesResponse {
 impl From<UserPreferences> for UserPreferencesResponse {
     fn from(prefs: UserPreferences) -> Self {
         Self {
-            id: prefs.id
+            id: prefs
+                .id
                 .map(|id| crate::utils::record_id::record_id_key_to_string(&id))
                 .unwrap_or_default(),
             user_id: crate::utils::record_id::record_id_key_to_string(&prefs.user_id),
@@ -100,8 +101,10 @@ impl From<UserPreferences> for UserPreferencesResponse {
             timezone: prefs.timezone,
             date_format: prefs.date_format,
             time_format: prefs.time_format,
-            created_at: chrono::DateTime::<Utc>::from_timestamp(prefs.created_at, 0).unwrap_or_else(Utc::now),
-            updated_at: chrono::DateTime::<Utc>::from_timestamp(prefs.updated_at, 0).unwrap_or_else(Utc::now),
+            created_at: chrono::DateTime::<Utc>::from_timestamp(prefs.created_at, 0)
+                .unwrap_or_else(Utc::now),
+            updated_at: chrono::DateTime::<Utc>::from_timestamp(prefs.updated_at, 0)
+                .unwrap_or_else(Utc::now),
         }
     }
 }

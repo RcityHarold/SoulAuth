@@ -50,6 +50,10 @@ pub mod names {
     pub const AUDIT_READ: &str = auth_local!("audit.read");
     pub const OIDC_CLIENTS_READ: &str = auth_local!("oidc_clients.read");
     pub const OIDC_CLIENTS_WRITE: &str = auth_local!("oidc_clients.write");
+    /// 查看已注册的非人主体及其**公钥**。
+    pub const ACTORS_READ: &str = auth_local!("actors.read");
+    /// 注册非人主体、增删其验证密钥。拿到它等于能凭空造出一个可认证的主体。
+    pub const ACTORS_WRITE: &str = auth_local!("actors.write");
 
     /// 命名空间前缀本身，由宏推导而来（`auth_local!("")`），
     /// 不重复写一遍字面量。仅测试需要，故 `cfg(test)`。
@@ -60,8 +64,7 @@ pub mod names {
     ///
     /// 以前这个列表直接写在 `routes::auth::is_admin_console_user` 里，
     /// 与常量分居两处；放在这里，"哪些权限算后台准入"只有一个答案。
-    pub const ADMIN_CONSOLE_READ: [&str; 4] =
-        [USERS_READ, ROLES_READ, SECURITY_READ, AUDIT_READ];
+    pub const ADMIN_CONSOLE_READ: [&str; 4] = [USERS_READ, ROLES_READ, SECURITY_READ, AUDIT_READ];
 
     /// 代码实际会校验的全部权限名，仅供一致性测试使用。
     #[cfg(test)]
@@ -176,7 +179,6 @@ pub struct CreatePermissionRequest {
     pub resource: String,
     pub action: String,
 }
-
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PermissionResponse {

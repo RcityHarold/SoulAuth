@@ -3,7 +3,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OidcAuthorizationCode {
     pub id: Option<String>,
-    pub code: String,
+    /// 授权码的 SHA-256 指纹，不是授权码本身。
+    pub code_hash: String,
     pub client_id: String,
     pub user_id: String,
     pub redirect_uri: String,
@@ -26,7 +27,8 @@ pub struct OidcAuthorizationCode {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OidcAccessToken {
     pub id: Option<String>,
-    pub token: String,
+    /// 访问令牌的 SHA-256 指纹，不是令牌本身。
+    pub token_hash: String,
     pub token_type: String,
     pub client_id: String,
     pub user_id: String,
@@ -38,10 +40,12 @@ pub struct OidcAccessToken {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct OidcRefreshToken {
     pub id: Option<String>,
-    pub token: String,
+    /// 刷新令牌的 SHA-256 指纹，不是令牌本身。
+    pub token_hash: String,
     pub client_id: String,
     pub user_id: String,
-    pub access_token: String,
+    /// 关联访问令牌的指纹（刷新时据此吊销旧访问令牌）。
+    pub access_token_hash: String,
     pub scope: String,
     /// 同 `OidcAuthorizationCode::auth_session_ref`。
     ///

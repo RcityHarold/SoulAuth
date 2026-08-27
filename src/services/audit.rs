@@ -5,13 +5,12 @@ use std::collections::HashMap;
 use tracing::error;
 
 use crate::{
-    error::{Result as ApiResult, AuthError},
-    services::database::Database,
+    error::{AuthError, Result as ApiResult},
     routes::audit::{
-        AuthenticationStats, CategoryMetric, ExecutiveSummary, HourlyActivity,
-        IpActivityMetric, LockoutStats, SecurityRecommendation, StatusMetric,
-        SuspiciousActivity, UserActivityMetric,
+        AuthenticationStats, CategoryMetric, ExecutiveSummary, HourlyActivity, IpActivityMetric,
+        LockoutStats, SecurityRecommendation, StatusMetric, SuspiciousActivity, UserActivityMetric,
     },
+    services::database::Database,
 };
 
 #[derive(Clone)]
@@ -34,7 +33,9 @@ impl AuditService {
         let oauth_query = "SELECT count() as count FROM user_activity WHERE action = 'oauth_login' AND timestamp >= $start_time GROUP ALL";
         let reset_query = "SELECT count() as count FROM user_activity WHERE action = 'password_reset' AND timestamp >= $start_time GROUP ALL";
 
-        let successful_logins = self.execute_count_query(successful_query, start_time).await?;
+        let successful_logins = self
+            .execute_count_query(successful_query, start_time)
+            .await?;
         let failed_logins = self.execute_count_query(failed_query, start_time).await?;
         let oauth_logins = self.execute_count_query(oauth_query, start_time).await?;
         let password_resets = self.execute_count_query(reset_query, start_time).await?;
@@ -72,8 +73,11 @@ impl AuditService {
         let ip_lockouts = self
             .execute_count_query_since(ip_lockouts_query, start_time)
             .await?;
-        
-        let mut active_result = self.db.client.query(active_lockouts_query)
+
+        let mut active_result = self
+            .db
+            .client
+            .query(active_lockouts_query)
             .bind(("now", Utc::now()))
             .await
             .and_then(|response| response.check())
@@ -81,7 +85,7 @@ impl AuditService {
                 error!("Failed to get active lockouts count: {}", e);
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
-        
+
         let active_lockouts: Option<i64> = active_result.take("count").map_err(|e| {
             error!("Failed to extract active lockouts count: {}", e);
             AuthError::DatabaseError("Query execution failed".to_string())
@@ -91,7 +95,10 @@ impl AuditService {
         let duration_query = "SELECT type::string(locked_at) AS locked_at, \
              type::string(locked_until) AS locked_until FROM account_lockout \
              WHERE locked_at >= $start_time AND locked_until != NONE";
-        let mut duration_result = self.db.client.query(duration_query)
+        let mut duration_result = self
+            .db
+            .client
+            .query(duration_query)
             .bind(("start_time", start_time))
             .await
             .and_then(|response| response.check())
@@ -145,10 +152,16 @@ impl AuditService {
     }
 
     // Failed Login by IP
-    pub async fn get_failed_login_by_ip(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<IpActivityMetric>> {
+    pub async fn get_failed_login_by_ip(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<IpActivityMetric>> {
         let query = "SELECT ip_address, count() as failed_attempts, math::max(timestamp) as last_attempt FROM user_activity WHERE action = 'login_failed' AND timestamp >= $start_time GROUP BY ip_address ORDER BY failed_attempts DESC LIMIT 20";
-        
-        let mut result = self.db.client.query(query)
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -190,8 +203,8 @@ impl AuditService {
             let ip_address = row::str_field(r, "ip_address");
             let failed_attempts = row::i64_field(r, "failed_attempts");
             let last_attempt_timestamp = row::i64_field(r, "last_attempt");
-            let last_attempt = DateTime::from_timestamp(last_attempt_timestamp, 0)
-                .unwrap_or_else(Utc::now);
+            let last_attempt =
+                DateTime::from_timestamp(last_attempt_timestamp, 0).unwrap_or_else(Utc::now);
 
             metrics.push(IpActivityMetric {
                 is_locked: locked.contains(&ip_address),
@@ -205,15 +218,21 @@ impl AuditService {
     }
 
     // Suspicious Activities Detection
-    pub async fn get_suspicious_activities(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<SuspiciousActivity>> {
+    pub async fn get_suspicious_activities(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<SuspiciousActivity>> {
         // Multiple criteria for suspicious activity:
         // 1. High frequency failed logins from same IP
         // 2. Login attempts from unusual locations
         // 3. Multiple account access attempts
-        
+
         let query = "SELECT ip_address, user_id, action, count() as count, math::min(timestamp) as first_seen, math::max(timestamp) as last_seen FROM user_activity WHERE timestamp >= $start_time AND (action = 'login_failed' OR action = 'permission_denied') GROUP BY ip_address, user_id, action ORDER BY count DESC LIMIT 50";
-        
-        let mut result = self.db.client.query(query)
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -254,9 +273,15 @@ impl AuditService {
     }
 
     // Activities by Category
-    pub async fn get_activities_by_category(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<CategoryMetric>> {
+    pub async fn get_activities_by_category(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<CategoryMetric>> {
         let query = "SELECT category, count() as count FROM user_activity WHERE timestamp >= $start_time GROUP BY category ORDER BY count DESC";
-        let mut result = self.db.client.query(query)
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -272,19 +297,30 @@ impl AuditService {
             .collect();
         let total: i64 = categories.iter().map(|(_, count)| count).sum();
 
-        Ok(categories.into_iter().map(|(category, count)| {
-            CategoryMetric {
+        Ok(categories
+            .into_iter()
+            .map(|(category, count)| CategoryMetric {
                 category,
                 count,
-                percentage: if total > 0 { (count as f64 / total as f64) * 100.0 } else { 0.0 },
-            }
-        }).collect())
+                percentage: if total > 0 {
+                    (count as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect())
     }
 
     // Activities by Status
-    pub async fn get_activities_by_status(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<StatusMetric>> {
+    pub async fn get_activities_by_status(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<StatusMetric>> {
         let query = "SELECT status, count() as count FROM user_activity WHERE timestamp >= $start_time GROUP BY status ORDER BY count DESC";
-        let mut result = self.db.client.query(query)
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -300,21 +336,32 @@ impl AuditService {
             .collect();
         let total: i64 = statuses.iter().map(|(_, count)| count).sum();
 
-        Ok(statuses.into_iter().map(|(status, count)| {
-            StatusMetric {
+        Ok(statuses
+            .into_iter()
+            .map(|(status, count)| StatusMetric {
                 status,
                 count,
-                percentage: if total > 0 { (count as f64 / total as f64) * 100.0 } else { 0.0 },
-            }
-        }).collect())
+                percentage: if total > 0 {
+                    (count as f64 / total as f64) * 100.0
+                } else {
+                    0.0
+                },
+            })
+            .collect())
     }
 
     // Top Active Users
-    pub async fn get_top_active_users(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<UserActivityMetric>> {
+    pub async fn get_top_active_users(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<UserActivityMetric>> {
         // SurrealDB 3.x: avoid JOIN; aggregate first, then resolve user email map.
         let query = "SELECT type::string(user_id) as user_id, count() as activity_count, math::max(timestamp) as last_activity FROM user_activity WHERE timestamp >= $start_time AND user_id != NONE GROUP BY user_id ORDER BY activity_count DESC LIMIT 20";
 
-        let mut result = self.db.client.query(query)
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -333,7 +380,8 @@ impl AuditService {
                 _ => continue,
             };
 
-            let user_id = obj.get("user_id")
+            let user_id = obj
+                .get("user_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -341,10 +389,12 @@ impl AuditService {
                 continue;
             }
 
-            let activity_count = obj.get("activity_count")
+            let activity_count = obj
+                .get("activity_count")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
-            let last_activity_ts = obj.get("last_activity")
+            let last_activity_ts = obj
+                .get("last_activity")
                 .and_then(|v| v.as_i64())
                 .unwrap_or(0);
 
@@ -359,7 +409,10 @@ impl AuditService {
         let mut email_map: HashMap<String, String> = HashMap::new();
         if !user_keys.is_empty() {
             let user_query = "SELECT type::string(id) as id, email FROM user WHERE type::string(id) IN $user_ids";
-            let mut user_result = self.db.client.query(user_query)
+            let mut user_result = self
+                .db
+                .client
+                .query(user_query)
                 .bind(("user_ids", user_keys))
                 .await
                 .and_then(|response| response.check())
@@ -374,42 +427,60 @@ impl AuditService {
                     Value::Object(o) => o,
                     _ => continue,
                 };
-                let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let email = obj.get("email").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let id = obj
+                    .get("id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let email = obj
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
                 if !id.is_empty() {
                     email_map.insert(id, email);
                 }
             }
         }
 
-        let users = compact_rows.into_iter().map(|(user_id, activity_count, last_activity_ts)| {
-            let normalized = user_id
-                .trim_start_matches("user:")
-                .trim_matches(|c| c == '⟨' || c == '⟩');
-            let lookup_id = format!("user:{}", normalized);
-            let email = email_map.get(&lookup_id).cloned().unwrap_or_default();
-            let last_activity = DateTime::from_timestamp(last_activity_ts, 0).unwrap_or_else(Utc::now);
+        let users = compact_rows
+            .into_iter()
+            .map(|(user_id, activity_count, last_activity_ts)| {
+                let normalized = user_id
+                    .trim_start_matches("user:")
+                    .trim_matches(|c| c == '⟨' || c == '⟩');
+                let lookup_id = format!("user:{}", normalized);
+                let email = email_map.get(&lookup_id).cloned().unwrap_or_default();
+                let last_activity =
+                    DateTime::from_timestamp(last_activity_ts, 0).unwrap_or_else(Utc::now);
 
-            UserActivityMetric {
-                user_id,
-                email,
-                activity_count,
-                last_activity,
-            }
-        }).collect();
+                UserActivityMetric {
+                    user_id,
+                    email,
+                    activity_count,
+                    last_activity,
+                }
+            })
+            .collect();
 
         Ok(users)
     }
 
     // Hourly Activity Distribution
-    pub async fn get_hourly_activity_distribution(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<HourlyActivity>> {
+    pub async fn get_hourly_activity_distribution(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<HourlyActivity>> {
         // `timestamp` 是 Unix 秒（number）。`time::hour()` 只接受 datetime，
         // 对数字列不会报错但恒返回 NONE —— 实测确认。这里直接用算术取 UTC 小时。
         let query = "SELECT math::floor((timestamp % 86400) / 3600) as hour, count() as count \
                      FROM user_activity WHERE timestamp >= $start_time \
                      GROUP BY hour ORDER BY hour";
-        
-        let mut result = self.db.client.query(query)
+
+        let mut result = self
+            .db
+            .client
+            .query(query)
             .bind(("start_time", start_time.timestamp()))
             .await
             .and_then(|response| response.check())
@@ -423,11 +494,11 @@ impl AuditService {
             .iter()
             .map(|r| (row::i64_field(r, "hour") as i32, row::i64_field(r, "count")))
             .collect();
-        
+
         // Fill in missing hours with 0 count
         let hourly_map: HashMap<i32, i64> = hourly_data.into_iter().collect();
         let mut distribution = Vec::new();
-        
+
         for hour in 0..24 {
             distribution.push(HourlyActivity {
                 hour,
@@ -439,12 +510,15 @@ impl AuditService {
     }
 
     // Generate Executive Summary
-    pub async fn generate_executive_summary(&self, start_time: DateTime<Utc>) -> ApiResult<ExecutiveSummary> {
+    pub async fn generate_executive_summary(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<ExecutiveSummary> {
         let total_users = self.get_total_users().await?;
         let active_users = self.get_active_users_count(start_time).await?;
         let security_incidents = self.get_security_incidents_count(start_time).await?;
         let auth_stats = self.get_authentication_stats(start_time).await?;
-        
+
         let has_attempts = auth_stats.successful_logins + auth_stats.failed_logins > 0;
         let risk_level =
             self.calculate_risk_level(security_incidents, auth_stats.success_rate, has_attempts);
@@ -459,9 +533,12 @@ impl AuditService {
     }
 
     // Security Recommendations
-    pub async fn generate_security_recommendations(&self, start_time: DateTime<Utc>) -> ApiResult<Vec<SecurityRecommendation>> {
+    pub async fn generate_security_recommendations(
+        &self,
+        start_time: DateTime<Utc>,
+    ) -> ApiResult<Vec<SecurityRecommendation>> {
         let mut recommendations = Vec::new();
-        
+
         // Check authentication success rate
         let auth_stats = self.get_authentication_stats(start_time).await?;
         // 同 `calculate_risk_level`：窗口内一次登录都没有时，成功率是 0.0 而非
@@ -673,7 +750,10 @@ mod row {
     use serde_json::Value;
 
     pub fn str_field(row: &Value, key: &str) -> String {
-        row.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        row.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
     }
 
     pub fn opt_str_field(row: &Value, key: &str) -> Option<String> {
