@@ -97,13 +97,30 @@ components:
           type: string
 
   securitySchemes:
+    # 三种，不是一种。
+    #
+    # 把它们混成一个 `bearerAuth` 会产生具体的误导：读契约的人会以为
+    # /api/oidc/userinfo 收的是登录拿到的那枚会话令牌 —— 它收的是 OIDC
+    # 访问令牌，两者由不同端点签发、生命周期也不同。
     bearerAuth:
       type: http
       scheme: bearer
       description: >-
-        会话令牌，来自 POST /api/auth/login。
-        OIDC 协议端点不用它：/authorize 认浏览器会话 cookie，
-        /token 认客户端凭据。
+        会话令牌，来自 POST /api/auth/login（或 AIActor 的
+        POST /api/actors/authenticate）。全部 /api 业务端点用它。
+    oidcAccessToken:
+      type: http
+      scheme: bearer
+      description: >-
+        OIDC 访问令牌，来自 POST /api/oidc/token。**只有** /api/oidc/userinfo
+        用它。它与上面的会话令牌不可互换。
+    browserSession:
+      type: apiKey
+      in: cookie
+      name: soulauth_session
+      description: >-
+        浏览器会话 cookie。/api/oidc/authorize 用它判断"这个浏览器是否已登录"；
+        没有它不是报错，而是重定向到登录页。
 
 tags:
   - name: AI Actors
@@ -134,7 +151,7 @@ paths:
       operationId: actors_list_actors
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.read
+      x-required-permissions: [soulauth:actors.read]
       responses:
         "200":
           description: OK
@@ -146,7 +163,7 @@ paths:
         不创建 HumanAccount —— AIActor 没有邮箱、用户名或口令。
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.write
+      x-required-permissions: [soulauth:actors.write]
       responses:
         "200":
           description: OK
@@ -157,7 +174,7 @@ paths:
       operationId: actors_get_actor
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.read
+      x-required-permissions: [soulauth:actors.read]
       responses:
         "200":
           description: OK
@@ -168,7 +185,7 @@ paths:
       operationId: actors_list_credentials
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.read
+      x-required-permissions: [soulauth:actors.read]
       responses:
         "200":
           description: OK
@@ -178,7 +195,7 @@ paths:
       description: 追加一枚密钥。多枚并存是安全轮换的前提。
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.write
+      x-required-permissions: [soulauth:actors.write]
       responses:
         "200":
           description: OK
@@ -192,7 +209,7 @@ paths:
         无从追溯。
       security:
         - bearerAuth: []
-      x-required-permission: soulauth:actors.write
+      x-required-permissions: [soulauth:actors.write]
       responses:
         "200":
           description: OK
@@ -480,8 +497,8 @@ paths:
     get:
       tags: [Authentication]
       operationId: auth_verify_email
-      security:
-        - bearerAuth: []
+      # 令牌在路径里，这条**必须**公开 —— 要求先有令牌才能验证邮箱是循环依赖
+      security: []
       responses:
         "200":
           description: OK
@@ -570,8 +587,9 @@ paths:
     get:
       tags: [OIDC]
       operationId: oidc_authorize
+      # 认浏览器 cookie；没有就重定向到登录页，不报 401
       security:
-        - bearerAuth: []
+        - browserSession: []
       responses:
         "200":
           description: OK
@@ -649,8 +667,8 @@ paths:
     get:
       tags: [OIDC]
       operationId: oidc_logout
-      security:
-        - bearerAuth: []
+      # 不读任何认证头，只看 id_token_hint 查询参数
+      security: []
       responses:
         "200":
           description: OK
@@ -668,8 +686,9 @@ paths:
     get:
       tags: [OIDC]
       operationId: oidc_userinfo
+      # 收的是 OIDC 访问令牌，不是会话令牌
       security:
-        - bearerAuth: []
+        - oidcAccessToken: []
       responses:
         "200":
           description: OK

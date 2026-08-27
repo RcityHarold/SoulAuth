@@ -2179,3 +2179,223 @@ fn j9_schema_indexes_reference_existing_fields() {
         }
     }
 }
+
+/// J10 · 契约声明的鉴权要求必须与 Runtime 一致
+///
+/// `j4` 只比对「路径 + 方法存不存在」。鉴权要求它一个字都不看 —— 于是契约可以
+/// 一边路径全对，一边把 `POST /api/auth/login` 声明成需要 bearer 令牌
+/// （拿令牌之前先要有令牌，纯循环），而所有测试照样是绿的。
+///
+/// 这条守两个方向的等价关系：
+///
+/// ```text
+/// 契约声明 bearerAuth  ⟺  handler 签名里有 AuthedUser / AuthedActor
+/// 契约声明 x-required-permissions  ⟺  handler 里有 require_permission!
+/// ```
+///
+/// **只管 `bearerAuth`。** 另外两种机制（`oidcAccessToken`、`browserSession`）
+/// 不走这两个提取器，契约用不同的 scheme 声明它们 —— 声明本身就是文档，
+/// 不需要在这里维护一张例外名单（例外名单迟早会变成一张没人敢删的清单）。
+#[test]
+fn j10_contract_auth_matches_runtime() {
+    let contract = read("contracts/openapi.yaml");
+    let permission_consts = permission_constants();
+
+    // ── Runtime 侧：handler 名 → (要不要令牌, 需要哪条权限) ──
+    let mut runtime: std::collections::HashMap<String, (bool, Option<String>)> =
+        std::collections::HashMap::new();
+    for (file, body) in sources() {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        for (name, sig, block) in fn_blocks(&body) {
+            let needs_token = sig.contains("AuthedUser") || sig.contains("AuthedActor");
+            let perm = block.split("require_permission").skip(1).find_map(|tail| {
+                let head: String = tail.chars().take(200).collect();
+                permission_consts
+                    .iter()
+                    .find(|(c, _)| head.contains(c.as_str()))
+                    .map(|(_, wire)| wire.clone())
+            });
+            // 键用 `<模块>_<函数>`，正好是 operationId 的格式。
+            //
+            // 只用函数名做键会撞车：`actors::register` 与 `auth::register` 同名，
+            // 而两者的鉴权要求正好相反（前者要权限，后者是公开注册入口）。
+            // 首版就是这么写的，于是这条守卫报了一个假不符。
+            let module = file.trim_start_matches("routes/").trim_end_matches(".rs");
+            runtime.insert(format!("{module}_{name}"), (needs_token, perm));
+        }
+    }
+    assert!(
+        runtime.len() > 40,
+        "只解析出 {} 个 handler —— 解析逻辑失效了",
+        runtime.len()
+    );
+
+    // ── 契约侧：逐个 operation 读 operationId / security / x-required-permissions ──
+    let mut checked = 0usize;
+    let mut current: Option<(String, bool, Option<String>)> = None;
+    let flush = |cur: &Option<(String, bool, Option<String>)>, checked: &mut usize| {
+        let Some((op_id, declares_bearer, declared_perm)) = cur else {
+            return;
+        };
+        // operationId 与 runtime 的键同格式，直接查。查不到就跳过 ——
+        // `main_health` 这类不在 routes/ 下的处理器不归这条守卫管。
+        let Some((needs_token, perm)) = runtime.get(op_id).cloned() else {
+            return;
+        };
+        *checked += 1;
+        assert_eq!(
+            *declares_bearer, needs_token,
+            "`{op_id}`：契约声明 bearerAuth={declares_bearer}，\
+             但 handler 签名里 AuthedUser/AuthedActor={needs_token}"
+        );
+        assert_eq!(
+            *declared_perm, perm,
+            "`{op_id}`：契约声明 x-required-permissions={declared_perm:?}，\
+             但 handler 里 require_permission! 的是 {perm:?}"
+        );
+    };
+
+    let mut in_security = false;
+    for line in contract.lines() {
+        let t = line.trim();
+        if let Some(rest) = t.strip_prefix("operationId: ") {
+            flush(&current, &mut checked);
+            current = Some((rest.trim().to_string(), false, None));
+            in_security = false;
+        } else if t == "security:" || t.starts_with("security: [") {
+            in_security = !t.contains('[');
+            if t.contains("bearerAuth") {
+                if let Some(c) = current.as_mut() {
+                    c.1 = true;
+                }
+            }
+        } else if in_security && t.starts_with("- ") {
+            if t.contains("bearerAuth") {
+                if let Some(c) = current.as_mut() {
+                    c.1 = true;
+                }
+            }
+        } else if let Some(rest) = t.strip_prefix("x-required-permissions: [") {
+            in_security = false;
+            if let Some(c) = current.as_mut() {
+                c.2 = Some(rest.trim_end_matches(']').trim().to_string());
+            }
+        } else if !t.starts_with('-') {
+            in_security = false;
+        }
+    }
+    flush(&current, &mut checked);
+
+    assert!(
+        checked > 60,
+        "只对上了 {checked} 个 operation，远少于契约里的数量 —— 解析逻辑失效了"
+    );
+}
+
+/// `models::permission::names` 里的 (常量名, wire 名)。
+fn permission_constants() -> Vec<(String, String)> {
+    let src = read("src/models/permission.rs");
+    let mut out = Vec::new();
+    for line in src.lines() {
+        let t = line.trim();
+        let Some(rest) = t.strip_prefix("pub const ") else {
+            continue;
+        };
+        let Some((name, tail)) = rest.split_once(':') else {
+            continue;
+        };
+        let Some(open) = tail.find("auth_local!(\"") else {
+            continue;
+        };
+        let after = &tail[open + "auth_local!(\"".len()..];
+        let Some(end) = after.find('"') else { continue };
+        out.push((
+            name.trim().to_string(),
+            format!("soulauth:{}", &after[..end]),
+        ));
+    }
+    out
+}
+
+/// 把一份 Rust 源码切成 (函数名, 签名, 函数体)。
+///
+/// 全程用**字节索引**。首版在字节偏移与 `Vec<char>` 之间来回换算，撞上中文
+/// 注释就 panic（`byte index … is not a char boundary`）—— 本仓库注释大量是
+/// 中文，这类 bug 在纯英文源码上永远不会暴露。
+fn fn_blocks(body: &str) -> Vec<(String, String, String)> {
+    let mut out = Vec::new();
+    let mut idx = 0usize;
+
+    while let Some(rel) = body[idx..].find("fn ") {
+        let at = idx + rel;
+        idx = at + 3;
+
+        // 必须是行首的 `fn` / `pub fn` / `pub async fn`，不能是标识符里的 fn。
+        let line_start = body[..at].rfind('\n').map(|n| n + 1).unwrap_or(0);
+        let before = body[line_start..at].trim();
+        if !before.is_empty()
+            && !before
+                .split_whitespace()
+                .all(|w| matches!(w, "pub" | "async" | "const" | "unsafe"))
+        {
+            continue;
+        }
+
+        let rest = &body[idx..];
+        let Some(paren_rel) = rest.find('(') else {
+            break;
+        };
+        let name = rest[..paren_rel].trim();
+        if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let name = name.to_string();
+
+        // 参数表可能跨多行且内含嵌套括号。
+        let paren_at = idx + paren_rel;
+        let mut depth = 0i32;
+        let mut sig_end = None;
+        for (off, ch) in body[paren_at..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        sig_end = Some(paren_at + off + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(sig_end) = sig_end else { break };
+
+        let Some(brace_rel) = body[sig_end..].find('{') else {
+            break;
+        };
+        let brace_at = sig_end + brace_rel;
+        let sig = body[at..brace_at].to_string();
+
+        let mut depth = 0i32;
+        let mut body_end = brace_at;
+        for (off, ch) in body[brace_at..].char_indices() {
+            match ch {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        body_end = brace_at + off + ch.len_utf8();
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        out.push((name, sig, body[brace_at..body_end].to_string()));
+        idx = body_end.max(idx);
+    }
+    out
+}
