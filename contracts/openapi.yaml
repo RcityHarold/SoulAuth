@@ -30,7 +30,8 @@ info:
 servers:
   - url: "{APP_URL}"
     description: >-
-      公开地址，由 APP_URL 配置。它同时是 OIDC issuer —— 二者必须逐字一致。
+      The public address, set by APP_URL. It is also the OIDC issuer — the two
+      must match character for character.
     variables:
       APP_URL:
         default: http://localhost:8080
@@ -42,13 +43,14 @@ components:
       required: [error, message]
       additionalProperties: true
       description: >-
-        全站统一的错误信封。`error` 是**稳定的机器可读码**，按它分支；
-        `message` 是人话，措辞随时可能改进，不要拿它做判断。
-        个别错误另带已文档化的补充字段（见 additionalProperties 说明）。
+        The single error envelope used across the whole API. `error` is a
+        **stable machine-readable code** — branch on it. `message` is prose: its
+        wording may improve at any time and must not be used for decisions.
+        Individual errors carry documented additional fields.
       properties:
         error:
           type: string
-          description: 稳定错误码，snake_case。
+          description: Stable error code, snake_case.
           enum:
             - internal_error
             - invalid_credentials
@@ -76,20 +78,21 @@ components:
             - service_unavailable
         message:
           type: string
-          description: 面向人的说明。不进契约。
+          description: Human-readable explanation. Not part of the contract.
         required_permission:
           type: string
-          description: 仅 `missing_permission` 携带 —— 缺的是哪一条权限。
+          description: Carried by `missing_permission` only — which permission is missing.
         locked_until_seconds:
           type: integer
-          description: 仅 `account_locked` 携带 —— 距解锁还有多少秒。
+          description: Carried by `account_locked` only — seconds until the lock clears.
 
     OAuthError:
       type: object
       required: [error]
       description: >-
-        **仅** OIDC 协议端点（/api/oidc/token 等）使用，形状由 RFC 6749 §5.2
-        规定，不能与上面的 Error 统一。
+        Used by the OIDC protocol endpoints **only** (/api/oidc/token and
+        friends). The shape is mandated by RFC 6749 §5.2 and cannot be unified
+        with the Error envelope above.
       properties:
         error:
           type: string
@@ -106,21 +109,24 @@ components:
       type: http
       scheme: bearer
       description: >-
-        会话令牌，来自 POST /api/auth/login（或 AIActor 的
-        POST /api/actors/authenticate）。全部 /api 业务端点用它。
+        Session token, from POST /api/auth/login (or POST
+        /api/actors/authenticate for an AI actor). Used by every /api business
+        endpoint.
     oidcAccessToken:
       type: http
       scheme: bearer
       description: >-
-        OIDC 访问令牌，来自 POST /api/oidc/token。**只有** /api/oidc/userinfo
-        用它。它与上面的会话令牌不可互换。
+        OIDC access token, from POST /api/oidc/token. Used by
+        /api/oidc/userinfo **only**. Not interchangeable with the session token
+        above.
     browserSession:
       type: apiKey
       in: cookie
       name: soulauth_session
       description: >-
-        浏览器会话 cookie。/api/oidc/authorize 用它判断"这个浏览器是否已登录"；
-        没有它不是报错，而是重定向到登录页。
+        Browser session cookie. /api/oidc/authorize uses it to decide whether
+        this browser is logged in; its absence is a redirect to the login page,
+        not an error.
 
 tags:
   - name: AI Actors
@@ -159,6 +165,10 @@ paths:
       tags: [AI Actors]
       operationId: actors_register
       description: >-
+        Register a non-human actor and attach its first Ed25519 verification
+        key. No HumanAccount is created — an AI actor has no email, username or
+        password.
+      description_zh: >-
         注册一个非人主体并挂上第一枚 Ed25519 验证密钥。
         不创建 HumanAccount —— AIActor 没有邮箱、用户名或口令。
       security:
@@ -192,7 +202,10 @@ paths:
     post:
       tags: [AI Actors]
       operationId: actors_add_credential
-      description: 追加一枚密钥。多枚并存是安全轮换的前提。
+      description: >-
+        Add another key. Having several active at once is what makes rotation
+        safe.
+      description_zh: 追加一枚密钥。多枚并存是安全轮换的前提。
       security:
         - bearerAuth: []
       x-required-permissions: [soulauth:actors.write]
@@ -205,6 +218,9 @@ paths:
       tags: [AI Actors]
       operationId: actors_revoke_credential
       description: >-
+        Revoke a key. The record is not deleted — otherwise the audit trail
+        loses the answer to which key a past authentication used.
+      description_zh: >-
         吊销一枚密钥。记录不删除 —— 否则历史审计里「这次认证用的是哪把钥匙」
         无从追溯。
       security:
@@ -219,6 +235,12 @@ paths:
       tags: [AI Actors]
       operationId: actors_authenticate
       description: >-
+        Step two: submit an Ed25519 signature over the challenge in exchange for
+        a session token. The signed content is recomputed independently by the
+        server; the payload echoed back in the request is never used. The
+        challenge is consumed atomically **before** verification, so a failed
+        attempt burns it too.
+      description_zh: >-
         第二步：提交对挑战的 Ed25519 签名，换一枚会话令牌。
         被签名内容由服务端独立重算，绝不采用请求里回传的 payload。
         挑战在验签**之前**被原子消费 —— 一次失败也会烧掉它。
@@ -231,6 +253,10 @@ paths:
       tags: [AI Actors]
       operationId: actors_challenge
       description: >-
+        Step one: obtain a single-use challenge (public endpoint). An unknown
+        actor and a suspended actor both return the same invalid_credentials,
+        so this cannot become a channel for enumerating subjects.
+      description_zh: >-
         第一步：领一枚一次性挑战（公开端点）。
         actor 不存在与已停用返回同一个 invalid_credentials，
         以免这里成为枚举主体的信道。
@@ -242,7 +268,10 @@ paths:
     get:
       tags: [AI Actors]
       operationId: actors_me
-      description: Agent 自省。人类会话令牌会被明确拒绝（403 forbidden）。
+      description: >-
+        Agent introspection. A human session token is explicitly refused with
+        403 forbidden.
+      description_zh: Agent 自省。人类会话令牌会被明确拒绝（403 forbidden）。
       security:
         - bearerAuth: []
       responses:

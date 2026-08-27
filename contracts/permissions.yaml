@@ -28,7 +28,8 @@ namespace: "soulauth:"
 permissions:
   - name: soulauth:users.read
     constant: USERS_READ
-    description: 读取 Actor、档案、偏好；读取他人的角色
+    description: Read actors, profiles and preferences; read another actor's roles
+    description_zh: 读取 Actor、档案、偏好；读取他人的角色
     status: supported
     enforced_at:
       - ops::get_membership_overview
@@ -40,14 +41,16 @@ permissions:
       - rbac::get_user_roles
   - name: soulauth:users.write
     constant: USERS_WRITE
-    description: 修改账号状态与会员等级
+    description: Change account status and membership level
+    description_zh: 修改账号状态与会员等级
     status: supported
     enforced_at:
       - user_management::update_user_account_status
       - user_management::update_user_membership
   - name: soulauth:roles.read
     constant: ROLES_READ
-    description: 列出与读取角色
+    description: List and read roles
+    description_zh: 列出与读取角色
     status: supported
     enforced_at:
       - rbac::get_role
@@ -55,7 +58,8 @@ permissions:
       - rbac::list_roles
   - name: soulauth:roles.write
     constant: ROLES_WRITE
-    description: 创建、更新角色；给主体分配 / 移除角色
+    description: Create and update roles; assign and remove roles on actors
+    description_zh: 创建、更新角色；给主体分配 / 移除角色
     status: supported
     enforced_at:
       - rbac::assign_role_to_user
@@ -64,20 +68,23 @@ permissions:
       - rbac::update_role
   - name: soulauth:roles.delete
     constant: ROLES_DELETE
-    description: 删除角色
+    description: Delete roles
+    description_zh: 删除角色
     status: supported
     enforced_at:
       - rbac::delete_role
   - name: soulauth:permissions.read
     constant: PERMISSIONS_READ
-    description: 列出与读取权限
+    description: List and read permissions
+    description_zh: 列出与读取权限
     status: supported
     enforced_at:
       - rbac::get_permission
       - rbac::list_permissions
   - name: soulauth:permissions.write
     constant: PERMISSIONS_WRITE
-    description: 创建权限；给角色分配 / 移除权限
+    description: Create permissions; attach and detach them on roles
+    description_zh: 创建权限；给角色分配 / 移除权限
     status: supported
     enforced_at:
       - rbac::assign_permission_to_role
@@ -85,7 +92,8 @@ permissions:
       - rbac::remove_permission_from_role
   - name: soulauth:security.read
     constant: SECURITY_READ
-    description: 读取锁定状态、安全指标、系统健康
+    description: Read lockout state, security metrics and system health
+    description_zh: 读取锁定状态、安全指标、系统健康
     status: supported
     enforced_at:
       - audit::get_security_metrics
@@ -93,13 +101,15 @@ permissions:
       - security::get_lockout_status
   - name: soulauth:security.write
     constant: SECURITY_WRITE
-    description: 解除账号 / IP 锁定
+    description: Clear account and IP lockouts
+    description_zh: 解除账号 / IP 锁定
     status: supported
     enforced_at:
       - security::unlock
   - name: soulauth:audit.read
     constant: AUDIT_READ
-    description: 审计仪表盘、活动汇总、安全报告、他人活动
+    description: Audit dashboard, activity summaries, security reports, other actors' activity
+    description_zh: 审计仪表盘、活动汇总、安全报告、他人活动
     status: supported
     enforced_at:
       - audit::generate_security_report
@@ -108,14 +118,16 @@ permissions:
       - user_management::get_user_activity_log_by_id
   - name: soulauth:oidc_clients.read
     constant: OIDC_CLIENTS_READ
-    description: 列出与读取 OIDC 客户端
+    description: List and read OIDC clients
+    description_zh: 列出与读取 OIDC 客户端
     status: supported
     enforced_at:
       - oidc_client::get_client
       - oidc_client::list_clients
   - name: soulauth:oidc_clients.write
     constant: OIDC_CLIENTS_WRITE
-    description: 创建、更新、停用客户端；重新生成密钥
+    description: Create, update and disable clients; regenerate secrets
+    description_zh: 创建、更新、停用客户端；重新生成密钥
     status: supported
     enforced_at:
       - oidc_client::create_client
@@ -129,7 +141,8 @@ permissions:
 # system-health —— 那两个端点由 security.read 把关。
   - name: soulauth:actors.read
     constant: ACTORS_READ
-    description: 查看已注册的非人主体及其验证密钥（只含公钥）
+    description: View registered non-human actors and their verification keys (public keys only)
+    description_zh: 查看已注册的非人主体及其验证密钥（只含公钥）
     status: supported
     enforced_at:
       - actors::get_actor
@@ -138,6 +151,10 @@ permissions:
   - name: soulauth:actors.write
     constant: ACTORS_WRITE
     description: >-
+      Register non-human actors and add or revoke their verification keys.
+      Holding it means being able to conjure an authenticable subject out of
+      nothing, so it is granted only to admin by default.
+    description_zh: >-
       注册非人主体、增删其验证密钥。拿到它等于能凭空造出一个可认证的主体，
       因此默认只授予 admin。
     status: supported
