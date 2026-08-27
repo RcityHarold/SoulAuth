@@ -1,6 +1,6 @@
 # SoulAuth 容器镜像。
 #
-# ⚠ 未经构建验证：编写环境没有 Docker。首次使用前请见 docker-compose.yml 顶部说明。
+# 每次推送由 CI 构建并跑通完整引导流程，见 .github/workflows/ci.yml 的 `docker` job。
 #
 # 分两段：编译产物有 ~1.5GB 的工具链和中间物，运行时一个都不需要。
 
