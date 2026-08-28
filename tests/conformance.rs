@@ -2258,12 +2258,14 @@ fn j10_contract_auth_matches_runtime() {
     };
 
     let mut in_security = false;
+    let mut in_perm = false;
     for line in contract.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("operationId: ") {
             flush(&current, &mut checked);
             current = Some((rest.trim().to_string(), false, None));
             in_security = false;
+            in_perm = false;
         } else if t == "security:" || t.starts_with("security: [") {
             in_security = !t.contains('[');
             if t.contains("bearerAuth") {
@@ -2278,11 +2280,24 @@ fn j10_contract_auth_matches_runtime() {
                 }
             }
         } else if let Some(rest) = t.strip_prefix("x-required-permissions: [") {
+            // 行内写法 `x-required-permissions: [soulauth:x.y]`
             in_security = false;
             if let Some(c) = current.as_mut() {
                 c.2 = Some(rest.trim_end_matches(']').trim().to_string());
             }
+        } else if t == "x-required-permissions:" {
+            // 多行列表写法。生成器用 yaml.safe_dump 输出，列表是多行的；
+            // 只认行内写法的话，40 个权限声明会全部被判成「没有声明」。
+            in_perm = true;
+            in_security = false;
+        } else if in_perm && t.starts_with("- soulauth:") {
+            if let Some(c) = current.as_mut() {
+                if c.2.is_none() {
+                    c.2 = Some(t.trim_start_matches("- ").trim().to_string());
+                }
+            }
         } else if !t.starts_with('-') {
+            in_perm = false;
             in_security = false;
         }
     }
@@ -2398,4 +2413,144 @@ fn fn_blocks(body: &str) -> Vec<(String, String, String)> {
         idx = body_end.max(idx);
     }
     out
+}
+
+/// J11 · 契约里的 schema 必须与 Rust 结构体一致
+///
+/// 请求/响应共 94 个类型、数百个字段。手写它们必然漂移，而**漂移的 schema 与
+/// 准确的 schema 看起来一模一样** —— 消费方照着它构造请求，直到 422 才发现
+/// 字段名不对。所以它们由 `contracts/generate-schemas.py` 从结构体生成，
+/// 这条守卫确认生成结果没有过期。
+///
+/// 断言的是「生成物与源码同步」，不是「生成器实现正确」：改了结构体却忘了重跑
+/// 脚本，这里会红。
+#[test]
+fn j11_schemas_match_rust_types() {
+    let generated = read("contracts/schemas.generated.json");
+    let contract = read("contracts/openapi.yaml");
+
+    // ① 生成物本身不能是空壳。首版的生成器因为路径键用了绝对路径，
+    //    `startswith("src/routes/")` 永远为假，静默生成了 0 个 schema ——
+    //    而一个空的 schema 段在 YAML 层面完全合法。
+    let schema_count = generated.matches("\"type\": \"object\"").count();
+    assert!(
+        schema_count > 50,
+        "生成的 schema 只有 {schema_count} 个，远少于预期 —— 生成器可能失效了"
+    );
+
+    // ② 每一个被路由引用的请求/响应类型，都必须在契约里有对应 schema。
+    for (name, _) in request_response_types() {
+        assert!(
+            contract.contains(&format!("\n    {name}:\n")),
+            "类型 `{name}` 出现在 handler 签名里，但 contracts/openapi.yaml 的 \
+             components.schemas 中没有它 —— 跑 `python3 contracts/generate-schemas.py`"
+        );
+    }
+
+    // ③ 字段逐个核对。**读生成的 JSON，不扫 YAML。**
+    //
+    // 首版在 openapi.yaml 上做文本切块，而 `yaml.safe_dump` 的缩进让「下一个
+    // 同级 schema」的边界判断立刻失效 —— 守卫报的是排版，不是契约。
+    // JSON 是生成物，格式由脚本固定，扫它是安全的。
+    for (name, fields) in request_response_types() {
+        let Some(at) = generated.find(&format!("\"{name}\": {{")) else {
+            continue;
+        };
+        let block = &generated[at..];
+        let end = block.find("\n    },").unwrap_or(block.len().min(4000));
+        let block = &block[..end];
+        for field in fields {
+            assert!(
+                block.contains(&format!("\"{field}\":")),
+                "`{name}` 的字段 `{field}` 不在 contracts/schemas.generated.json 里 —— \
+                 改了结构体之后请重跑 `python3 contracts/generate-schemas.py`"
+            );
+        }
+    }
+}
+
+/// 被路由 handler 签名引用到的请求/响应类型，及其 serde 字段名。
+fn request_response_types() -> Vec<(String, Vec<String>)> {
+    let all = sources();
+    let joined: String = all.iter().map(|(_, b)| b.as_str()).collect();
+
+    // handler 签名里出现的 `Json<T>` / `Query<T>`
+    let mut wanted: Vec<String> = Vec::new();
+    for (file, body) in &all {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        for marker in ["Json<", "Query<"] {
+            let mut from = 0usize;
+            while let Some(rel) = body[from..].find(marker) {
+                let at = from + rel + marker.len();
+                let Some(end) = body[at..].find('>') else {
+                    break;
+                };
+                let ty = body[at..at + end].trim();
+                let ty = ty.rsplit("::").next().unwrap_or(ty);
+                let ty = ty.trim_start_matches("Vec<");
+                if ty.chars().next().is_some_and(char::is_uppercase)
+                    && ty.chars().all(|c| c.is_alphanumeric())
+                    && ty != "Value"
+                    && ty != "String"
+                {
+                    wanted.push(ty.to_string());
+                }
+                from = at + end;
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+
+    // 每个类型的**线上字段名**。
+    //
+    // 不是 Rust 标识符：`#[serde(rename = "verified")]` 会让 `is_email_verified`
+    // 在 wire 上叫 `verified`，而契约描述的是 wire。首版比对 Rust 名，
+    // 于是把一个正确的生成结果判成了过期。
+    wanted
+        .into_iter()
+        .filter_map(|name| {
+            let at = joined.find(&format!("struct {name} {{"))?;
+            let body = &joined[at..];
+            let end = body.find("\n}")?;
+
+            let mut fields = Vec::new();
+            let mut rename: Option<String> = None;
+            let mut skip = false;
+            for line in body[..end].lines().skip(1) {
+                let l = line.trim();
+                if l.starts_with("#[") {
+                    if let Some(i) = l.find("rename = \"") {
+                        let rest = &l[i + "rename = \"".len()..];
+                        if let Some(j) = rest.find('"') {
+                            rename = Some(rest[..j].to_string());
+                        }
+                    }
+                    // `skip_serializing_if` 只是条件省略，字段仍在契约里。
+                    if l.contains("skip_serializing") && !l.contains("skip_serializing_if") {
+                        skip = true;
+                    }
+                    continue;
+                }
+                if l.starts_with("//") || l.is_empty() {
+                    continue;
+                }
+                let ident = l.strip_prefix("pub ").unwrap_or(l);
+                let Some((ident, _)) = ident.split_once(':') else {
+                    rename = None;
+                    skip = false;
+                    continue;
+                };
+                let ident = ident.trim();
+                if ident.chars().all(|c| c.is_alphanumeric() || c == '_') && !skip {
+                    fields.push(rename.clone().unwrap_or_else(|| ident.to_string()));
+                }
+                rename = None;
+                skip = false;
+            }
+            (!fields.is_empty()).then_some((name, fields))
+        })
+        .collect()
 }
