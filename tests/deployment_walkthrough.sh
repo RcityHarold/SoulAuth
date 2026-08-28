@@ -10,7 +10,13 @@
 #
 # 用法：cargo build && ./tests/deployment_walkthrough.sh
 # 退出码：0 表示照文档能从零部署到「拿到一个可用的管理员」。
-ROOT="/home/ubuntu/Rainbow-Hub/SoulAuth"; SP=8123; AP=8203
+# 从脚本自身位置推导仓库根，与 integration.sh 同一写法。
+#
+# 这里曾经写死成某台机器上的绝对路径（`/home/ubuntu/…`）。后果不只是
+# 「别人跑不了」：`$ROOT/schema.sql` 不存在时 import 失败，而失败被下面的
+# `>/dev/null 2>&1` 吞掉，屏幕上只剩「schema.sql 导入失败」，不给原因 ——
+# 一个专门用来证明「文档是可执行的」的脚本，自己不可执行，且不说为什么。
+readonly ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; SP=8123; AP=8203
 export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
 WORK="$(mktemp -d)"; FAIL=0
 cleanup(){ kill -9 ${AP_PID:-0} ${DB_PID:-0} 2>/dev/null; rm -rf "$WORK"; }; trap cleanup EXIT
@@ -38,12 +44,25 @@ export BIND_ADDR=127.0.0.1:${AP}
 ok "已导出（APP_URL 用 loopback，故不需要生产两项）"
 
 step 3 "准备数据库（复用同一组变量）"
-surreal import --endpoint "http://$DATABASE_URL" --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
-    --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" "$ROOT/schema.sql" >/dev/null 2>&1 \
-    && ok "schema.sql 导入成功" || bad "schema.sql 导入失败"
-surreal import --endpoint "http://$DATABASE_URL" --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
-    --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" "$ROOT/initial_data.sql" >/dev/null 2>&1 \
-    && ok "initial_data.sql 导入成功" || bad "initial_data.sql 导入失败"
+# 导入失败必须把 surreal 的原话打出来。以前这两条是 `>/dev/null 2>&1`，
+# 于是「OPTION IMPORT 缺失」「文件不存在」「ns/db 打错」三种完全不同的原因
+# 在屏幕上长得一模一样：一句「导入失败」。而这个脚本存在的全部意义，
+# 就是让照文档做不出来的时候能立刻知道是哪一步、为什么。
+import_sql() {
+    local file="$1"
+    if surreal import --endpoint "http://$DATABASE_URL" \
+        --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
+        --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" \
+        "$ROOT/$file" > "$WORK/import.log" 2>&1
+    then
+        ok "$file 导入成功"
+    else
+        bad "$file 导入失败"
+        sed 's/^/      /' "$WORK/import.log" >&2
+    fi
+}
+import_sql schema.sql
+import_sql initial_data.sql
 
 step 5 "启动应用程序"
 ( cd "$ROOT"; RUST_LOG=soulauth=warn exec ./target/debug/soulauth ) > "$WORK/app.log" 2>&1 &

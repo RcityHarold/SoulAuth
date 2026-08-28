@@ -1,3 +1,16 @@
+OPTION IMPORT;
+-- ↑ 必须是**第一行**，前面连注释都不能有。
+--
+-- SurrealDB 3.2 起 `surreal import` 强制要求它，否则整条命令以 400 失败：
+--   Invalid statement: Import requires `OPTION IMPORT;` as the first statement.
+--
+-- 它关掉事件、live query、字段处理与结果输出 —— 导入本来就不需要这些，
+-- 而这正是 `surreal export` 自己在产物开头写的第一行。对旧版本无害。
+--
+-- 不加的后果不是「慢一点」：Quickstart 与 DEPLOYMENT.md 的第 2 步直接失败，
+-- 而 CI 装 SurrealDB 用的是不锁版本的 `curl | sh`，docker-compose 用的是浮动的
+-- `surrealdb/surrealdb:v3` —— 上游一发新版，两条路径同时断。
+
 -- SoulAuth Database Schema
 -- 运行此文件以创建所有必需的数据库表和索引
 
