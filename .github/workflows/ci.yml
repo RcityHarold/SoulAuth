@@ -70,6 +70,16 @@ jobs:
       - name: Integration suite
         run: ./tests/integration.sh
 
+      # 部署文档的可执行形式。
+      #
+      # 文档站在两页上写着「这条路径由 CI 执行」并挂 `guard="deployment_walkthrough.sh"`
+      # 的徽章 —— 而这一步以前**并不存在**，脚本从没在 CI 上跑过。同期它还写死了
+      # 某台机器上的绝对 ROOT，也就是说那枚徽章指向的守卫既没运行、也运行不了。
+      #
+      # 一枚指不出真实运行的守卫的徽章，比不加徽章更糟：它看起来像有证据。
+      - name: Deployment walkthrough （部署文档的可执行形式）
+        run: ./tests/deployment_walkthrough.sh
+
       - name: Dump service log on failure
         if: failure()
         run: |

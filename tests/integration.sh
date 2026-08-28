@@ -330,9 +330,17 @@ BOOT_TOKEN="$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log"
     bad "启动日志打印了引导令牌" "$(grep -i bootstrap "$WORK/app.log" | head -3)"
 
 # 错误令牌必须被拒，且要留审计。
-eq 401 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+#
+# 状态码是 403 而不是 401，与下面「已初始化」那两条**完全一致** —— 这是同一条
+# 不变式的未初始化侧。曾经这里是 401：调顺序只统一了已初始化那一侧，拿一枚废
+# 令牌打一次仍然能区分 401（未初始化）与 403（已初始化），探测信道原封不动。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"nope@test.local","username":"nope","password":"CorrectHorse42!"}')" \
-    "错误引导令牌被拒"
+    "未初始化时错误引导令牌被拒，且与已初始化同一状态码"
+# 留着这份响应体，等系统初始化之后逐字节比对。只统一状态码不够 ——
+# 文案里只要出现 "an administrator already exists" 之类的措辞，信道就从
+# 状态码搬进了 body。
+BOOT_REJECT_UNINIT="$(body)"
 
 # 密码策略不因为「这是第一个用户」而放宽。
 eq 400 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
@@ -359,6 +367,10 @@ eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
 eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"third@test.local","username":"third","password":"CorrectHorse42!"}')" \
     "已初始化后错误令牌返回同一状态码，不构成探测信道"
+# 未初始化 / 已初始化，同一枚废令牌，响应必须逐字节相同 —— 状态码与 body 都是。
+# 这条断言才是「引导端点不泄露部署状态」这句公开文档的真正守卫。
+eq "$BOOT_REJECT_UNINIT" "$(body)" \
+    "两种引导失败的响应体逐字节相同，部署状态不外泄"
 
 group "4. 权限名前缀与 RBAC 守卫"
 

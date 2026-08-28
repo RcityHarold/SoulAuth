@@ -36,6 +36,7 @@ use axum::{
 };
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     config::Config,
@@ -53,6 +54,12 @@ use crate::{
     },
     AppState,
 };
+
+/// 引导端点两种失败共用的对外文案。
+///
+/// 「令牌错」与「门已关」必须逐字节相同，否则状态码统一了、信道搬到 body 里。
+/// 措辞刻意不提管理员是否存在：它要能同时诚实地描述这两种情况。
+const BOOTSTRAP_UNAVAILABLE: &str = "Bootstrap is not available";
 
 /// 引导令牌所需的字符数。
 ///
@@ -134,8 +141,10 @@ pub struct BootstrapAdminResponse {
 /// 建立第一个管理员。
 ///
 /// 前置条件有两条，缺一不可：令牌正确，且系统中**尚无**任何管理员。
-/// 第二条一旦不再满足，这个端点就永久返回 409 —— 它不是一个可以反复调用的
-/// 提权入口，而是一次性的开机门。
+/// 任何一条不满足都返回 403 —— 它不是一个可以反复调用的提权入口，
+/// 而是一次性的开机门。
+///
+/// 两种失败共用同一个状态码和同一段文案，见下面 ① ② 的说明。
 async fn bootstrap_admin(
     Extension(db): Extension<Arc<Database>>,
     Extension(app_state): Extension<Arc<AppState>>,
@@ -153,14 +162,25 @@ async fn bootstrap_admin(
     // 顺序是刻意的：已经有 admin 之后，无论令牌对不对都必须拒绝，而且两种情况
     // 要给同一个答复。反过来先验令牌的话，「令牌错」与「已初始化」会返回不同
     // 状态码，等于把一枚失效令牌变成探测实例是否已初始化的信道。
+    //
+    // 但只调顺序堵不住这条信道 —— 它只统一了「已初始化」那一侧。**未**初始化时
+    // 令牌错如果返回 401，拿一枚废令牌打一次就够了：401 = 未初始化、403 = 已初始化，
+    // 探针照常工作。所以两种失败必须共用同一个状态码**和同一段文案**（见 ②），
+    // 文案里也不能出现 "an administrator already exists" 这种泄露状态的措辞。
     if admin_exists(&db).await? {
-        return Err(AuthError::Forbidden(
-            "Bootstrap is closed: an administrator already exists".to_string(),
-        ));
+        return Err(AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string()));
     }
 
     // ② 校验令牌。失败也要留审计 —— 引导窗口期的爆破尝试正是要留痕的事。
+    //
+    // 对外的答复与 ① 逐字节相同。代价是运维把令牌敲错时，客户端那侧看不出
+    // 「是令牌错了」还是「门已经关了」—— 所以真实原因写进日志和审计行，
+    // 留在服务端。排错线索一点没少，只是不再对匿名调用方开放。
     if !app_state.bootstrap.verify(&request.token) {
+        warn!(
+            ip = %ctx.ip_address,
+            "Bootstrap rejected: invalid token (no administrator exists yet)"
+        );
         audit.record(
             AuditEvent::new(
                 "bootstrap_rejected",
@@ -171,9 +191,7 @@ async fn bootstrap_admin(
             )
             .with_details(serde_json::json!({ "reason": "invalid_bootstrap_token" })),
         );
-        return Err(AuthError::Unauthorized(
-            "Invalid bootstrap token".to_string(),
-        ));
+        return Err(AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string()));
     }
 
     // ③ 建账号。走与普通注册完全相同的路径 —— 密码策略、邮箱校验、唯一约束
