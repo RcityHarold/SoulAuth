@@ -53,9 +53,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # 版本钉死，不取 latest。
+      #
+      # 不钉的话，安装脚本每天拉 latest.txt 指向的那一版，于是同一个 commit
+      # 在不同日子有不同结果 —— 而这正好发生过：schema.sql 缺 `OPTION IMPORT;`
+      # 时在 3.0 上导得进、在 3.2 上整份导入失败且一张表不留，本机全绿、
+      # CI 全红，差别只是安装那天 latest 指向哪里。
+      #
+      # 升级时改这一处，并把 tests/integration.sh 与 docker-compose.yml 一起跑过。
       - name: Install SurrealDB
+        env:
+          SURREAL_VERSION: v3.2.4
         run: |
-          curl -sSf https://install.surrealdb.com | sh
+          curl -sSf https://install.surrealdb.com | sh -s -- --version "$SURREAL_VERSION"
           echo "$HOME/.surrealdb" >> "$GITHUB_PATH"
 
       - name: Verify SurrealDB is on PATH
@@ -69,6 +79,14 @@ jobs:
       # 以及停用账号之后各条凭证是否真的一起失效。
       - name: Integration suite
         run: ./tests/integration.sh
+
+      # 部署文档的可执行副本。
+      #
+      # 这一步以前不在 CI 里，而文档上挂着 `guard="deployment_walkthrough.sh"`
+      # 的 tested 徽章 —— 徽章指向的东西没人跑，等于徽章什么都没证明。
+      # 脚本本身也曾把仓库根写成绝对路径，只在作者机器上成立；两处一起修。
+      - name: Deployment walkthrough （可执行的部署文档）
+        run: ./tests/deployment_walkthrough.sh
 
       - name: Dump service log on failure
         if: failure()

@@ -131,11 +131,23 @@ pub struct BootstrapAdminResponse {
     pub is_admin: bool,
 }
 
+/// 引导端点对外只有一种拒绝答复。
+///
+/// 「已经有管理员」和「令牌不对」必须不可区分。分开返回的话，一枚早已失效的
+/// 令牌就成了探针：拿它打一发，一种状态码说明这台实例已经被初始化过，另一种
+/// 说明引导窗口还开着 —— 后者正是值得继续打的目标。两种情况的区分留在审计
+/// 日志里，那是运维看得到、而发请求的人看不到的地方。
+///
+/// 走同一个构造器而不是两处各写一遍，是为了让它们没法悄悄漂开。
+fn bootstrap_rejected() -> AuthError {
+    AuthError::Forbidden("Bootstrap is closed or the token is invalid".to_string())
+}
+
 /// 建立第一个管理员。
 ///
 /// 前置条件有两条，缺一不可：令牌正确，且系统中**尚无**任何管理员。
-/// 第二条一旦不再满足，这个端点就永久返回 409 —— 它不是一个可以反复调用的
-/// 提权入口，而是一次性的开机门。
+/// 任一条不满足都返回 403，且响应逐字相同 —— 见 `bootstrap_rejected`。
+/// 这不是一个可以反复调用的提权入口，而是一次性的开机门。
 async fn bootstrap_admin(
     Extension(db): Extension<Arc<Database>>,
     Extension(app_state): Extension<Arc<AppState>>,
@@ -154,9 +166,17 @@ async fn bootstrap_admin(
     // 要给同一个答复。反过来先验令牌的话，「令牌错」与「已初始化」会返回不同
     // 状态码，等于把一枚失效令牌变成探测实例是否已初始化的信道。
     if admin_exists(&db).await? {
-        return Err(AuthError::Forbidden(
-            "Bootstrap is closed: an administrator already exists".to_string(),
-        ));
+        audit.record(
+            AuditEvent::new(
+                "bootstrap_rejected",
+                ActivityCategory::Security,
+                ActivityStatus::Failed,
+                ctx.ip_address.clone(),
+                ctx.user_agent.clone(),
+            )
+            .with_details(serde_json::json!({ "reason": "already_initialized" })),
+        );
+        return Err(bootstrap_rejected());
     }
 
     // ② 校验令牌。失败也要留审计 —— 引导窗口期的爆破尝试正是要留痕的事。
@@ -171,9 +191,7 @@ async fn bootstrap_admin(
             )
             .with_details(serde_json::json!({ "reason": "invalid_bootstrap_token" })),
         );
-        return Err(AuthError::Unauthorized(
-            "Invalid bootstrap token".to_string(),
-        ));
+        return Err(bootstrap_rejected());
     }
 
     // ③ 建账号。走与普通注册完全相同的路径 —— 密码策略、邮箱校验、唯一约束

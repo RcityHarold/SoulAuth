@@ -1,3 +1,11 @@
+-- SurrealDB 3.2 起，`surreal import` 会把不带 OPTION IMPORT 的文件按普通查询
+-- 执行，DEFINE 语句因此被拒，整份导入失败且一张表都不留。3.0 上没有这个行为，
+-- 于是这一条曾经在本机全绿、在 CI 拉到的最新版上全红。
+--
+-- `OPTION IMPORT;` 在 3.0 与 3.2 上都被接受（两版实测：24 张表），所以这里不是
+-- 迁就某一版，而是让文件对两代都成立。
+OPTION IMPORT;
+
 -- SoulAuth Database Schema
 -- 运行此文件以创建所有必需的数据库表和索引
 

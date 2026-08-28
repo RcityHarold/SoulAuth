@@ -1,0 +1,15 @@
+# 行尾一律 LF，包括在 Windows 上检出时。
+#
+# 这不是风格问题：tests/*.sh 一旦被检出成 CRLF，shebang 后面就多出一个 \r，
+# 内核找不到解释器，报的是 "bad interpreter"，而不是任何指向行尾的话。
+# schema.sql 同理 —— CRLF 会跟着进 SurrealDB 的字符串字面量。
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.sql  text eol=lf
+*.yml  text eol=lf
+*.toml text eol=lf
+
+# 生成物：不参与语言统计，默认折叠 diff。改它没有意义，改生成器才有。
+contracts/schemas.generated.json linguist-generated=true
+Cargo.lock                       linguist-generated=true

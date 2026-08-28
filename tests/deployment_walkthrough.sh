@@ -10,7 +10,10 @@
 #
 # 用法：cargo build && ./tests/deployment_walkthrough.sh
 # 退出码：0 表示照文档能从零部署到「拿到一个可用的管理员」。
-ROOT="/home/ubuntu/Rainbow-Hub/SoulAuth"; SP=8123; AP=8203
+# ROOT 从脚本自身位置推出来，不写死。写死的路径意味着这份脚本只在一台机器上
+# 能跑 —— 而它守的是「照文档能不能从零部署」这件事，只在作者机器上成立的证明
+# 等于没有证明。
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; SP=8123; AP=8203
 export no_proxy="localhost,127.0.0.1" NO_PROXY="localhost,127.0.0.1"
 WORK="$(mktemp -d)"; FAIL=0
 cleanup(){ kill -9 ${AP_PID:-0} ${DB_PID:-0} 2>/dev/null; rm -rf "$WORK"; }; trap cleanup EXIT

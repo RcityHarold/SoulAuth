@@ -330,9 +330,13 @@ BOOT_TOKEN="$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log"
     bad "启动日志打印了引导令牌" "$(grep -i bootstrap "$WORK/app.log" | head -3)"
 
 # 错误令牌必须被拒，且要留审计。
-eq 401 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
+#
+# 状态码是 403 而不是 401，且与「已经有管理员」时一模一样 —— 见本节末尾。
+eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"nope@test.local","username":"nope","password":"CorrectHorse42!"}')" \
     "错误引导令牌被拒"
+# 留下未初始化状态下的拒绝原文，稍后与已初始化状态下的逐字比对。
+REJECT_BEFORE="$(body)"
 
 # 密码策略不因为「这是第一个用户」而放宽。
 eq 400 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
@@ -359,6 +363,11 @@ eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
 eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"third@test.local","username":"third","password":"CorrectHorse42!"}')" \
     "已初始化后错误令牌返回同一状态码，不构成探测信道"
+# 状态码相同还不够：响应体也必须逐字相同，否则 message 字段就是同一个探针。
+REJECT_AFTER="$(body)"
+[ "$REJECT_BEFORE" = "$REJECT_AFTER" ] &&
+    ok "引导拒绝的响应体在初始化前后逐字相同" ||
+    bad "引导拒绝的响应体在初始化前后逐字相同" "初始化前: $REJECT_BEFORE / 初始化后: $REJECT_AFTER"
 
 group "4. 权限名前缀与 RBAC 守卫"
 

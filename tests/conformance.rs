@@ -2469,6 +2469,58 @@ fn j11_schemas_match_rust_types() {
     }
 }
 
+/// J12 · 文档里给出的命令必须真的能跑
+///
+/// 这条守的是「照抄即失败」的命令。两次都发生过：
+///
+/// - `surreal import --conn …` —— `--conn` 是 SurrealDB 2.x 之前的写法，3.x 上
+///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，OIDC_GUIDE.md 里那份复制
+///   又活了很久。
+/// - schema.sql 缺 `OPTION IMPORT;` —— 3.0 上导得进，3.2 上整份导入失败且
+///   一张表不留。本机与 CI 的差别仅仅是安装那天 latest 指向哪个版本。
+///
+/// 两者的共同点是：读文档发现不了，只有真跑一次才知道。walkthrough 跑的是
+/// DEPLOYMENT.md，跑不到别的 md，所以这里补一道纯静态的。
+#[test]
+fn j12_documented_commands_use_current_cli() {
+    let docs = [
+        "README.md",
+        "README.zh-CN.md",
+        "DEPLOYMENT.md",
+        "OIDC_GUIDE.md",
+    ];
+    for doc in docs {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            // 只看命令行本身，不看解释「不要用 --conn」的散文。
+            if !line.trim_start().starts_with("surreal ") {
+                continue;
+            }
+            assert!(
+                !line.contains("--conn "),
+                "{doc}:{} 用了 `--conn` —— SurrealDB 3.x 已移除该参数，\n  \
+                 照抄这条命令会失败：{line}",
+                i + 1
+            );
+        }
+    }
+
+    // 导入文件必须自带 OPTION IMPORT，否则在 3.2+ 上整份导入失败。
+    for f in ["schema.sql", "initial_data.sql"] {
+        let body = read(f);
+        let first = body
+            .lines()
+            .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("--"))
+            .unwrap_or("");
+        assert_eq!(
+            first.trim(),
+            "OPTION IMPORT;",
+            "{f} 的第一条语句必须是 `OPTION IMPORT;` —— 少了它，\n  \
+             `surreal import` 在 3.2+ 上会把 DEFINE 当普通查询执行并整份失败"
+        );
+    }
+}
+
 /// 被路由 handler 签名引用到的请求/响应类型，及其 serde 字段名。
 fn request_response_types() -> Vec<(String, Vec<String>)> {
     let all = sources();

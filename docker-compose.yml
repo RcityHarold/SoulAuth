@@ -30,7 +30,7 @@ name: soulauth
 
 services:
   surrealdb:
-    image: surrealdb/surrealdb:v3
+    image: surrealdb/surrealdb:v3.2.4
     command:
       - start
       - --bind=0.0.0.0:8000
@@ -52,7 +52,7 @@ services:
   # 用 SurrealDB 官方镜像而不是在应用里做运行期 DDL —— 认证服务不应该拥有
   # 改自己表结构的权限，那条边界在 DEPLOYMENT.md 里已经定了。
   schema-init:
-    image: surrealdb/surrealdb:v3
+    image: surrealdb/surrealdb:v3.2.4
     depends_on:
       surrealdb:
         condition: service_healthy
