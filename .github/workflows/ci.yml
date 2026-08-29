@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # 手动触发。账单或配额把 job 挡在门外时，恢复之后不必造一个空提交
+  # 才能重跑 —— 在 Actions 页面点 Run workflow 即可。
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
@@ -17,9 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
+
+      # 不指定版本：`rustup show` 会安装 rust-toolchain.toml 里钉的那一个，
+      # 连同它列出的 components。版本只有一处来源，改那个文件即可。
+      - name: Install pinned toolchain
+        run: rustup show
+
       - uses: Swatinem/rust-cache@v2
 
       - name: cargo check
@@ -45,12 +51,28 @@ jobs:
         continue-on-error: true
         run: cargo test --test conformance -- --ignored --test-threads=1
 
+      # 最新 stable 上的 lint 探针。只报告，不阻断。
+      #
+      # 门禁跑在钉死的版本上，否则上游发一次 clippy 就能让一个没动过的 commit
+      # 由绿变红。但完全不看新版本会让升级那天一次性堆上几十条 —— 所以在这里
+      # 提前看见，自己选时候修。
+      #
+      # 这一步变黄不是失败，是「下次升级工具链时要处理的清单」。
+      - name: lint on latest stable （只报告）
+        continue-on-error: true
+        run: |
+          rustup toolchain install stable --component clippy --profile minimal
+          echo "钉死版本: $(rustc --version)"
+          echo "最新 stable: $(rustup run stable rustc --version)"
+          rustup run stable cargo clippy --all-targets -- -D warnings
+
   integration:
     name: integration suite
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned toolchain
+        run: rustup show
       - uses: Swatinem/rust-cache@v2
 
       # 版本钉死，不取 latest。

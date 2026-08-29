@@ -127,7 +127,7 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    UPDATE user SET account_status = 'Deleted' WHERE account_status = 'PendingDeletion';
    ```
 
-   `PUT /api/users/users/{id}/status` 从此拒收 `"PendingDeletion"`（400）。
+   `PUT /api/users/{user_id}/status` 从此拒收 `"PendingDeletion"`（400）。
 
 5. **补充 user 表字段：**
    ```sql

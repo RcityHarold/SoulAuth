@@ -68,12 +68,32 @@ pub struct TokenResponse {
     pub scope: String,
 }
 
+impl TokenRequest {
+    /// 客户端标识。
+    ///
+    /// 令牌端点在进入服务层之前已经保证它有值：要么表单里带了，要么从
+    /// `Authorization: Basic` 补齐，两者都没有时端点直接返回 `invalid_request`。
+    /// 这里退化成空串而不是 panic —— 空串查不到任何客户端，最终以
+    /// `invalid_client` 收场，与「身份不对」是同一个答复。
+    pub fn client_id(&self) -> &str {
+        self.client_id.as_deref().unwrap_or_default()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TokenRequest {
     pub grant_type: String,
     pub code: Option<String>,
     pub redirect_uri: Option<String>,
-    pub client_id: String,
+    /// 可选：按 RFC 6749 §4.1.3，客户端**已经向授权服务器认证过**时不必再带。
+    ///
+    /// 曾经是 `String`。于是用 `client_secret_basic` 的客户端（凭证在
+    /// Authorization 头里）只要不在表单里再抄一份 client_id，请求就在反序列化阶段
+    /// 挂掉，返回 422 加一句 axum 的内部报错 —— 既不是本站的错误信封，也不是
+    /// RFC 6749 §5.2 的 OAuth 错误体，接入方拿不到任何可分支的码。
+    /// 而 `client_secret_basic` 恰好是多数 OIDC 客户端库的默认。
+    #[serde(default)]
+    pub client_id: Option<String>,
     pub client_secret: Option<String>,
     pub code_verifier: Option<String>,
     pub refresh_token: Option<String>,

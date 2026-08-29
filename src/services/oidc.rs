@@ -261,7 +261,7 @@ impl OidcService {
 
     /// 统一的客户端认证：机密客户端必须提供且校验通过 client_secret。
     async fn authenticate_client(&self, request: &TokenRequest) -> Result<OidcClient> {
-        let client = self.get_client(&request.client_id).await?;
+        let client = self.get_client(request.client_id()).await?;
 
         match (&client.client_type, request.client_secret.as_deref()) {
             (ClientType::Confidential, None) => {
@@ -310,7 +310,7 @@ impl OidcService {
         if auth_code.expires_at < Utc::now().timestamp() {
             return Err(anyhow!("Authorization code expired"));
         }
-        if auth_code.client_id != request.client_id {
+        if auth_code.client_id != request.client_id() {
             return Err(anyhow!("Authorization code was not issued to this client"));
         }
         if auth_code.redirect_uri != *redirect_uri {
@@ -379,7 +379,7 @@ impl OidcService {
 
         // 获取并验证刷新令牌
         let stored_refresh_token = self.get_refresh_token(refresh_token).await?;
-        if stored_refresh_token.client_id != request.client_id {
+        if stored_refresh_token.client_id != request.client_id() {
             return Err(anyhow!("Refresh token was not issued to this client"));
         }
         if stored_refresh_token.expires_at < Utc::now().timestamp() {

@@ -1734,6 +1734,72 @@ fn j1_permission_registry_matches_runtime() {
             );
         }
     }
+
+    // 名字对得上，不等于授权图对得上。
+    //
+    // 这一段原本不存在，于是注册表里 admin 写着 12 条、种子数据实际授了 14 条
+    // （少的正是 actors.read / actors.write），两边各自成立了很久。文档站渲染的
+    // 是这份注册表，读者据此会以为 admin 管不了非人主体 —— 而集成测试同时断言
+    // 「单角色查询返回 14 条权限」。三份材料两个答案。
+    let seed = read("initial_data.sql");
+    let mut granted: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        Default::default();
+    let mut rest = seed.as_str();
+    while let Some(at) = rest.find("role_permission:") {
+        let tail = &rest[at..];
+        let Some(stmt_end) = tail.find("};") else {
+            break;
+        };
+        let stmt = &tail[..stmt_end];
+        let role = stmt
+            .strip_prefix("role_permission:")
+            .and_then(|t| t.split("__").next())
+            .unwrap_or("")
+            .to_string();
+        let perm = stmt
+            .split("permission_id: permission:")
+            .nth(1)
+            .and_then(|t| t.split(|c: char| !(c.is_alphanumeric() || c == '_')).next())
+            .unwrap_or("")
+            .to_string();
+        if !role.is_empty() && !perm.is_empty() {
+            granted.entry(role).or_default().insert(perm);
+        }
+        rest = &tail[stmt_end..];
+    }
+    assert!(
+        granted.len() >= 4,
+        "从 initial_data.sql 里只解析出 {} 个角色的授权 —— 取值逻辑坏了，断言等于空转",
+        granted.len()
+    );
+
+    // `permission:users_read` ←→ `soulauth:users.read`
+    let to_contract = |seed_name: &str| -> String {
+        let (res, action) = seed_name.rsplit_once('_').unwrap_or((seed_name, ""));
+        format!("soulauth:{res}.{action}")
+    };
+
+    for (role, perms) in &granted {
+        let block = registry
+            .split(&format!("- name: {role}\n"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("Permission Registry 的 roles: 段里没有角色 `{role}`"));
+        let declared: std::collections::BTreeSet<String> = block
+            .lines()
+            .take_while(|l| l.starts_with("      - ") || l.trim_start().starts_with("permissions:"))
+            .filter_map(|l| l.trim().strip_prefix("- ").map(str::to_string))
+            .collect();
+        let actual: std::collections::BTreeSet<String> =
+            perms.iter().map(|p| to_contract(p)).collect();
+        assert_eq!(
+            declared, actual,
+            "角色 `{role}` 的授权与注册表对不上。\n               注册表声明 {} 条，initial_data.sql 实际授予 {} 条。\n               注册表多出：{:?}\n  实际多出：{:?}",
+            declared.len(),
+            actual.len(),
+            declared.difference(&actual).collect::<Vec<_>>(),
+            actual.difference(&declared).collect::<Vec<_>>(),
+        );
+    }
 }
 
 /// J2 · Configuration Registry 与 Runtime 一致
@@ -1970,26 +2036,105 @@ fn j6_error_shape_is_uniform() {
         "权限宏不得再返回裸 StatusCode"
     );
 
-    // 3. 路由层自造的错误体只允许两处：统一的 error_body，和 OIDC 的 RFC 形状。
+    // 3. 自造的错误体只允许两种形状：统一的 error_body，和 OIDC 的 RFC 6749 §5.2。
+    //
+    // 这一段原本有两个洞，两个都被真实缺陷穿过去了：
+    //
+    // ① **只扫 `routes/`。** 限流中间件住在 `utils/`，于是它返回的
+    //    `{"error": "Rate limit exceeded", "code": "RATE_LIMIT_EXCEEDED"}`
+    //    完全在断言之外 —— 散文当机器码用，外加一个契约从未声明的字段。
+    //    同为 429 的账号锁定走的却是正确形状，同一个状态码两种形状。
+    //
+    // ② **只看单行。** 判据是「这一行同时出现 `json!({` 和 `"error"`」，
+    //    于是换行写的 `json!` 字面量一条都扫不到，而多行正是常见写法。
+    //
+    // 现在扫全 `src/`，并按花括号配平取出整个 `json!` 块。
+    let contract = read("contracts/openapi.yaml");
+    let codes: Vec<String> = contract
+        .lines()
+        .skip_while(|l| !l.contains("enum:"))
+        .take_while(|l| l.trim_start().starts_with('-') || l.contains("enum:"))
+        .filter_map(|l| l.trim().strip_prefix("- ").map(|c| c.to_string()))
+        .collect();
+    assert!(
+        codes.len() > 10,
+        "从契约里没读到 Error 枚举（读到 {} 条）—— 这条断言会变成空转",
+        codes.len()
+    );
+
     let mut ad_hoc = Vec::new();
+    let mut checked = 0usize;
     for (file, body) in sources() {
-        if !file.starts_with("routes/") {
-            continue;
-        }
-        for line in body.lines() {
-            let l = line.trim();
-            if l.contains("json!({") && l.contains("\"error\"") {
-                let allowed = l.contains("\"error\": code, \"message\": message")
-                    || l.contains("\"error\": code, \"error_description\": description");
-                if !allowed {
-                    ad_hoc.push(format!("{file}: {l}"));
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        let mut from = 0usize;
+        while let Some(rel) = production[from..].find("json!({") {
+            let at = from + rel;
+            // 花括号配平，取出整块 —— 单行判据正是这里漏掉多行字面量的地方。
+            let mut depth = 0i32;
+            let mut end = at;
+            for (i, ch) in production[at..].char_indices() {
+                match ch {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = at + i + 1;
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let block = &production[at..end.max(at + 7)];
+            from = end.max(at + 7);
+
+            if !block.contains("\"error\"") {
+                continue;
+            }
+            checked += 1;
+
+            // 统一信封的两种合法写法，以及 OIDC 的 RFC 形状。
+            let templated = block.contains("\"error\": code")
+                || block.contains("\"error\": error")
+                || block.contains("\"error\": self.code()");
+            let rfc_oauth = block.contains("error_description");
+            if templated || rfc_oauth {
+                continue;
+            }
+
+            // 字面量取值必须在契约枚举里。
+            let literal = block
+                .split("\"error\"")
+                .nth(1)
+                .and_then(|rest| rest.split('"').nth(1))
+                .unwrap_or("");
+            if !codes.iter().any(|c| c == literal) {
+                ad_hoc.push(format!(
+                    "{file}: `error` 取值 {literal:?} 不在 contracts/openapi.yaml 的 Error 枚举里"
+                ));
+                continue;
+            }
+            // 伴随字段只允许契约声明过的两个。
+            for extra in ["\"code\"", "\"detail\"", "\"status\"", "\"reason\""] {
+                if block.contains(extra) {
+                    ad_hoc.push(format!(
+                        "{file}: 错误体带了契约未声明的字段 {extra} —— 只有 \
+                         required_permission / locked_until_seconds 是声明过的"
+                    ));
                 }
             }
         }
     }
     assert!(
+        checked >= 5,
+        "只扫到 {checked} 个错误体 —— 取值逻辑坏了，断言等于空转"
+    );
+    assert!(
         ad_hoc.is_empty(),
-        "路由层出现自造错误体，形状会与 AuthError 分叉：\n{}",
+        "错误体形状与契约不符：\n{}",
         ad_hoc.join("\n")
     );
 }

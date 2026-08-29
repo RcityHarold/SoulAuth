@@ -2,7 +2,7 @@
 
 ## 概述
 
-Rainbow-Auth 系统实现了完整的 OpenID Connect 1.0 协议，支持企业级单点登录 (SSO) 功能。本指南详细说明如何部署、配置和使用 OIDC 功能。
+SoulAuth 系统实现了完整的 OpenID Connect 1.0 协议，支持企业级单点登录 (SSO) 功能。本指南详细说明如何部署、配置和使用 OIDC 功能。
 
 ## 特性概览
 
@@ -373,7 +373,7 @@ function OIDCLogin() {
    使用 [jwt.io](https://jwt.io) 解码 ID Token
 
 3. **查看服务器日志**:
-   检查 Rainbow-Auth 服务器日志获取详细错误信息
+   检查 SoulAuth 服务器日志获取详细错误信息
 
 ## 监控和维护
 
