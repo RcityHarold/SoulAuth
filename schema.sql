@@ -1,10 +1,18 @@
--- SurrealDB 3.2 起，`surreal import` 会把不带 OPTION IMPORT 的文件按普通查询
--- 执行，DEFINE 语句因此被拒，整份导入失败且一张表都不留。3.0 上没有这个行为，
--- 于是这一条曾经在本机全绿、在 CI 拉到的最新版上全红。
---
--- `OPTION IMPORT;` 在 3.0 与 3.2 上都被接受（两版实测：24 张表），所以这里不是
--- 迁就某一版，而是让文件对两代都成立。
 OPTION IMPORT;
+-- ↑ 放在第一行。这不是语法要求 —— 3.2.4 上实测，前面带注释同样导得进 ——
+-- 而是因为 `surreal export` 自己就把它写在产物首行，跟着它走的文件不会有人
+-- 怀疑该不该动。
+--
+-- SurrealDB 3.2 起 `surreal import` 强制要求这条语句，否则整条命令以 400 失败：
+--   Invalid statement: Import requires `OPTION IMPORT;` as the first statement.
+-- 3.0 上没有这个要求，两版都接受它（实测：加上之后 3.0.0 与 3.2.4 都是 24 张表）。
+--
+-- 它关掉事件、live query、字段处理与结果输出 —— 导入本来就不需要这些。
+--
+-- 不加的后果不是「慢一点」：Quickstart 第 2 步、DEPLOYMENT.md 第 2 步、
+-- integration job、docker job 会同时断。这一条曾经在本机（3.0）全绿、在 CI
+-- 拉到的最新版（3.2.4）全红，差别仅仅是安装那天 latest 指向哪里；现在 CI 与
+-- docker-compose 都把版本钉死了，但文件本身对两代都成立才是根本的那道保险。
 
 -- SoulAuth Database Schema
 -- 运行此文件以创建所有必需的数据库表和索引

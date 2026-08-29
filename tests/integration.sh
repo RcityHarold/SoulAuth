@@ -331,12 +331,16 @@ BOOT_TOKEN="$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log"
 
 # 错误令牌必须被拒，且要留审计。
 #
-# 状态码是 403 而不是 401，且与「已经有管理员」时一模一样 —— 见本节末尾。
+# 状态码是 403 而不是 401，与下面「已初始化」那两条**完全一致** —— 这是同一条
+# 不变式的未初始化侧。曾经这里是 401：调顺序只统一了已初始化那一侧，拿一枚废
+# 令牌打一次仍然能区分 401（未初始化）与 403（已初始化），探测信道原封不动。
 eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"nope@test.local","username":"nope","password":"CorrectHorse42!"}')" \
-    "错误引导令牌被拒"
-# 留下未初始化状态下的拒绝原文，稍后与已初始化状态下的逐字比对。
-REJECT_BEFORE="$(body)"
+    "未初始化时错误引导令牌被拒，且与已初始化同一状态码"
+# 留着这份响应体，等系统初始化之后逐字节比对。只统一状态码不够 ——
+# 文案里只要出现 "an administrator already exists" 之类的措辞，信道就从
+# 状态码搬进了 body。
+BOOT_REJECT_UNINIT="$(body)"
 
 # 密码策略不因为「这是第一个用户」而放宽。
 eq 400 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
@@ -363,11 +367,10 @@ eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
 eq 403 "$(req POST /api/bootstrap/admin -H 'Content-Type: application/json' \
     -d '{"token":"wrong","email":"third@test.local","username":"third","password":"CorrectHorse42!"}')" \
     "已初始化后错误令牌返回同一状态码，不构成探测信道"
-# 状态码相同还不够：响应体也必须逐字相同，否则 message 字段就是同一个探针。
-REJECT_AFTER="$(body)"
-[ "$REJECT_BEFORE" = "$REJECT_AFTER" ] &&
-    ok "引导拒绝的响应体在初始化前后逐字相同" ||
-    bad "引导拒绝的响应体在初始化前后逐字相同" "初始化前: $REJECT_BEFORE / 初始化后: $REJECT_AFTER"
+# 未初始化 / 已初始化，同一枚废令牌，响应必须逐字节相同 —— 状态码与 body 都是。
+# 这条断言才是「引导端点不泄露部署状态」这句公开文档的真正守卫。
+eq "$BOOT_REJECT_UNINIT" "$(body)" \
+    "两种引导失败的响应体逐字节相同，部署状态不外泄"
 
 group "4. 权限名前缀与 RBAC 守卫"
 
@@ -2157,7 +2160,16 @@ eq 1 "$(sql_count "SELECT count() FROM ai_actor_credential WHERE status = 'revok
 
 # 拿人类的 actor_id 走这条免口令路径必须失败，否则它就是人类认证的后门。
 HUMAN_ACTOR="$(sql "SELECT VALUE type::string(id) FROM actor_identity WHERE actor_kind = 'human' AND status = 'active' LIMIT 1" | grep -oP 'actor_identity:[A-Za-z0-9_-]+' | head -1)"
-if [ -n "$HUMAN_ACTOR" ]; then
+# 取不到就必须红，不能静默跳过。
+#
+# 这条断言原本只包在 `if [ -n ... ]` 里、没有 else：某一轮 HUMAN_ACTOR 取空，
+# 它一声不响地没有执行，而汇总照样打「全部通过」—— 唯一的痕迹是通过数从 353
+# 变成 352。一条守着「人类账号不能走 AIActor 免口令通道」的断言，静默跳过与
+# 不存在没有区别，而它看起来还像是过了。
+if [ -z "$HUMAN_ACTOR" ]; then
+    bad "人类主体不能走 AIActor 认证路径" \
+        "取不到活跃的人类 actor_identity，这条断言没能执行 —— 前置数据或 sql 助手有问题"
+else
     eq 401 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
         -d "{\"actor_id\":\"${HUMAN_ACTOR}\"}")" \
         "人类主体不能走 AIActor 认证路径"
@@ -2171,6 +2183,23 @@ eq 0 "$PANICS" "服务日志中无 panic"
 # ═══════════════════════════════ 汇总 ═══════════════════════════════
 
 printf '\n%s\n' "────────────────────────────────"
+
+# 通过数的下界。
+#
+# 零失败不等于跑全了：一条被条件跳过的断言既不计通过、也不计失败，汇总看起来
+# 与全绿一模一样。上面那条 AIActor 后门断言就这样消失过一次，而当时唯一能看出
+# 异常的，是通过数比前一轮少了 1 —— 那需要有人恰好记得前一轮是多少。
+#
+# 所以把它写下来。加断言时把这个数一起改大，这跟文档站那份读数是同一条纪律：
+# 数字要么是跑出来的，要么就不该出现。
+MIN_PASS=353
+if [ "$PASS" -lt "$MIN_PASS" ]; then
+    printf '%s  通过 %d 项，少于下界 %d —— 有断言被静默跳过了\n' \
+        "$(c_red 覆盖不足)" "$PASS" "$MIN_PASS"
+    printf '%s\n' "$(c_dim "对比上一轮的 ✓ 清单可定位是哪一条；若确实新增/删除了断言，请同步改 MIN_PASS")"
+    exit 1
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     printf '%s  通过 %d 项\n' "$(c_grn 全部通过)" "$PASS"
     exit 0

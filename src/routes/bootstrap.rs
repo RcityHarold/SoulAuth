@@ -36,6 +36,7 @@ use axum::{
 };
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 use crate::{
     config::Config,
@@ -53,6 +54,12 @@ use crate::{
     },
     AppState,
 };
+
+/// 引导端点两种失败共用的对外文案。
+///
+/// 「令牌错」与「门已关」必须逐字节相同，否则状态码统一了、信道搬到 body 里。
+/// 措辞刻意不提管理员是否存在：它要能同时诚实地描述这两种情况。
+const BOOTSTRAP_UNAVAILABLE: &str = "Bootstrap is not available";
 
 /// 引导令牌所需的字符数。
 ///
@@ -131,23 +138,25 @@ pub struct BootstrapAdminResponse {
     pub is_admin: bool,
 }
 
-/// 引导端点对外只有一种拒绝答复。
+/// 引导端点对外唯一的拒绝答复。
 ///
-/// 「已经有管理员」和「令牌不对」必须不可区分。分开返回的话，一枚早已失效的
-/// 令牌就成了探针：拿它打一发，一种状态码说明这台实例已经被初始化过，另一种
-/// 说明引导窗口还开着 —— 后者正是值得继续打的目标。两种情况的区分留在审计
-/// 日志里，那是运维看得到、而发请求的人看不到的地方。
+/// 常量管住文案，这个构造器管住状态码 —— 两样都只有一处来源。只有常量的话，
+/// `AuthError::Forbidden(...)` 仍然写了两遍，其中一遍被改成 `Unauthorized`
+/// 就够重新打开信道；那种漂移只能靠测试去数，而这里让它压根写不出来。
 ///
-/// 走同一个构造器而不是两处各写一遍，是为了让它们没法悄悄漂开。
+/// 两种失败的区分留在 `warn!` 与审计行里 —— 运维看得到，匿名调用方看不到。
 fn bootstrap_rejected() -> AuthError {
-    AuthError::Forbidden("Bootstrap is closed or the token is invalid".to_string())
+    AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string())
 }
 
 /// 建立第一个管理员。
 ///
 /// 前置条件有两条，缺一不可：令牌正确，且系统中**尚无**任何管理员。
-/// 任一条不满足都返回 403，且响应逐字相同 —— 见 `bootstrap_rejected`。
-/// 这不是一个可以反复调用的提权入口，而是一次性的开机门。
+/// 任何一条不满足都返回 403 —— 它不是一个可以反复调用的提权入口，
+/// 而是一次性的开机门。
+///
+/// 两种失败共用同一个状态码和同一段文案，都经 `bootstrap_rejected()` 构造，
+/// 见下面 ① ② 的说明。
 async fn bootstrap_admin(
     Extension(db): Extension<Arc<Database>>,
     Extension(app_state): Extension<Arc<AppState>>,
@@ -165,7 +174,16 @@ async fn bootstrap_admin(
     // 顺序是刻意的：已经有 admin 之后，无论令牌对不对都必须拒绝，而且两种情况
     // 要给同一个答复。反过来先验令牌的话，「令牌错」与「已初始化」会返回不同
     // 状态码，等于把一枚失效令牌变成探测实例是否已初始化的信道。
+    //
+    // 但只调顺序堵不住这条信道 —— 它只统一了「已初始化」那一侧。**未**初始化时
+    // 令牌错如果返回 401，拿一枚废令牌打一次就够了：401 = 未初始化、403 = 已初始化，
+    // 探针照常工作。所以两种失败必须共用同一个状态码**和同一段文案**（见 ②），
+    // 文案里也不能出现 "an administrator already exists" 这种泄露状态的措辞。
     if admin_exists(&db).await? {
+        warn!(
+            ip = %ctx.ip_address,
+            "Bootstrap rejected: an administrator already exists"
+        );
         audit.record(
             AuditEvent::new(
                 "bootstrap_rejected",
@@ -180,7 +198,15 @@ async fn bootstrap_admin(
     }
 
     // ② 校验令牌。失败也要留审计 —— 引导窗口期的爆破尝试正是要留痕的事。
+    //
+    // 对外的答复与 ① 逐字节相同。代价是运维把令牌敲错时，客户端那侧看不出
+    // 「是令牌错了」还是「门已经关了」—— 所以真实原因写进日志和审计行，
+    // 留在服务端。排错线索一点没少，只是不再对匿名调用方开放。
     if !app_state.bootstrap.verify(&request.token) {
+        warn!(
+            ip = %ctx.ip_address,
+            "Bootstrap rejected: invalid token (no administrator exists yet)"
+        );
         audit.record(
             AuditEvent::new(
                 "bootstrap_rejected",

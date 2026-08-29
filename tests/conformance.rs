@@ -1240,8 +1240,15 @@ fn h11_fresh_instance_bootstraps_without_database_mutation() {
 /// 法源: 10 §4「Bootstrap Client ≠ Administrator」「Client Creation Order
 /// ≠ Administrative Authority」。
 ///
-/// 结构判据：必须先判系统状态再验令牌。反过来的话，「令牌错」与「已初始化」
-/// 会返回不同状态码，一枚失效令牌就成了探测实例是否已初始化的信道。
+/// 结构判据有两条，**第二条才是真正的守卫**：
+///
+/// ① 必须先判系统状态再验令牌。
+/// ② 两条拒绝分支必须给出**同一个** `AuthError` 变体与同一段文案。
+///
+/// 这条测试原本只有 ①。①单独不成立：它只统一了「已初始化」那一侧，未初始化
+/// 时令牌错若返回 401，拿一枚废令牌打一次就能区分 401（未初始化）与 403
+/// （已初始化），信道原封不动。公开文档的「引导端点不泄露部署状态」这句话
+/// 当时是靠 ① 撑着的，而 ① 撑不住 —— 于是补上 ②。
 #[test]
 fn h12_bootstrap_gate_is_single_use_and_not_an_oracle() {
     let bootstrap = read("src/routes/bootstrap.rs");
@@ -1255,6 +1262,51 @@ fn h12_bootstrap_gate_is_single_use_and_not_an_oracle() {
         admin_check < token_check,
         "必须先判「是否已初始化」再验令牌 —— 顺序颠倒会让失效令牌变成探测信道"
     );
+
+    // ② 两条拒绝分支共用同一个答复。
+    //
+    // 分两层数：拒绝**只能有一处构造**（`bootstrap_rejected`，它同时定死状态码
+    // 与文案），两条分支都只是调它。这比数「同一行原样重复了两次」更硬 ——
+    // 后者要求那一行逐字不变，而 rustfmt 换个行宽就能让断言空匹配却仍然报绿。
+    // 只数**代码**，不数注释 —— 上面那段说明里就出现了 `AuthError::Forbidden(...)`
+    // 这几个字，在原文上直接 matches 会把解释算成一处实现，判据当场自伤。
+    let code_only: String = bootstrap
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code_only.matches("AuthError::Forbidden(").count(),
+        1,
+        "引导拒绝必须只有一处构造点（fn bootstrap_rejected），\n  \
+         写成两处的话，其中一处被改动就重新打开了信道"
+    );
+    assert_eq!(
+        code_only
+            .matches("return Err(bootstrap_rejected());")
+            .count(),
+        2,
+        "「令牌错」与「门已关」必须都走同一个构造器，共两处"
+    );
+    assert!(
+        !code_only.contains("AuthError::Unauthorized"),
+        "引导端点不得用 401 —— 它与「已初始化」的 403 一起构成探测信道"
+    );
+
+    // 文案本身也不能泄露。状态码统一了、body 里写着「管理员已存在」，
+    // 信道只是搬了个家。
+    let msg = bootstrap
+        .split("const BOOTSTRAP_UNAVAILABLE: &str = ")
+        .nth(1)
+        .and_then(|s| s.split(';').next())
+        .expect("必须有一处共用文案常量 BOOTSTRAP_UNAVAILABLE");
+    for leak in ["administrator", "admin", "exists", "initialis", "initializ"] {
+        assert!(
+            !msg.to_lowercase().contains(leak),
+            "引导拒绝文案不得暗示实例是否已初始化，命中 {leak:?}：{msg}"
+        );
+    }
+
     // 令牌比对必须等时：引导窗口期内它就是整个实例的管理权。
     assert!(
         bootstrap.contains("constant_time_eq"),
