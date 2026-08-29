@@ -53,9 +53,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
+      # 版本钉死，不取 latest。
+      #
+      # 不钉的话，安装脚本每天拉 latest.txt 指向的那一版，于是同一个 commit
+      # 在不同日子有不同结果 —— 而这正好发生过：schema.sql 缺 `OPTION IMPORT;`
+      # 时在 3.0 上导得进、在 3.2 上整份导入失败且一张表不留，本机全绿、
+      # CI 全红，差别只是安装那天 latest 指向哪里。
+      #
+      # 升级时改这一处，并把 tests/integration.sh 与 docker-compose.yml 一起跑过。
       - name: Install SurrealDB
+        env:
+          SURREAL_VERSION: v3.2.4
         run: |
-          curl -sSf https://install.surrealdb.com | sh
+          curl -sSf https://install.surrealdb.com | sh -s -- --version "$SURREAL_VERSION"
           echo "$HOME/.surrealdb" >> "$GITHUB_PATH"
 
       - name: Verify SurrealDB is on PATH

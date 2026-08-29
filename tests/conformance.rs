@@ -1265,16 +1265,31 @@ fn h12_bootstrap_gate_is_single_use_and_not_an_oracle() {
 
     // ② 两条拒绝分支共用同一个答复。
     //
-    // 数「同一行原样重复了几次」，而不是分别去匹配两个文案 —— 后者只要有人把
-    // 其中一处改成别的措辞，测试仍然能各自匹配上，正好漏掉要防的那件事。
-    let rejection = "return Err(AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string()));";
+    // 分两层数：拒绝**只能有一处构造**（`bootstrap_rejected`，它同时定死状态码
+    // 与文案），两条分支都只是调它。这比数「同一行原样重复了两次」更硬 ——
+    // 后者要求那一行逐字不变，而 rustfmt 换个行宽就能让断言空匹配却仍然报绿。
+    // 只数**代码**，不数注释 —— 上面那段说明里就出现了 `AuthError::Forbidden(...)`
+    // 这几个字，在原文上直接 matches 会把解释算成一处实现，判据当场自伤。
+    let code_only: String = bootstrap
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_eq!(
-        bootstrap.matches(rejection).count(),
+        code_only.matches("AuthError::Forbidden(").count(),
+        1,
+        "引导拒绝必须只有一处构造点（fn bootstrap_rejected），\n  \
+         写成两处的话，其中一处被改动就重新打开了信道"
+    );
+    assert_eq!(
+        code_only
+            .matches("return Err(bootstrap_rejected());")
+            .count(),
         2,
-        "「令牌错」与「门已关」必须是逐字相同的一条拒绝语句，共两处"
+        "「令牌错」与「门已关」必须都走同一个构造器，共两处"
     );
     assert!(
-        !bootstrap.contains("AuthError::Unauthorized"),
+        !code_only.contains("AuthError::Unauthorized"),
         "引导端点不得用 401 —— 它与「已初始化」的 403 一起构成探测信道"
     );
 
@@ -2295,12 +2310,14 @@ fn j10_contract_auth_matches_runtime() {
     };
 
     let mut in_security = false;
+    let mut in_perm = false;
     for line in contract.lines() {
         let t = line.trim();
         if let Some(rest) = t.strip_prefix("operationId: ") {
             flush(&current, &mut checked);
             current = Some((rest.trim().to_string(), false, None));
             in_security = false;
+            in_perm = false;
         } else if t == "security:" || t.starts_with("security: [") {
             in_security = !t.contains('[');
             if t.contains("bearerAuth") {
@@ -2315,11 +2332,24 @@ fn j10_contract_auth_matches_runtime() {
                 }
             }
         } else if let Some(rest) = t.strip_prefix("x-required-permissions: [") {
+            // 行内写法 `x-required-permissions: [soulauth:x.y]`
             in_security = false;
             if let Some(c) = current.as_mut() {
                 c.2 = Some(rest.trim_end_matches(']').trim().to_string());
             }
+        } else if t == "x-required-permissions:" {
+            // 多行列表写法。生成器用 yaml.safe_dump 输出，列表是多行的；
+            // 只认行内写法的话，40 个权限声明会全部被判成「没有声明」。
+            in_perm = true;
+            in_security = false;
+        } else if in_perm && t.starts_with("- soulauth:") {
+            if let Some(c) = current.as_mut() {
+                if c.2.is_none() {
+                    c.2 = Some(t.trim_start_matches("- ").trim().to_string());
+                }
+            }
         } else if !t.starts_with('-') {
+            in_perm = false;
             in_security = false;
         }
     }
@@ -2435,4 +2465,196 @@ fn fn_blocks(body: &str) -> Vec<(String, String, String)> {
         idx = body_end.max(idx);
     }
     out
+}
+
+/// J11 · 契约里的 schema 必须与 Rust 结构体一致
+///
+/// 请求/响应共 94 个类型、数百个字段。手写它们必然漂移，而**漂移的 schema 与
+/// 准确的 schema 看起来一模一样** —— 消费方照着它构造请求，直到 422 才发现
+/// 字段名不对。所以它们由 `contracts/generate-schemas.py` 从结构体生成，
+/// 这条守卫确认生成结果没有过期。
+///
+/// 断言的是「生成物与源码同步」，不是「生成器实现正确」：改了结构体却忘了重跑
+/// 脚本，这里会红。
+#[test]
+fn j11_schemas_match_rust_types() {
+    let generated = read("contracts/schemas.generated.json");
+    let contract = read("contracts/openapi.yaml");
+
+    // ① 生成物本身不能是空壳。首版的生成器因为路径键用了绝对路径，
+    //    `startswith("src/routes/")` 永远为假，静默生成了 0 个 schema ——
+    //    而一个空的 schema 段在 YAML 层面完全合法。
+    let schema_count = generated.matches("\"type\": \"object\"").count();
+    assert!(
+        schema_count > 50,
+        "生成的 schema 只有 {schema_count} 个，远少于预期 —— 生成器可能失效了"
+    );
+
+    // ② 每一个被路由引用的请求/响应类型，都必须在契约里有对应 schema。
+    for (name, _) in request_response_types() {
+        assert!(
+            contract.contains(&format!("\n    {name}:\n")),
+            "类型 `{name}` 出现在 handler 签名里，但 contracts/openapi.yaml 的 \
+             components.schemas 中没有它 —— 跑 `python3 contracts/generate-schemas.py`"
+        );
+    }
+
+    // ③ 字段逐个核对。**读生成的 JSON，不扫 YAML。**
+    //
+    // 首版在 openapi.yaml 上做文本切块，而 `yaml.safe_dump` 的缩进让「下一个
+    // 同级 schema」的边界判断立刻失效 —— 守卫报的是排版，不是契约。
+    // JSON 是生成物，格式由脚本固定，扫它是安全的。
+    for (name, fields) in request_response_types() {
+        let Some(at) = generated.find(&format!("\"{name}\": {{")) else {
+            continue;
+        };
+        let block = &generated[at..];
+        let end = block.find("\n    },").unwrap_or(block.len().min(4000));
+        let block = &block[..end];
+        for field in fields {
+            assert!(
+                block.contains(&format!("\"{field}\":")),
+                "`{name}` 的字段 `{field}` 不在 contracts/schemas.generated.json 里 —— \
+                 改了结构体之后请重跑 `python3 contracts/generate-schemas.py`"
+            );
+        }
+    }
+}
+
+/// J12 · 文档里给出的命令必须真的能跑
+///
+/// 这条守的是「照抄即失败」的命令。两次都发生过：
+///
+/// - `surreal import --conn …` —— `--conn` 是 SurrealDB 2.x 之前的写法，3.x 上
+///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，OIDC_GUIDE.md 里那份复制
+///   又活了很久。
+/// - schema.sql 缺 `OPTION IMPORT;` —— 3.0 上导得进，3.2 上整份导入失败且
+///   一张表不留。本机与 CI 的差别仅仅是安装那天 latest 指向哪个版本。
+///
+/// 两者的共同点是：读文档发现不了，只有真跑一次才知道。walkthrough 跑的是
+/// DEPLOYMENT.md，跑不到别的 md，所以这里补一道纯静态的。
+#[test]
+fn j12_documented_commands_use_current_cli() {
+    let docs = [
+        "README.md",
+        "README.zh-CN.md",
+        "DEPLOYMENT.md",
+        "OIDC_GUIDE.md",
+    ];
+    for doc in docs {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            // 只看命令行本身，不看解释「不要用 --conn」的散文。
+            if !line.trim_start().starts_with("surreal ") {
+                continue;
+            }
+            assert!(
+                !line.contains("--conn "),
+                "{doc}:{} 用了 `--conn` —— SurrealDB 3.x 已移除该参数，\n  \
+                 照抄这条命令会失败：{line}",
+                i + 1
+            );
+        }
+    }
+
+    // 导入文件必须自带 OPTION IMPORT，否则在 3.2+ 上整份导入失败。
+    for f in ["schema.sql", "initial_data.sql"] {
+        let body = read(f);
+        let first = body
+            .lines()
+            .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with("--"))
+            .unwrap_or("");
+        assert_eq!(
+            first.trim(),
+            "OPTION IMPORT;",
+            "{f} 的第一条语句必须是 `OPTION IMPORT;` —— 少了它，\n  \
+             `surreal import` 在 3.2+ 上会把 DEFINE 当普通查询执行并整份失败"
+        );
+    }
+}
+
+/// 被路由 handler 签名引用到的请求/响应类型，及其 serde 字段名。
+fn request_response_types() -> Vec<(String, Vec<String>)> {
+    let all = sources();
+    let joined: String = all.iter().map(|(_, b)| b.as_str()).collect();
+
+    // handler 签名里出现的 `Json<T>` / `Query<T>`
+    let mut wanted: Vec<String> = Vec::new();
+    for (file, body) in &all {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        for marker in ["Json<", "Query<"] {
+            let mut from = 0usize;
+            while let Some(rel) = body[from..].find(marker) {
+                let at = from + rel + marker.len();
+                let Some(end) = body[at..].find('>') else {
+                    break;
+                };
+                let ty = body[at..at + end].trim();
+                let ty = ty.rsplit("::").next().unwrap_or(ty);
+                let ty = ty.trim_start_matches("Vec<");
+                if ty.chars().next().is_some_and(char::is_uppercase)
+                    && ty.chars().all(|c| c.is_alphanumeric())
+                    && ty != "Value"
+                    && ty != "String"
+                {
+                    wanted.push(ty.to_string());
+                }
+                from = at + end;
+            }
+        }
+    }
+    wanted.sort();
+    wanted.dedup();
+
+    // 每个类型的**线上字段名**。
+    //
+    // 不是 Rust 标识符：`#[serde(rename = "verified")]` 会让 `is_email_verified`
+    // 在 wire 上叫 `verified`，而契约描述的是 wire。首版比对 Rust 名，
+    // 于是把一个正确的生成结果判成了过期。
+    wanted
+        .into_iter()
+        .filter_map(|name| {
+            let at = joined.find(&format!("struct {name} {{"))?;
+            let body = &joined[at..];
+            let end = body.find("\n}")?;
+
+            let mut fields = Vec::new();
+            let mut rename: Option<String> = None;
+            let mut skip = false;
+            for line in body[..end].lines().skip(1) {
+                let l = line.trim();
+                if l.starts_with("#[") {
+                    if let Some(i) = l.find("rename = \"") {
+                        let rest = &l[i + "rename = \"".len()..];
+                        if let Some(j) = rest.find('"') {
+                            rename = Some(rest[..j].to_string());
+                        }
+                    }
+                    // `skip_serializing_if` 只是条件省略，字段仍在契约里。
+                    if l.contains("skip_serializing") && !l.contains("skip_serializing_if") {
+                        skip = true;
+                    }
+                    continue;
+                }
+                if l.starts_with("//") || l.is_empty() {
+                    continue;
+                }
+                let ident = l.strip_prefix("pub ").unwrap_or(l);
+                let Some((ident, _)) = ident.split_once(':') else {
+                    rename = None;
+                    skip = false;
+                    continue;
+                };
+                let ident = ident.trim();
+                if ident.chars().all(|c| c.is_alphanumeric() || c == '_') && !skip {
+                    fields.push(rename.clone().unwrap_or_else(|| ident.to_string()));
+                }
+                rename = None;
+                skip = false;
+            }
+            (!fields.is_empty()).then_some((name, fields))
+        })
+        .collect()
 }

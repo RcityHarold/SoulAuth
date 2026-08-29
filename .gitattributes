@@ -34,3 +34,9 @@ Dockerfile text eol=lf
 *.png   binary
 *.jpg   binary
 *.ico   binary
+
+# 生成物：不参与 GitHub 的语言统计，diff 默认折叠。
+# 改它没有意义 —— schemas.generated.json 由 contracts/generate-schemas.py 写出，
+# 手改会在下一次生成时被覆盖，而 conformance j11 会先一步发现两者对不上。
+contracts/schemas.generated.json linguist-generated=true
+Cargo.lock                       linguist-generated=true

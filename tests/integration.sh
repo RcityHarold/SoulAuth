@@ -2160,7 +2160,16 @@ eq 1 "$(sql_count "SELECT count() FROM ai_actor_credential WHERE status = 'revok
 
 # 拿人类的 actor_id 走这条免口令路径必须失败，否则它就是人类认证的后门。
 HUMAN_ACTOR="$(sql "SELECT VALUE type::string(id) FROM actor_identity WHERE actor_kind = 'human' AND status = 'active' LIMIT 1" | grep -oP 'actor_identity:[A-Za-z0-9_-]+' | head -1)"
-if [ -n "$HUMAN_ACTOR" ]; then
+# 取不到就必须红，不能静默跳过。
+#
+# 这条断言原本只包在 `if [ -n ... ]` 里、没有 else：某一轮 HUMAN_ACTOR 取空，
+# 它一声不响地没有执行，而汇总照样打「全部通过」—— 唯一的痕迹是通过数从 353
+# 变成 352。一条守着「人类账号不能走 AIActor 免口令通道」的断言，静默跳过与
+# 不存在没有区别，而它看起来还像是过了。
+if [ -z "$HUMAN_ACTOR" ]; then
+    bad "人类主体不能走 AIActor 认证路径" \
+        "取不到活跃的人类 actor_identity，这条断言没能执行 —— 前置数据或 sql 助手有问题"
+else
     eq 401 "$(req POST /api/actors/challenge -H 'Content-Type: application/json' \
         -d "{\"actor_id\":\"${HUMAN_ACTOR}\"}")" \
         "人类主体不能走 AIActor 认证路径"
@@ -2174,6 +2183,23 @@ eq 0 "$PANICS" "服务日志中无 panic"
 # ═══════════════════════════════ 汇总 ═══════════════════════════════
 
 printf '\n%s\n' "────────────────────────────────"
+
+# 通过数的下界。
+#
+# 零失败不等于跑全了：一条被条件跳过的断言既不计通过、也不计失败，汇总看起来
+# 与全绿一模一样。上面那条 AIActor 后门断言就这样消失过一次，而当时唯一能看出
+# 异常的，是通过数比前一轮少了 1 —— 那需要有人恰好记得前一轮是多少。
+#
+# 所以把它写下来。加断言时把这个数一起改大，这跟文档站那份读数是同一条纪律：
+# 数字要么是跑出来的，要么就不该出现。
+MIN_PASS=353
+if [ "$PASS" -lt "$MIN_PASS" ]; then
+    printf '%s  通过 %d 项，少于下界 %d —— 有断言被静默跳过了\n' \
+        "$(c_red 覆盖不足)" "$PASS" "$MIN_PASS"
+    printf '%s\n' "$(c_dim "对比上一轮的 ✓ 清单可定位是哪一条；若确实新增/删除了断言，请同步改 MIN_PASS")"
+    exit 1
+fi
+
 if [ "$FAIL" -eq 0 ]; then
     printf '%s  通过 %d 项\n' "$(c_grn 全部通过)" "$PASS"
     exit 0

@@ -32,7 +32,8 @@ Rainbow-Auth 系统实现了完整的 OpenID Connect 1.0 协议，支持企业�
 
 ```bash
 # 使用 SurrealDB CLI 或者通过 HTTP API 执行
-surreal import --conn http://localhost:8000 --user root --pass root --ns auth --db main schema.sql
+surreal import --endpoint http://localhost:8000 --user root --pass root \
+    --namespace auth --database main schema.sql
 ```
 
 ### 2. 启动服务

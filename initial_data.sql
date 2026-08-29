@@ -1,5 +1,5 @@
 OPTION IMPORT;
--- ↑ 必须是第一行，前面不能有注释。见 schema.sql 开头的说明。
+-- ↑ 同 schema.sql，见那边开头的说明。
 
 -- Rust Auth System Initial Data
 -- 运行此文件以创建系统角色和权限的初始数据

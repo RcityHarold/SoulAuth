@@ -138,13 +138,25 @@ pub struct BootstrapAdminResponse {
     pub is_admin: bool,
 }
 
+/// 引导端点对外唯一的拒绝答复。
+///
+/// 常量管住文案，这个构造器管住状态码 —— 两样都只有一处来源。只有常量的话，
+/// `AuthError::Forbidden(...)` 仍然写了两遍，其中一遍被改成 `Unauthorized`
+/// 就够重新打开信道；那种漂移只能靠测试去数，而这里让它压根写不出来。
+///
+/// 两种失败的区分留在 `warn!` 与审计行里 —— 运维看得到，匿名调用方看不到。
+fn bootstrap_rejected() -> AuthError {
+    AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string())
+}
+
 /// 建立第一个管理员。
 ///
 /// 前置条件有两条，缺一不可：令牌正确，且系统中**尚无**任何管理员。
 /// 任何一条不满足都返回 403 —— 它不是一个可以反复调用的提权入口，
 /// 而是一次性的开机门。
 ///
-/// 两种失败共用同一个状态码和同一段文案，见下面 ① ② 的说明。
+/// 两种失败共用同一个状态码和同一段文案，都经 `bootstrap_rejected()` 构造，
+/// 见下面 ① ② 的说明。
 async fn bootstrap_admin(
     Extension(db): Extension<Arc<Database>>,
     Extension(app_state): Extension<Arc<AppState>>,
@@ -168,7 +180,21 @@ async fn bootstrap_admin(
     // 探针照常工作。所以两种失败必须共用同一个状态码**和同一段文案**（见 ②），
     // 文案里也不能出现 "an administrator already exists" 这种泄露状态的措辞。
     if admin_exists(&db).await? {
-        return Err(AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string()));
+        warn!(
+            ip = %ctx.ip_address,
+            "Bootstrap rejected: an administrator already exists"
+        );
+        audit.record(
+            AuditEvent::new(
+                "bootstrap_rejected",
+                ActivityCategory::Security,
+                ActivityStatus::Failed,
+                ctx.ip_address.clone(),
+                ctx.user_agent.clone(),
+            )
+            .with_details(serde_json::json!({ "reason": "already_initialized" })),
+        );
+        return Err(bootstrap_rejected());
     }
 
     // ② 校验令牌。失败也要留审计 —— 引导窗口期的爆破尝试正是要留痕的事。
@@ -191,7 +217,7 @@ async fn bootstrap_admin(
             )
             .with_details(serde_json::json!({ "reason": "invalid_bootstrap_token" })),
         );
-        return Err(AuthError::Forbidden(BOOTSTRAP_UNAVAILABLE.to_string()));
+        return Err(bootstrap_rejected());
     }
 
     // ③ 建账号。走与普通注册完全相同的路径 —— 密码策略、邮箱校验、唯一约束
