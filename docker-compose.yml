@@ -39,6 +39,13 @@ services:
       # surrealkv:// 而不是 file: —— file: 是 SurrealDB 1.x 的写法，3.x 上
       # 会以「Unable to load the specified datastore」直接退出。
       - surrealkv:///data/soulauth.db
+    # 镜像以 `nonroot` 跑（配置里 User=nonroot），而 Docker 新建的具名卷挂上来
+    # 归 root:root 0755 —— 非 root 进程建不了数据文件，容器直接 exit 1。
+    #
+    # 这个坑此前一直被另一个错误盖着：datastore 写成 `file:` 时，surreal 在更早
+    # 的一步就以「Unable to load the specified datastore」退出，根本走不到写文件。
+    # 修好 scheme 之后它才浮出来。
+    user: root
     volumes:
       - surreal-data:/data
     healthcheck:
