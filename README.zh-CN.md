@@ -275,7 +275,7 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
   `APP_URL` 下的路径——`/verify-email`、`/reset-password/{token}`、`/login`、
   `/oauth/callback`、`/initialize-password`。后三个是写死的路径，
   前两个可覆盖。
-- `GET /api/users/profile` 与 `/preferences` 在对应的 `POST` 建立记录之前
+- `GET /api/me/profile` 与 `/api/me/preferences` 在对应的 `POST` 建立记录之前
   返回 404，而不是空对象。
 - 注册接口在邮箱重复时返回 409，可用于探测某个邮箱是否已注册；而密码重置
   刻意做了防枚举。两者口径不一致，是可用性取舍而非疏漏。

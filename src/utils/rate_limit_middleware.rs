@@ -135,10 +135,15 @@ fn rate_limited_response(ip: &str, endpoint: &str) -> Response {
     );
     (
         StatusCode::TOO_MANY_REQUESTS,
+        // 全站唯一的错误信封：`error` 是稳定的 snake_case 机器码，`message` 是人话。
+        //
+        // 这里曾经是 `"error": "Rate limit exceeded"` 外加一个契约从未声明的 `code`
+        // 字段。照文档写 `if (body.error === "rate_limit_exceeded")` 的客户端在限流上
+        // 必然落空，而同为 429 的账号锁定走的却是正确形状 —— 同一个状态码两种形状，
+        // 是最难排查的那一类。
         Json(json!({
-            "error": "Rate limit exceeded",
-            "message": "Too many requests. Please try again later.",
-            "code": "RATE_LIMIT_EXCEEDED"
+            "error": "rate_limit_exceeded",
+            "message": "Too many requests. Please try again later."
         })),
     )
         .into_response()

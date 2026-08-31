@@ -302,7 +302,7 @@ DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshoo
   point at paths under `APP_URL` — `/verify-email`, `/reset-password/{token}`,
   `/login`, `/oauth/callback`, `/initialize-password`. The last three are fixed
   paths; the others are overridable.
-- `GET /api/users/profile` and `/preferences` return 404 before the
+- `GET /api/me/profile` and `/api/me/preferences` return 404 before the
   corresponding `POST` creates the record, rather than an empty object.
 - Registration returns 409 on a duplicate address, which allows probing whether
   an address is registered. Password reset deliberately does not — the two

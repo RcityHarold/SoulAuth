@@ -2,6 +2,7 @@ use axum::{extract::Query, response::Json, routing::get, Extension, Router};
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cmp::Reverse;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -842,7 +843,7 @@ async fn generate_authentication_analysis(
             trend: trend_label(*count, previous.get(action).copied().unwrap_or(0)),
         })
         .collect();
-    login_patterns.sort_by(|a, b| b.count.cmp(&a.count));
+    login_patterns.sort_by_key(|p| Reverse(p.count));
 
     // 失败分析：按 action 归类所有 status = Failed 的记录。
     let failures = count_failed_actions_since(db, start_time).await?;
@@ -859,7 +860,7 @@ async fn generate_authentication_analysis(
             },
         })
         .collect();
-    failure_analysis.sort_by(|a, b| b.count.cmp(&a.count));
+    failure_analysis.sort_by_key(|f| Reverse(f.count));
 
     Ok(AuthenticationAnalysis {
         login_patterns,
@@ -961,7 +962,7 @@ async fn get_security_incidents(
         });
     }
 
-    incidents.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    incidents.sort_by_key(|i| Reverse(i.timestamp));
     Ok(incidents)
 }
 
@@ -976,7 +977,7 @@ async fn generate_user_behavior_analysis(
     let mut hourly = audit_service
         .get_hourly_activity_distribution(start_time)
         .await?;
-    hourly.sort_by(|a, b| b.count.cmp(&a.count));
+    hourly.sort_by_key(|h| Reverse(h.count));
     let peak_activity_hours: Vec<i32> = hourly
         .iter()
         .filter(|slot| slot.count > 0)

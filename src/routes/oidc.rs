@@ -757,13 +757,26 @@ async fn token(
                 "client credentials must not be sent in both the Authorization header                  and the request body",
             );
         }
-        if request.client_id != basic_id {
-            return client_auth_error(
-                "invalid_client",
-                "client_id in the Authorization header does not match the request body",
-            );
+        // 带了就仍然校验一致性；没带就用头里的补齐 —— 后者正是 RFC 允许的写法。
+        match &request.client_id {
+            Some(form_id) if form_id != &basic_id => {
+                return client_auth_error(
+                    "invalid_client",
+                    "client_id in the Authorization header does not match the request body",
+                );
+            }
+            _ => request.client_id = Some(basic_id),
         }
         request.client_secret = Some(basic_secret);
+    }
+
+    // 既没走 Basic，表单里也没有 client_id —— 这才是真正缺少身份的情况。
+    // 返回规范的 OAuth 错误体，而不是让它在更深处以别的形式失败。
+    if request.client_id.is_none() {
+        return client_auth_error(
+            "invalid_request",
+            "client_id is required when the client does not authenticate with the Authorization header",
+        );
     }
 
     match oidc_service.exchange_code_for_tokens(&request).await {

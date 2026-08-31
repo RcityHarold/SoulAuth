@@ -127,7 +127,7 @@ chmod 600 /etc/soulauth/oidc-signing.pem
    UPDATE user SET account_status = 'Deleted' WHERE account_status = 'PendingDeletion';
    ```
 
-   `PUT /api/users/users/{id}/status` 从此拒收 `"PendingDeletion"`（400）。
+   `PUT /api/users/{user_id}/status` 从此拒收 `"PendingDeletion"`（400）。
 
 5. **补充 user 表字段：**
    ```sql
@@ -552,7 +552,8 @@ export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 
 1. **启动 SurrealDB** 并确认可达：
    ```bash
-   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" file:/var/lib/surrealdb
+   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" \
+     surrealkv:///var/lib/surrealdb/soulauth.db
    curl -f http://127.0.0.1:8000/health && echo " SurrealDB OK"
    ```
 

@@ -299,13 +299,14 @@ async fn login(
     Extension(app_state): Extension<Arc<AppState>>,
     Extension(audit): Extension<Arc<AuditLogger>>,
     Extension(config): Extension<Config>,
+    Extension(db): Extension<Arc<Database>>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
 ) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     let ctx = request_context(&addr, &headers, &config);
     let (outcome, session_key) =
-        perform_login(&auth_service, &app_state, &audit, &req, &ctx).await?;
+        perform_login(&auth_service, &app_state, &audit, &db, &req, &ctx).await?;
     login_response(&config, outcome, session_key.as_deref())
 }
 
@@ -321,7 +322,7 @@ async fn admin_login(
 ) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
     let ctx = request_context(&addr, &headers, &config);
     let (outcome, session_key) =
-        perform_login(&auth_service, &app_state, &audit, &req, &ctx).await?;
+        perform_login(&auth_service, &app_state, &audit, &db, &req, &ctx).await?;
 
     if let LoginResponse::Authenticated(response) = &outcome {
         ensure_admin_console_access(db, &response.user.id).await?;
@@ -408,6 +409,7 @@ async fn perform_login(
     auth_service: &Arc<AuthService>,
     app_state: &Arc<AppState>,
     audit: &Arc<AuditLogger>,
+    db: &Arc<Database>,
     req: &LoginRequest,
     ctx: &RequestContext,
 ) -> std::result::Result<(LoginResponse, Option<String>), (StatusCode, Json<serde_json::Value>)> {
@@ -458,7 +460,15 @@ async fn perform_login(
         LoginOutcome::Authenticated(issued) => {
             // 只有走完整个登录流程才清零失败计数。
             reset_lockout_counters(app_state, &req.email, &ctx.ip_address);
-            let issued = *issued;
+            let mut issued = *issued;
+            // `From<User>` 拿不到角色表，is_admin 默认是 false。/api/auth/me 早就
+            // 在这里查了一次 RBAC，登录这条路径当时漏了 —— 而前端拿登录响应决定
+            // 要不要露出管理后台入口，是所有写法里最自然的那一个，那个字段就摆在
+            // 返回体里。结果是管理员登录后永远看到普通用户视图。
+            //
+            // 这不是权限漏洞：真正的授权判定始终在服务端按权限做，客户端改这个
+            // 字段改不出任何权限。它是一个「照文档做、结果是错的」的功能缺陷。
+            issued.response.user.is_admin = fill_is_admin(db, &issued.response.user.id).await;
             audit.record(
                 AuditEvent::new(
                     actions::LOGIN_SUCCESS,
@@ -591,12 +601,24 @@ async fn get_current_user(
     );
 
     let mut response = UserResponse::from(user.0);
-    response.is_admin = RBACService::new(db)
-        .check_user_role(&user_id, "admin")
-        .await
-        .unwrap_or(false);
+    response.is_admin = fill_is_admin(&db, &user_id).await;
 
     Ok(Json(response))
+}
+
+/// 查一次 RBAC，回答「这个账号是不是管理员」。
+///
+/// 登录响应与 `/api/auth/me` 都要用，走同一个函数而不是两处各写一遍 ——
+/// 两处各写一遍正是它们曾经漂开的原因。
+///
+/// 查不到时返回 false：这个字段只用于决定前端要不要露出管理入口，
+/// 判错的代价是少显示一个入口，而不是多授予一份权限。
+async fn fill_is_admin(db: &Arc<Database>, user_id: &str) -> bool {
+    let user_id = crate::utils::record_id::normalize_user_id(user_id);
+    RBACService::new(db.clone())
+        .check_user_role(&user_id, "admin")
+        .await
+        .unwrap_or(false)
 }
 
 // ===== 多因素认证 =====

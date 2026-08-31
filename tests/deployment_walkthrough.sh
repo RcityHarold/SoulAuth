@@ -25,7 +25,14 @@ bad(){ FAIL=$((FAIL+1)); printf '  \033[31m✗ %s\033[0m\n' "$1"; }
 ok(){ printf '  \033[32m✓ %s\033[0m\n' "$1"; }
 
 step 1 "启动 SurrealDB 并确认可达"
-surreal start --bind "127.0.0.1:${SP}" --user root --pass root memory >/dev/null 2>&1 &
+# 用文件存储，不用 memory。
+#
+# 这个脚本守的是「照部署文档能不能从零跑到一个可用管理员」，而文档让读者用持久化
+# 存储。用 memory 跑，等于永远测不到 datastore 那一行 —— 实际发生过：文档里写的
+# `file:soulauth.db` 是 SurrealDB 1.x 的写法，3.x 上直接以
+# 「Unable to load the specified datastore」退出，而三道测试全用 memory，
+# 一道都没发现，是外部试跑的人撞出来的。
+surreal start --bind "127.0.0.1:${SP}" --user root --pass root "surrealkv://$WORK/walkthrough.db" >/dev/null 2>&1 &
 DB_PID=$!; disown $DB_PID
 for i in $(seq 40); do curl -sSf -o /dev/null --max-time 2 "http://127.0.0.1:${SP}/health" 2>/dev/null && break; sleep 0.5; done
 curl -sSf -o /dev/null --max-time 3 "http://127.0.0.1:${SP}/health" 2>/dev/null && ok "SurrealDB OK" || { bad "起不来"; exit 1; }
