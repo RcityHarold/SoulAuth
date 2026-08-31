@@ -418,35 +418,40 @@ export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 
 7. **建立第一个管理员**：
 
-   注册接口本身不发管理员权限——第一个 admin 必须在库里手工授予，
-   这是刻意的：否则"谁是第一个注册的人"就成了拿到全部权限的条件。
+   全程不需要碰数据库。新实例在启动日志里打一枚一次性引导令牌（`WARN` 级别，
+   默认日志级别下可见），用它换第一个管理员：
 
    ```bash
-   # ① 注册。username 是必填项，密码需满足策略：
-   #    至少 12 个字符，且含大写 / 小写 / 数字 / 符号四类中的三类
-   curl -X POST http://localhost:8080/api/auth/register \
-     -H "Content-Type: application/json" \
-     -d '{"email":"admin@your-domain.com","username":"admin","password":"CorrectHorse42!"}'
+   # ① 从启动日志里取令牌
+   #    WARN No administrator found. Bootstrap token for this process: 7f3a…
+   #
+   #    多副本部署时用 SOULAUTH_BOOTSTRAP_TOKEN 固定它；设为空串则完全
+   #    关闭这条路径。
 
-   # ② 在数据库里把 admin 角色授予该账号
-   curl -u "$DATABASE_USER:$DATABASE_PASS" \
-     -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
-     --data "LET \$a = (SELECT VALUE subject_id FROM user WHERE email = 'admin@your-domain.com')[0];
-             CREATE user_role CONTENT {
-               user_id: \$a, role_id: role:admin,
-               assigned_at: 0, assigned_by: actor_identity:system
-             };" \
-     "http://$DATABASE_URL/sql"
+   # ② 用它建管理员。密码需满足策略：至少 12 个字符（PASSWORD_MIN_LENGTH），
+   #    且含大写 / 小写 / 数字 / 符号四类中的三类
+   curl -X POST http://localhost:8080/api/bootstrap/admin \
+     -H 'Content-Type: application/json' \
+     -d '{"token":"7f3a…","email":"admin@your-domain.com",
+          "username":"admin","password":"CorrectHorse42!"}'
+   # → {"user_id":"…","email":"admin@your-domain.com","is_admin":true}
 
-   # ③ 重新登录拿令牌（角色变更后需要重新登录，令牌本身不带角色）
+   # ③ 登录拿会话令牌（引导响应里不含令牌）
    curl -X POST http://localhost:8080/api/auth/login \
-     -H "Content-Type: application/json" \
+     -H 'Content-Type: application/json' \
      -d '{"email":"admin@your-domain.com","password":"CorrectHorse42!"}'
 
    # ④ 确认权限已生效
    curl http://localhost:8080/api/auth/me -H "Authorization: Bearer <token>"
    # → "is_admin": true
    ```
+
+   这道门是一次性的：系统里一旦存在管理员，端点永久拒绝，且对「令牌错」与
+   「门已关」返回**逐字相同**的响应 —— 一枚失效令牌因此无法用来探测某个实例
+   是否已经初始化。
+
+   令牌是**这个进程**的（日志原话 `for this process`）：重启一次就换一枚，
+   得回去看新的那行 `WARN`。
 
 ### 4. 验证这份文档本身
 
