@@ -45,38 +45,6 @@ surreal import --endpoint http://localhost:8000 --user root --pass root \
 - 系统用户账户（用于权限分配的内部账户）
 - 角色权限关联（为系统角色分配适当的权限）
 
-### 3. 清理 Rainbow-Docs 遗留权限（仅存量实例需要）
-
-`docs_permissions.sql` 已删除。它曾往 SoulAuth 的权限表里塞入另一个项目
-（Rainbow-Docs）的 10 个权限、3 个角色和 31 条授权关联，而 SoulAuth 自身代码
-从未引用过它们 —— 按 P0-DECISION-09/10，Auth-local RBAC 只管 SoulAuth 自己的
-管理后台，别的应用的权限不该寄存在这里。
-
-全新部署无需任何操作。**已经导入过该文件的实例**，其数据库里仍留有这些行，
-需手工清理（先删关联再删主体，避免留下孤儿关联）：
-
-```sql
--- 1) 先删授权关联
-DELETE role_permission WHERE permission_id IN (
-    SELECT VALUE id FROM permission
-    WHERE string::starts_with(name, 'soulauth:docs.')
-       OR string::starts_with(name, 'soulauth:spaces.')
-       OR string::starts_with(name, 'soulauth:comments.')
-);
-DELETE role_permission WHERE role_id IN (
-    SELECT VALUE id FROM role WHERE name IN ['docs_admin', 'docs_editor', 'docs_reader']
-);
-
--- 2) 再删权限与角色本体
-DELETE permission WHERE string::starts_with(name, 'soulauth:docs.')
-    OR string::starts_with(name, 'soulauth:spaces.')
-    OR string::starts_with(name, 'soulauth:comments.');
-DELETE role WHERE name IN ['docs_admin', 'docs_editor', 'docs_reader'];
-
--- 3) 顺带清掉可能残留的用户-角色绑定
-DELETE user_role WHERE role_id NOT IN (SELECT VALUE id FROM role);
-```
-
 ## OIDC 签名密钥
 
 ID Token 使用 RS256 签名，公钥通过 `/api/oidc/jwks` 发布。生产环境必须提供一把持久私钥：
@@ -90,200 +58,48 @@ chmod 600 /etc/soulauth/oidc-signing.pem
 未配置时进程启动会临时生成一把并打 WARN —— 重启后 `kid` 变化，已签发的 ID Token
 将无法验签，依赖方会出现随机的登录失败。
 
-## 从旧版本升级
-
-1. **所有用户需要重新登录。** 现在每次鉴权都会核对 `session` 表，登出与改密可以
-   真正吊销令牌；升级前签发的令牌若无对应会话记录将被拒绝。
-
-2. **执行权限迁移。** `initial_data.sql` 末尾新增了 `oidc_clients.read` /
-   `oidc_clients.write` 两个权限并授予 admin 角色。已有部署单独执行该段即可，
-   否则管理员将无法访问 `/api/oidc/clients`。
-
-3. **`membership_expiry` 由 `string` 改为 `datetime`。**
-
-   该字段以前是自由字符串且写入不校验，`"下个月"` 这类值也能落库。
-   现在由类型保证形状（语义仍不由 SoulAuth 解释，见
-   P0-DECISION-09 §4.7）。**必须先清洗数据再改字段定义**，
-   否则改完之后读取旧行会失败：
-
-   ```sql
-   -- ① 把无法解析的值清空（能解析的按 RFC3339 转换）
-   UPDATE user SET membership_expiry = NONE
-     WHERE membership_expiry != NONE
-       AND type::is::datetime(<datetime> membership_expiry) = false;
-
-   -- ② 再改字段定义
-   DEFINE FIELD membership_expiry ON user TYPE option<datetime>;
-   ```
-
-4. **`AccountStatus` 移除了 `PendingDeletion` 变体。**
-
-   它此前的行为与 `Deleted` 完全同义（没有宽限期、没有到期推进、
-   没有级联清除、也没有撤销入口），却对外宣告了一条不存在的删除流水线。
-   存量的 `"PendingDeletion"` 行会被解析成 `Inactive`（不可用），
-   方向是 fail-closed、不会误放行；但建议显式归位：
-
-   ```sql
-   UPDATE user SET account_status = 'Deleted' WHERE account_status = 'PendingDeletion';
-   ```
-
-   `PUT /api/users/{user_id}/status` 从此拒收 `"PendingDeletion"`（400）。
-
-5. **补充 user 表字段：**
-   ```sql
-   DEFINE FIELD verification_token_expires_at ON user TYPE option<number>;
-   ```
-
-6. **`oidc_client.created_by` 字段类型由 `record<user>` 改为 `string`。**
-   存量行里存的是 record 链接，必须**先转换数据、再改字段定义**，否则改完之后
-   读取旧行会直接失败：
-   ```sql
-   -- ① 先把已有的 record 链接转成字符串
-   UPDATE oidc_client SET created_by = type::string(created_by)
-     WHERE created_by != NONE;
-   -- ② 再收紧字段类型
-   DEFINE FIELD created_by ON oidc_client TYPE string;
-   ```
-
-7. **社交相关表已不再使用**，可在确认无其他消费方后删除：
-   `friend_request`、`friendship`、`direct_conversation`、`direct_message`、
-   `social_group`、`social_group_member`、`group_thread`、`group_thread_message`、
-   `group_collab_run`。
-
-8. **新增必填 / 建议配置：** `CORS_ALLOWED_ORIGINS`、`TRUST_PROXY_HEADERS`、
-   `OIDC_RSA_PRIVATE_KEY_PATH`。`JWT_SECRET` 现在要求至少 32 字符。
-
-9. **应用不再自动建表。** 启动时的 DDL 已移除，schema 变更一律通过 `schema.sql`
-   手动执行——这与本文档开头"应用程序不应具有 DDL 权限"的原则一致。
-
-10. **已注册的 OIDC 客户端密钥仍可用**（旧的 SHA-256 哈希会继续被接受），
-   但建议逐个调用 `POST /api/oidc/clients/:client_id/regenerate-secret`
-   迁移到 Argon2 存储。
-
-11. **配置 MFA 密钥加密密钥。** TOTP 密钥现在加密后落库：
-   ```bash
-   openssl rand -base64 32   # 填入 MFA_SECRET_ENCRYPTION_KEY
-   ```
-   不配置时会从 `JWT_SECRET` 派生并打 WARN —— 那样一来轮换 `JWT_SECRET`
-   会导致所有已存的 TOTP 密钥无法解密，生产环境务必单独配置。
-   存量的明文密钥可继续使用，并在下一次写入时自动就地加密。
-
-12. **备用恢复码改为 Argon2 哈希存储。** 升级前生成的明文备用码仍可校验，
-    但建议让已启用 MFA 的用户重新生成一次（`POST /api/auth/mfa/setup`）。
-
-13. **`initial_data.sql` 现在是幂等的**（`CREATE` 全部改为带确定性 ID 的
-    `UPSERT`），可以安全地重复执行。权限名前缀化后，重跑它即可就地改名 ——
-    `role_permission` 按 record ID 关联，角色授权关系不受影响。
-
-14. **`/api/oidc/authorize` 的未登录跳转目标变了。** 以前直接 302 到 Google，
-    现在跳 `LOGIN_PAGE_URL`（默认 `{APP_URL}/login`）并带 `return_to`。
-    登录页需要做两件事：调用 `POST /api/auth/login` 完成登录，
-    然后跳回 `return_to` 指向的地址；如果仍需要 Google 登录入口，
-    在页面上链到 `GET /api/auth/login/google` 即可。
-
-15. **本地开发不再需要 https。** Cookie 的 `Secure` 属性现在由 `APP_URL` 的协议
-    决定，`http://localhost:8080` 下会自动省略。
-
-16. **可选：调整 `AUTH_SESSION_CACHE_TTL_SECONDS`。** 默认 5 秒。设为 0 会回到
-    每个请求都校验会话（吊销绝对即时，代价是每请求两次查询）。
-
-17. **必须重新执行 `schema.sql` 中的这几条字段定义**（类型有变，且 SCHEMAFULL
-    下旧定义会拒绝新写入）：
-    ```sql
-    -- 审计事件未必对应已存在的用户（登录失败、限流触发等）
-    DEFINE FIELD user_id ON user_activity TYPE option<record<user>>;
-    ```
-    如果 `user_activity` / `user_profile` / `user_preferences` 里已有历史数据，
-    由于此前的写入本就会被 SCHEMAFULL 拒绝，这些表大概率是空的；若确有数据，
-    需要把 datetime 值转成 Unix 秒后再启用新版本。
-
-18. **所有用户需要重新登录（第二次）。** 浏览器会话 cookie 现在必须携带 `sid`
-    并对应一条有效的 `session` 记录，升级前签发的 cookie 会被拒绝。
-
-19. **前端需要新增一个邮箱验证页**（或配置 `VERIFY_EMAIL_PAGE_URL` 指向已有页面）：
-    验证邮件的链接现在是 `{VERIFY_EMAIL_PAGE_URL}?token=xxx`，页面拿到 token 后
-    再调 `GET /api/auth/verify-email/{token}`。
-
-20. **审计接口的响应结构有两处变化：**
-    - `GET /api/audit/system-health` 删除了 `connection_pool_used` /
-      `connection_pool_size` 两个字段（SurrealDB HTTP 客户端不暴露连接池指标，
-      之前一直是写死的 1/10）；内存与运行时长改为真实值。
-    - `GET /api/audit/security-report` 中 `user_retention_metrics` 的字段
-      由 `daily_retention` / `weekly_retention` / `monthly_retention` 改名为
-      `daily_active_rate` / `weekly_active_rate` / `monthly_active_rate`
-      —— 这个口径本来就是活跃率而非留存率。同一接口的
-      `geographic_distribution` 现在恒为空数组（没有接入 GeoIP 数据源）。
-
-21. **第三方登录凭证由必填改为可选（破坏性变更的反面：放宽）。**
-    `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GITHUB_CLIENT_ID` /
-    `GITHUB_CLIENT_SECRET` / `OAUTH_REDIRECT_URL` 五项此前是硬必填，只用邮箱
-    密码登录的部署被迫填假值。现在不配即不启用，登录入口返回 501。
-    **已填假值的实例建议清掉**——配置里的假数据一旦哪天被当真就是事故。
-
-22. **生产环境缺密钥改为拒绝启动。** `APP_URL` 非环回时，缺
-    `OIDC_RSA_PRIVATE_KEY_PEM`/`_PATH` 或 `MFA_SECRET_ENCRYPTION_KEY` 会让进程
-    起不来（此前只打 WARN）。升级前请确认这两项已配，否则重启后服务不可用。
-    理由见「生产环境额外必填」一节。
-
-23. **限流改为跨副本合账。** 新增 `rate_limit` 表，需重新执行 `schema.sql`
-    （或单独执行该表的 `DEFINE`）。登录 / 注册 / 改密 / 验邮箱等敏感端点的
-    计数经数据库共享，多副本不再各算各的。
-    ⚠ 副作用：**重启副本不再清空配额**。这是它该有的性质，但排查时容易误判。
-
-24. **`client_secret_basic` 补上实现。** 此前发现文档声明支持它，而令牌端点
-    只解析表单——用标准 OIDC 客户端库接入的机密客户端会失败，且错误信息
-    指向「未提供 secret」。升级后两种方式都可用。
-
-25. **账号状态判定改为白名单。** 只有 `Active` 放行，未知状态一律按不可用
-    处理（此前是「没被显式列为坏的就算好的」）。若你的数据库里有非标准的
-    `account_status` 值，那些账号升级后将无法登录——升级前先查：
-    ```sql
-    SELECT VALUE account_status FROM user
-    WHERE account_status NOT IN ['Active','Inactive','Suspended','Deleted'];
-    ```
-
 ## 权限系统说明
+
+权威清单是 `contracts/permissions.yaml`，由 `tests/conformance.rs::j1` 双向对账：
+注册表声明的每一条 Runtime 必须真的校验，Runtime 校验的每一条注册表必须声明；
+角色的授予图也与 `initial_data.sql` 逐条比对。下面的表从那份契约抄来。
 
 ### 系统角色
 
-| 角色名 | 显示名称 | 描述 | 权限范围 |
-|--------|----------|------|----------|
-| `admin` | 系统管理员 | 拥有所有权限 | 所有权限 |
-| `user_manager` | 用户管理员 | 负责用户管理 | users.read, users.write, users.delete |
-| `security_manager` | 安全管理员 | 负责安全管理 | security.read, security.write, users.read |
-| `auditor` | 审计员 | 查看审计日志 | audit.read |
-| `user` | 普通用户 | 基础用户角色 | 基础权限 |
+| 角色 | 持有 |
+|---|---|
+| `admin` | 全部 14 条 |
+| `security_manager` | `security.read`、`security.write`、`users.read` |
+| `user_manager` | `users.read`、`users.write` |
+| `auditor` | `audit.read` |
+| `user` | 无。基线角色，不持有任何控制平面权限 |
 
 ### 系统权限
 
-权限名带 `soulauth:` 命名空间前缀（P0-DECISION-10 DEC-10-05）。前缀的意义是
-划清边界：这些权限只管 SoulAuth 自己的管理后台，**不是 SoulSeedOS 的
-Canonical Permission Source** —— OS 侧也有 `users.read` 这类名字，两者同名不同物。
-
-代码中真正被检查的是下面 11 个（单一真相在 `src/models/permission.rs`
-的 `names` 模块，有单元测试守着它与 `initial_data.sql` 的一致性）：
+权限名带 `soulauth:` 前缀，划的是边界：这些权限只管 SoulAuth 自己的管理后台，
+接入方系统很可能也有一个 `users.read`，两者同名不同物。
 
 | 权限名 | 用于 |
 |---|---|
-| `soulauth:users.read` | 读用户、他人资料/偏好、他人 SSO 会话 |
+| `soulauth:users.read` | 读主体、他人档案与偏好、他人活动日志 |
 | `soulauth:users.write` | 改账号状态、改会员等级 |
-| `soulauth:roles.read` | 读角色与角色权限 |
-| `soulauth:roles.write` | 给用户授/撤角色 |
+| `soulauth:roles.read` | 列出与读取角色 |
+| `soulauth:roles.write` | 建/改角色；给主体授予与撤销角色 |
 | `soulauth:roles.delete` | 删除角色 |
-| `soulauth:permissions.read` | 读权限详情 |
-| `soulauth:permissions.write` | 给角色授/撤权限 |
-| `soulauth:security.read` | 安全指标、系统健康、全局会话统计、会话清理 |
+| `soulauth:permissions.read` | 列出与读取权限 |
+| `soulauth:permissions.write` | 建权限；在角色上挂载与摘除 |
+| `soulauth:security.read` | 读锁定状态、安全指标、系统健康 |
+| `soulauth:security.write` | **解除账号与 IP 锁定** |
 | `soulauth:audit.read` | 审计看板、活动摘要、安全报告、他人活动日志 |
-| `soulauth:oidc_clients.read` | 读 OIDC 客户端 |
-| `soulauth:oidc_clients.write` | **注册 / 改 / 停用 OIDC 客户端** |
+| `soulauth:oidc_clients.read` | 列出与读取 OIDC 客户端 |
+| `soulauth:oidc_clients.write` | 注册 / 改 / 停用客户端；重新生成密钥 |
+| `soulauth:actors.read` | 查看已注册的非人主体及其凭证 |
+| `soulauth:actors.write` | 注册非人主体，增加或吊销其凭证 |
 
-最后一条是接入 SoulSeedOS 时要用的——注册 OS 客户端需要一个持有它的账号。
+`oidc_clients.write` 是接入其它应用时要用的：注册客户端需要一个持有它的账号。
 
-`initial_data.sql` 另外还种了 7 个当前**没有任何代码引用**的权限
-（`users.delete` / `permissions.delete` / `security.write` /
-`profile.read` / `profile.write` / `preferences.read` / `preferences.write`）。
-它们授给了 admin 与 user_manager，但不影响任何接口的判定——留着是为将来，
-不要据此以为某个接口受它们保护。
+`actors.write` 与其它写权限不同 —— 别的改的是已有对象，这一条**能凭空造出一个
+可认证的主体**。授出去之前想清楚。
 
 ## 应用程序部署
 
@@ -641,8 +457,8 @@ export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 cargo build && ./tests/deployment_walkthrough.sh
 ```
 
-改动本文档的部署步骤后请一并跑它。这份文档曾经通不过自己 —— 参数名写错、
-ns/db 三处不一致，而这些只有真正执行才会暴露。
+改动本文档的部署步骤后请一并跑它。参数名写错、ns/db 三处不一致这类问题，
+只有真正执行才会暴露。
 
 ## 作为 OIDC Provider 接入（SoulSeedOS / 其它应用）
 
@@ -729,16 +545,15 @@ curl -X POST https://auth.example.com/api/oidc/token \
 curl -X POST https://auth.example.com/api/oidc/token \
   -u "${CLIENT_ID}:${CLIENT_SECRET}" \
   -d grant_type=authorization_code -d code=... -d redirect_uri=... \
-  -d client_id=... -d code_verifier=...
+  -d code_verifier=...
 ```
 
-**两处同时带凭证会被拒**（`invalid_request`），不会"挑一个用"——那会让
-「两处 secret 不一致」这种明显异常被静默接受。
+走 Basic 时表单里**不必**再带一份 `client_id` —— 按 RFC 6749 §4.1.3，客户端已经
+向授权服务器认证过时它不是必需的。带了也行，但必须与头里的一致，否则以
+`invalid_client` 拒掉。两处都不给时返回 `invalid_request`。
 
-> **升级提示**：`client_secret_basic` 是 2026-08-17 才补上实现的。此前发现
-> 文档一直声明支持它，而令牌端点只解析表单。跑更早版本的实例上，用标准
-> OIDC 客户端库接入会报 `Client secret required for confidential clients`
-> ——接入方会反复检查自己的配置，而配置是对的。
+**两处同时带凭证会被拒**（`invalid_request`），不会"挑一个用" —— 那会让
+「两处 secret 不一致」这种明显异常被静默接受。
 
 ### 接入方必须知道的三条行为
 
@@ -838,7 +653,6 @@ echo "$ID_TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null | jq '{iss, aud, sid, exp
 | 一个人被限流，所有人一起被限 | 在反向代理后没开 `TRUST_PROXY_HEADERS`，所有请求的来源 IP 都是代理的 |
 | 重启了服务，限流还在 | 敏感端点的限流计数存在数据库里，重启不清（设计如此）。删对应的 `rate_limit` 行 |
 | 注册成功但收不到验证信 | 发信失败只记日志、不阻断请求。查应用日志里的 SMTP 错误 |
-| 接入方报「未提供 client_secret」，但配置是对的 | 客户端库走的是 `client_secret_basic`，而实例版本早于 2026-08-17 |
 | 接入方间歇性 401 | 多副本各自生成了临时 OIDC 私钥。配 `OIDC_RSA_PRIVATE_KEY_PATH` 并让所有副本共用 |
 | 接入方稳定 401，且 `sid` 为空 | 拿的是 access token（32 位不透明串）不是 ID Token |
 | 登录跳转正常，回调报 `redirect_uri` 不匹配 | 注册客户端时 `redirect_uris` 填成了资源服务器的地址，应填执行授权码交换那一方的回调地址 |
