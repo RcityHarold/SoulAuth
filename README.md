@@ -1,8 +1,11 @@
 # SoulAuth
 
-An authentication service written in Rust. It owns accounts, credentials and
-sessions, and it speaks OpenID Connect so other systems can consume the result
-without ever touching its database.
+A self-hosted authentication service written in Rust that speaks standard OpenID
+Connect, so a client library that already talks to Keycloak or Auth0 talks to it without
+changes.
+
+What it does differently: an AI actor gets an identity record and an Ed25519 key of its
+own, rather than a `user` row with a made-up email address on it.
 
 **Documentation: <https://rcityharold.github.io/SoulAuth-docs/>** — integration guides, the full API reference rendered from
 the machine-readable contract, and the operations pages.
@@ -24,8 +27,8 @@ everything shown runs in one process today.
 ## What it is, and what it deliberately is not
 
 **It is** the answer to *who is this*: registration, login, email verification,
-password reset, MFA, third-party sign-in, session lifecycle, and an OIDC
-provider that other systems verify against.
+password reset, MFA, third-party sign-in, AI actor authentication, session lifecycle,
+and an OIDC provider that other systems verify against.
 
 **It is not** the answer to *what may they do* in your system. SoulAuth carries
 a small RBAC model, but that model governs **SoulAuth's own admin surface only**.
@@ -49,6 +52,7 @@ about the account, never an authorization decision inside the consumer. See
 | **MFA** | TOTP (RFC 6238) with QR provisioning, single-use backup codes, replay rejection via a step watermark |
 | **Sessions** | Server-side session records, single logout, global logout (also revokes issued OIDC tokens and every browser session), suspension revokes both |
 | **OIDC provider** | Discovery, JWKS, authorization code + PKCE (S256 only), refresh with rotation, userinfo, RP-initiated logout, client management API |
+| **AI actors** | Ed25519 challenge–response: no email, no password, no user row. Several active keys per identity, so each machine holds its own and the log records which key authenticated |
 | **RBAC** | Roles, permissions, user/role and role/permission assignment — scoped to SoulAuth's own admin surface |
 | **Protection** | Per-endpoint rate limiting shared across replicas, account lockout on both user and IP dimensions, CORS allow-list |
 | **Audit** | Activity log, security metrics, security report, system health |
@@ -81,8 +85,27 @@ default `0.0.0.0:8080`). It determines the OIDC issuer, the prefix of links in
 outgoing mail, and whether session cookies carry `Secure`.
 
 Pointing `APP_URL` at a non-loopback host switches on the production gates —
-see [Production posture](#production-posture) and
+see [Security posture](#security-posture) and
 [DEPLOYMENT.md](DEPLOYMENT.md).
+
+There is no default account. A fresh instance prints a one-time token in its startup log
+(at `WARN`, so it is visible at the default level); use it to create the first
+administrator without touching the database:
+
+```bash
+# WARN No administrator found. Bootstrap token for this process: 7f3a…
+curl -X POST http://localhost:8080/api/bootstrap/admin \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"7f3a…","email":"you@example.com","username":"admin","password":"CorrectHorse42!"}'
+
+# Then log in for a session token
+curl -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"CorrectHorse42!"}'
+```
+
+The gate closes permanently once an administrator exists, and returns the same response
+for a wrong token as for a closed gate.
 
 ---
 
