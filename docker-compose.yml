@@ -36,7 +36,9 @@ services:
       - --bind=0.0.0.0:8000
       - --user=root
       - --pass=root
-      - file:/data/soulauth.db
+      # surrealkv:// 而不是 file: —— file: 是 SurrealDB 1.x 的写法，3.x 上
+      # 会以「Unable to load the specified datastore」直接退出。
+      - surrealkv:///data/soulauth.db
     volumes:
       - surreal-data:/data
     healthcheck:

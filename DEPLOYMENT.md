@@ -552,7 +552,8 @@ export NO_PROXY=127.0.0.1,localhost,${DB_HOST}
 
 1. **启动 SurrealDB** 并确认可达：
    ```bash
-   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" file:/var/lib/surrealdb
+   surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" \
+     surrealkv:///var/lib/surrealdb/soulauth.db
    curl -f http://127.0.0.1:8000/health && echo " SurrealDB OK"
    ```
 
