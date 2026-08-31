@@ -80,26 +80,27 @@ step 6 "验证部署 curl /health"
 H=$(curl -sSf --max-time 5 "http://127.0.0.1:${AP}/health" 2>/dev/null)
 [ -n "$H" ] && ok "$H" || { bad "无响应: $(tail -3 "$WORK/app.log")"; exit 1; }
 
-step "7①" "注册第一个管理员"
-C=$(curl -sS --max-time 10 -o "$WORK/r" -w '%{http_code}' -X POST "http://127.0.0.1:${AP}/api/auth/register" \
+step "7①" "从启动日志取引导令牌"
+BT=$(grep -oP 'Bootstrap token for this process: \K\S+' "$WORK/app.log" | head -1)
+[ -n "$BT" ] && ok "取到令牌" || { bad "启动日志里没有引导令牌"; sed 's/^/      /' "$WORK/app.log" | tail -5 >&2; }
+
+step "7②" "用它建第一个管理员"
+C=$(curl -sS --max-time 10 -o "$WORK/r" -w '%{http_code}' -X POST "http://127.0.0.1:${AP}/api/bootstrap/admin" \
    -H "Content-Type: application/json" \
-   -d '{"email":"admin@your-domain.com","username":"admin","password":"CorrectHorse42!"}' 2>/dev/null)
-[ "$C" = 200 ] && ok "注册成功" || bad "返回 $C: $(head -c 120 "$WORK/r")"
+   -d "{\"token\":\"${BT}\",\"email\":\"admin@your-domain.com\",\"username\":\"admin\",\"password\":\"CorrectHorse42!\"}" 2>/dev/null)
+if [ "$C" = 200 ]; then
+  grep -q '"is_admin":true' "$WORK/r" && ok "引导响应直接断言 is_admin" || bad "引导成功但 is_admin 不为 true: $(head -c 120 "$WORK/r")"
+else
+  bad "返回 $C: $(head -c 160 "$WORK/r")"
+fi
 
-step "7②" "授予 admin 角色"
-curl -sS --max-time 10 -u "$DATABASE_USER:$DATABASE_PASS" \
-  -H "surreal-ns: $DATABASE_NAMESPACE" -H "surreal-db: $DATABASE_NAME" \
-  --data "LET \$a = (SELECT VALUE subject_id FROM user WHERE email = 'admin@your-domain.com')[0];
-          CREATE user_role CONTENT { user_id: \$a, role_id: role:admin,
-            assigned_at: 0, assigned_by: actor_identity:system };" \
-  "http://$DATABASE_URL/sql" > "$WORK/g" 2>&1
-python3 -c "
-import json
-d=json.load(open('$WORK/g'))
-errs=[x for x in d if x.get('status')!='OK']
-print('  '+('\033[32m✓ 授予成功\033[0m' if not errs else '\033[31m✗ '+str(errs[0].get('result'))[:100]+'\033[0m'))" || bad "解析失败"
+step "7②b" "这道门是一次性的"
+C2=$(curl -sS --max-time 10 -o "$WORK/r2" -w '%{http_code}' -X POST "http://127.0.0.1:${AP}/api/bootstrap/admin" \
+   -H "Content-Type: application/json" \
+   -d "{\"token\":\"${BT}\",\"email\":\"second@your-domain.com\",\"username\":\"second\",\"password\":\"CorrectHorse42!\"}" 2>/dev/null)
+[ "$C2" = 403 ] && ok "已有管理员后同一令牌被拒（403）" || bad "期望 403，实际 $C2"
 
-step "7③④" "重新登录并确认 is_admin"
+step "7③④" "登录并确认 is_admin"
 TOK=$(curl -sS --max-time 10 -X POST "http://127.0.0.1:${AP}/api/auth/login" -H "Content-Type: application/json" \
    -d '{"email":"admin@your-domain.com","password":"CorrectHorse42!"}' 2>/dev/null \
    | python3 -c "import json,sys;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
