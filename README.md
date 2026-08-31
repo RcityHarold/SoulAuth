@@ -4,6 +4,9 @@ An authentication service written in Rust. It owns accounts, credentials and
 sessions, and it speaks OpenID Connect so other systems can consume the result
 without ever touching its database.
 
+**Documentation: <https://rcityharold.github.io/SoulAuth-docs/>** — integration guides, the full API reference rendered from
+the machine-readable contract, and the operations pages.
+
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
@@ -324,6 +327,21 @@ DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshoo
   consumers that asked for it.
 - No RFC 7662 token introspection. Consumers learn about revocation at token
   expiry, not immediately.
+
+---
+
+## Where to go next
+
+| | |
+|---|---|
+| Running in five minutes | [Quickstart](https://rcityharold.github.io/SoulAuth-docs/start/quickstart) |
+| Choosing an integration | [Integration path](https://rcityharold.github.io/SoulAuth-docs/start/integration-path) |
+| Wiring an OIDC client | [Authorization Code flow](https://rcityharold.github.io/SoulAuth-docs/integrate/authorization-code-flow) |
+| Before you open it up | [Production checklist](https://rcityharold.github.io/SoulAuth-docs/operate/production-checklist) |
+| Every endpoint, parameter and error | [API reference](https://rcityharold.github.io/SoulAuth-docs/reference/api-conventions) |
+
+Deployment steps live in [DEPLOYMENT.md](DEPLOYMENT.md) — that file is what
+`tests/deployment_walkthrough.sh` executes on every push.
 
 ---
 

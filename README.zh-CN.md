@@ -3,6 +3,9 @@
 用 Rust 写的认证服务。它掌管账号、凭证与会话，并以 OpenID Connect 对外提供
 验证能力——接入方拿公钥自行验签，从不需要碰它的数据库。
 
+**文档站：<https://rcityharold.github.io/SoulAuth-docs/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
+完整 API 参考，以及运维那几页。
+
 > English version: [README.md](README.md)（主版本）
 
 ```
@@ -293,6 +296,21 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
   刻意做了防枚举。两者口径不一致，是可用性取舍而非疏漏。
 - ID Token 寿命对**所有**客户端一律夹到 300 秒，不只是对提出该要求的接入方。
 - 没有 RFC 7662 令牌自省。接入方感知吊销要等到令牌自然过期。
+
+---
+
+## 接下来去哪
+
+| | |
+|---|---|
+| 五分钟跑起来 | [快速上手](https://rcityharold.github.io/SoulAuth-docs/zh/start/quickstart) |
+| 决定怎么接入 | [接入路径](https://rcityharold.github.io/SoulAuth-docs/zh/start/integration-path) |
+| 接一个 OIDC 客户端 | [授权码流程](https://rcityharold.github.io/SoulAuth-docs/zh/integrate/authorization-code-flow) |
+| 开放访问之前 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
+| 每个端点、参数与错误 | [API 参考](https://rcityharold.github.io/SoulAuth-docs/zh/reference/api-conventions) |
+
+部署步骤在 [DEPLOYMENT.md](DEPLOYMENT.md) —— 那份文件正是
+`tests/deployment_walkthrough.sh` 每次推送都要执行一遍的对象。
 
 ---
 
