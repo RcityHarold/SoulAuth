@@ -7,9 +7,14 @@ without ever touching its database.
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
-axum 0.6 · SurrealDB 3.0 · 70 HTTP endpoints · ~17k lines
-122 unit tests (5s, no external dependencies) · 25 integration groups / 242 assertions
+axum 0.6 · SurrealDB 3.0 · 71 paths / 84 operations · ~22k lines
+158 unit tests (no external dependencies) · 27 integration groups / 353 assertions
 ```
+
+![SoulAuth architecture](docs/figures/architecture.en.png)
+
+Logical responsibilities, not a call sequence and not a deployment diagram —
+everything shown runs in one process today.
 
 ---
 
@@ -35,7 +40,7 @@ about the account, never an authorization decision inside the consumer. See
 
 | Area | What's covered |
 |---|---|
-| **Accounts** | Registration, login, email verification, password reset, account status (Active / Inactive / Suspended / PendingDeletion / Deleted), membership tiers |
+| **Accounts** | Registration, login, email verification, password reset, account status (Active / Inactive / Suspended / Deleted), membership tiers |
 | **Credentials** | Argon2 password hashing, password policy (length + character-class rules), first-password initialisation for accounts created via OAuth |
 | **Third-party sign-in** | Google and GitHub. Both optional — an instance that only wants email/password configures neither |
 | **MFA** | TOTP (RFC 6238) with QR provisioning, single-use backup codes, replay rejection via a step watermark |
@@ -98,20 +103,24 @@ OIDC client library.
 
 ## API surface
 
-70 endpoints across eight modules. The route tables in `src/routes/` are the
-authoritative list; this is the shape of it.
+84 operations over 71 paths. `contracts/openapi.yaml` is the authoritative list and
+`tests/conformance.rs::j4` holds it against the route table in both directions; this is
+the shape of it.
 
-| Module | Endpoints | Covers |
+| Prefix | Operations | Covers |
 |---|---:|---|
-| `auth` | 21 | register, login, logout, logout-all, sessions, email verification and resend, password reset, MFA (5), OAuth entry and callback for two providers |
-| `user_management` | 14 | own profile / preferences / activity log, plus admin reads and account-status / membership writes |
-| `rbac` | 13 | role and permission CRUD, assignment in both directions, self permission checks |
-| `oidc` | 7 | discovery, JWKS, authorize, token, userinfo, logout |
-| `oidc_client` | 6 | client registration, listing, update, disable, secret rotation |
-| `audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
-| `ops` | 1 | membership overview |
-| `security` | 2 | lockout status query, manual unlock (user or IP) |
-| _root_ | 1 | `/health` liveness probe (outside the rate limiter) |
+| `/api/auth` | 21 | register, login, admin login, logout, logout-all, sessions, email verification and resend, password reset, first-password initialisation, MFA (5), OAuth entry and callback for two providers |
+| `/api/rbac` | 17 | role and permission CRUD, assignment in both directions, self permission checks |
+| `/api/oidc` | 12 | discovery, JWKS, authorize, token, userinfo, logout, plus the client management API |
+| `/api/actors` | 9 | AI actor registration, credential add and revoke, challenge, authenticate, self-introspection |
+| `/api/me` | 7 | own profile, preferences and activity log |
+| `/api/users` | 7 | admin reads plus account-status and membership writes |
+| `/api/audit` | 5 | dashboard, activity summary, security metrics, security report, system health |
+| `/api/security` | 2 | lockout status query, manual unlock (user or IP) |
+| `/api/bootstrap` | 1 | create the first administrator with the one-time startup token |
+| `/api/ops` | 1 | membership overview |
+| `/.well-known` | 1 | discovery document at the root path |
+| `/health` | 1 | liveness probe (outside the rate limiter) |
 
 Every endpoint is exercised by the integration suite. Representative flows:
 
@@ -200,8 +209,8 @@ surprises people during incident response.
 Two layers with different jobs. Neither substitutes for the other.
 
 ```bash
-cargo test              # 122 unit tests, ~5s, no external dependencies
-cargo build && ./tests/integration.sh   # 25 groups, 242 assertions
+cargo test              # 158 unit tests, no external dependencies
+cargo build && ./tests/integration.sh   # 27 groups, 353 assertions
 ```
 
 **Unit tests** cover pure logic and consistency invariants — permission names
@@ -287,7 +296,10 @@ src/
 schema.sql         table and field definitions — authoritative
 initial_data.sql   roles, permissions, seed accounts; idempotent
 tests/
+  conformance.rs   architecture invariants asserted against schema and source
   integration.sh   contract-level suite
+  deployment_walkthrough.sh
+                   executes DEPLOYMENT.md from an empty database to a usable admin
   smtp_sink.py     zero-dependency SMTP receiver
   mock_oauth.py    zero-dependency Google/GitHub stand-in
   totp.py          RFC 6238 code generation, self-checked against the RFC vectors

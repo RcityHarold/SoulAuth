@@ -6,9 +6,14 @@
 > English version: [README.md](README.md)（主版本）
 
 ```
-axum 0.6 · SurrealDB 3.0 · 70 个 HTTP 端点 · 约 1.7 万行
-单元测试 122 项（5 秒，零外部依赖）· 集成测试 25 组 242 项断言
+axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
+单元测试 158 项（零外部依赖）· 集成测试 27 组 353 项断言
 ```
+
+![SoulAuth 架构](docs/figures/architecture.zh.png)
+
+这张图画的是逻辑职责，不是调用时序，也不是部署图 —— 图中的一切目前都跑在同一个
+进程里。
 
 ---
 
@@ -31,7 +36,7 @@ RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulau
 
 | 方面 | 覆盖内容 |
 |---|---|
-| **账号** | 注册、登录、邮箱验证、密码重置、账号状态（Active / Inactive / Suspended / PendingDeletion / Deleted）、会员等级 |
+| **账号** | 注册、登录、邮箱验证、密码重置、账号状态（Active / Inactive / Suspended / Deleted）、会员等级 |
 | **凭证** | Argon2 口令散列、口令策略（长度 + 字符类别）、为 OAuth 建号的无密码账号设置首个密码 |
 | **第三方登录** | Google 与 GitHub，**两个都是可选的**——只用邮箱密码的部署一个都不必配 |
 | **MFA** | TOTP（RFC 6238）含二维码下发、一次性备用码、基于时间窗水位线的重放拒绝 |
@@ -92,19 +97,23 @@ OIDC 那几个端点（`/.well-known/openid-configuration`、`/jwks`、`/token`�
 
 ## 接口面
 
-70 个端点，分八个模块。`src/routes/` 下的路由表是权威清单，这里给的是它的形状。
+71 条路径、84 个 operation。`contracts/openapi.yaml` 是权威清单，
+`tests/conformance.rs::j4` 拿它与路由表双向对账；这里给的是它的形状。
 
-| 模块 | 端点数 | 覆盖 |
+| 前缀 | operation | 覆盖 |
 |---|---:|---|
-| `auth` | 21 | 注册、登录、登出、全端登出、会话列表、邮箱验证与重发、密码重置、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
-| `user_management` | 14 | 本人资料 / 偏好 / 活动日志，以及管理员的读取与账号状态、会员等级写入 |
-| `rbac` | 13 | 角色与权限的增删查、双向授予、自身权限自查 |
-| `oidc` | 7 | 发现文档、JWKS、authorize、token、userinfo、logout |
-| `oidc_client` | 6 | 客户端注册、列表、更新、停用、密钥轮换 |
-| `audit` | 5 | 看板、活动摘要、安全指标、安全报告、系统健康 |
-| `ops` | 1 | 会员总览 |
-| `security` | 2 | 查询锁定状态、手工解锁（账号或 IP）|
-| _根路径_ | 1 | `/health` 存活探针（不受限流约束） |
+| `/api/auth` | 21 | 注册、登录、管理后台登录、登出、全端登出、会话列表、邮箱验证与重发、密码重置、首次设密、MFA（5 个）、两个 provider 的 OAuth 入口与回调 |
+| `/api/rbac` | 17 | 角色与权限的增删查、双向授予、自身权限自查 |
+| `/api/oidc` | 12 | 发现文档、JWKS、authorize、token、userinfo、logout，以及客户端管理 API |
+| `/api/actors` | 9 | AI 主体注册、加密钥、吊销密钥、领挑战、认证、自省 |
+| `/api/me` | 7 | 本人资料、偏好、活动日志 |
+| `/api/users` | 7 | 管理员读取，以及账号状态与会员等级写入 |
+| `/api/audit` | 5 | 看板、活动摘要、安全指标、安全报告、系统健康 |
+| `/api/security` | 2 | 查询锁定状态、手工解锁（账号或 IP）|
+| `/api/bootstrap` | 1 | 用启动时的一次性令牌建第一个管理员 |
+| `/api/ops` | 1 | 会员总览 |
+| `/.well-known` | 1 | 根路径上的发现文档 |
+| `/health` | 1 | 存活探针（不受限流约束） |
 
 每一个端点都被集成测试跑到。典型流程：
 
@@ -185,8 +194,8 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 两层，分工不同，谁也替代不了谁。
 
 ```bash
-cargo test              # 单元测试 122 项，约 5 秒，零外部依赖
-cargo build && ./tests/integration.sh   # 25 组 242 项断言
+cargo test              # 单元测试 158 项，零外部依赖
+cargo build && ./tests/integration.sh   # 27 组 353 项断言
 ```
 
 **单元测试**管纯逻辑与一致性不变量：权限名与种子数据是否对得上、端点路径
@@ -260,7 +269,10 @@ src/
 schema.sql         表与字段定义 —— 权威来源
 initial_data.sql   角色、权限、种子账号；幂等，可重复执行
 tests/
+  conformance.rs   对照 schema 与源码断言架构不变式
   integration.sh   契约级测试套件
+  deployment_walkthrough.sh
+                   把 DEPLOYMENT.md 从空库执行到一个可用的管理员
   smtp_sink.py     零依赖收信端
   mock_oauth.py    零依赖的 Google / GitHub 替身
   totp.py          RFC 6238 验证码生成，已用 RFC 标准向量自校
