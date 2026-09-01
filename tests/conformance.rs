@@ -3003,6 +3003,67 @@ fn j16_section_references_resolve() {
     }
 }
 
+/// J17 · .env.example 必须与配置契约一一对应
+///
+/// 这是每个部署者复制的那一份，也是唯一一份「照抄就能起来」的配置。
+/// 加了新配置项却忘了写进去，部署者不会知道它存在；删了配置项却留在示例里，
+/// 部署者会照着填一个已经没人读的键。
+///
+/// 两个方向都查。当前 42 对 42。
+#[test]
+fn j17_env_example_matches_the_config_contract() {
+    let contract = read("contracts/configuration.yaml");
+    let mut in_contract: Vec<String> = contract
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            let rest = t.strip_prefix("- name:")?;
+            let name = rest.trim();
+            name.chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_')
+                .then(|| name.to_string())
+        })
+        .collect();
+
+    let example = read(".env.example");
+    let mut in_example: Vec<String> = example
+        .lines()
+        .filter_map(|l| {
+            let key = l.split('=').next()?;
+            (!key.is_empty()
+                && key.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                && l.contains('='))
+            .then(|| key.to_string())
+        })
+        .collect();
+
+    assert!(
+        in_contract.len() > 20 && in_example.len() > 20,
+        "契约 {} 项 / 示例 {} 项 —— 解析逻辑失效了",
+        in_contract.len(),
+        in_example.len()
+    );
+
+    in_contract.sort();
+    in_example.sort();
+    let missing: Vec<&String> = in_contract
+        .iter()
+        .filter(|k| !in_example.contains(k))
+        .collect();
+    let extra: Vec<&String> = in_example
+        .iter()
+        .filter(|k| !in_contract.contains(k))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "契约里有但 .env.example 里没有：{missing:?} —— 部署者不会知道这些配置项存在"
+    );
+    assert!(
+        extra.is_empty(),
+        ".env.example 里有但契约里没有：{extra:?} —— 部署者会填一个没人读的键"
+    );
+}
+
 /// 被路由 handler 签名引用到的请求/响应类型，及其 serde 字段名。
 fn request_response_types() -> Vec<(String, Vec<String>)> {
     let all = sources();
