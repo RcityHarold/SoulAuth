@@ -49,7 +49,21 @@ fn read(rel: &str) -> String {
     fs::read_to_string(&p).unwrap_or_else(|e| panic!("读不到 {}: {e}", p.display()))
 }
 
+/// schema.sql，去掉 `IF NOT EXISTS`。
+///
+/// 每条 DEFINE 都带 `IF NOT EXISTS`（compose 每次启动都会重导一遍，见 J13），
+/// 但下面所有解析器按 `DEFINE FIELD <名> ON <表>` 切词，多出来的三个词会把它们
+/// 整体顶偏一位。归一化放在这一处，解析器就不必各自认两种写法。
+/// 要看原文（例如校验 `IF NOT EXISTS` 本身）用 `schema_raw()`。
 fn schema() -> String {
+    schema_raw()
+        .replace("DEFINE TABLE IF NOT EXISTS ", "DEFINE TABLE ")
+        .replace("DEFINE FIELD IF NOT EXISTS ", "DEFINE FIELD ")
+        .replace("DEFINE INDEX IF NOT EXISTS ", "DEFINE INDEX ")
+        .replace("DEFINE ANALYZER IF NOT EXISTS ", "DEFINE ANALYZER ")
+}
+
+fn schema_raw() -> String {
     read("schema.sql")
 }
 
@@ -127,9 +141,7 @@ fn hits_any(needles: &[&str]) -> Vec<String> {
 }
 
 fn table_exists(name: &str) -> bool {
-    let s = schema();
-    s.contains(&format!("DEFINE TABLE {name} "))
-        || s.contains(&format!("DEFINE TABLE IF NOT EXISTS {name} "))
+    schema().contains(&format!("DEFINE TABLE {name} "))
 }
 
 fn field_exists(table: &str, field: &str) -> bool {
@@ -2715,6 +2727,99 @@ fn j12_documented_commands_use_current_cli() {
             "{f} 的第一条语句必须是 `OPTION IMPORT;` —— 少了它，\n  \
              `surreal import` 在 3.2+ 上会把 DEFINE 当普通查询执行并整份失败"
         );
+    }
+}
+
+/// J13 · 两个 SQL 文件必须可以重复导入
+///
+/// `docker-compose.yml` 里的 schema-init / seed-init 每次 `up` 都会重新导入
+/// 一遍，CI 还会在有数据的库上再导一次。只要有一条 `DEFINE` 漏了
+/// `IF NOT EXISTS`，第二次导入就会在 `already exists` 上整份失败，
+/// 而失败的是一次性服务 —— soulauth 依赖它 `service_completed_successfully`，
+/// 于是整个 compose 起不来。
+///
+/// 种子数据同理：必须全是 `UPSERT`。一条 `CREATE` 会在第二次导入时撞主键。
+#[test]
+fn j13_sql_files_are_reimportable() {
+    let bare: Vec<String> = schema_raw()
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| l.trim_start().starts_with("DEFINE "))
+        .filter(|(_, l)| !l.contains("IF NOT EXISTS"))
+        .map(|(i, l)| format!("schema.sql:{} {}", i + 1, l.trim()))
+        .collect();
+    assert!(
+        bare.is_empty(),
+        "{} 条 DEFINE 没带 `IF NOT EXISTS` —— 重导会在 `already exists` 上整份失败:\n  {}",
+        bare.len(),
+        bare.join("\n  ")
+    );
+
+    // 下界：确认上面那个筛子真的看到了 schema，而不是读了个空文件。
+    let defines = schema_raw()
+        .lines()
+        .filter(|l| l.trim_start().starts_with("DEFINE "))
+        .count();
+    assert!(
+        defines > 100,
+        "只数出 {defines} 条 DEFINE —— 解析逻辑失效了"
+    );
+
+    let creates: Vec<String> = seed()
+        .lines()
+        .enumerate()
+        .filter(|(_, l)| {
+            let t = l.trim_start();
+            t.starts_with("CREATE ") || t.starts_with("INSERT ")
+        })
+        .map(|(i, l)| format!("initial_data.sql:{} {}", i + 1, l.trim()))
+        .collect();
+    assert!(
+        creates.is_empty(),
+        "种子数据必须全用 UPSERT，否则重导会撞主键:\n  {}",
+        creates.join("\n  ")
+    );
+}
+
+/// J14 · README 上的测试数量必须是真的
+///
+/// 两份 README 的横幅写着「单元测试 N 项」。这个数字是手写的，
+/// 而它已经悄悄偏过一次：横幅停在 158（`#[test]` 的条数），
+/// 漏掉了 12 个 `#[tokio::test]`，真实值是 170。
+///
+/// 这类数字没人会主动去核，只能靠守卫盯着。
+#[test]
+fn j14_readme_test_counts_are_real() {
+    let actual: usize = sources()
+        .iter()
+        .map(|(_, b)| b.matches("#[test]").count() + b.matches("#[tokio::test]").count())
+        .sum();
+    assert!(actual > 50, "只数出 {actual} 个单测 —— 解析逻辑失效了");
+
+    for (doc, needle) in [
+        ("README.md", "unit tests"),
+        ("README.zh-CN.md", "单元测试 "),
+    ] {
+        let body = read(doc);
+        let claimed: Vec<usize> = body
+            .lines()
+            .filter(|l| l.contains(needle))
+            .filter_map(|l| {
+                let digits: String = l
+                    .chars()
+                    .skip_while(|c| !c.is_ascii_digit())
+                    .take_while(char::is_ascii_digit)
+                    .collect();
+                digits.parse().ok()
+            })
+            .collect();
+        assert!(
+            !claimed.is_empty(),
+            "{doc} 里找不到「{needle}」那句 —— 横幅改写过，这条守卫得跟着改"
+        );
+        for n in claimed {
+            assert_eq!(n, actual, "{doc} 声称单测 {n} 项，实际 {actual} 项");
+        }
     }
 }
 

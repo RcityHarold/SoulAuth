@@ -14,7 +14,7 @@ the machine-readable contract, and the operations pages.
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 paths / 84 operations · ~22k lines
-158 unit tests (no external dependencies) · 27 integration groups / 353 assertions
+170 unit tests (no external dependencies) · 27 integration groups / 353 assertions
 ```
 
 ![SoulAuth architecture](docs/figures/architecture.en.png)
@@ -235,7 +235,7 @@ surprises people during incident response.
 Two layers with different jobs. Neither substitutes for the other.
 
 ```bash
-cargo test              # 158 unit tests, no external dependencies
+cargo test              # 170 unit tests, no external dependencies
 cargo build && ./tests/integration.sh   # 27 groups, 353 assertions
 ```
 

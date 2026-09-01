@@ -186,13 +186,22 @@ jobs:
           curl -fsS http://localhost:8080/api/users -H "Authorization: Bearer $TOK" >/dev/null
           echo "引导出的管理员可访问受保护端点"
 
-      # 重跑一次必须仍然成功：schema-init 在已初始化的库上会被 `already exists`
-      # 顶回来，如果它没有先探测就导入，第二次 `up` 起就起不来了。
-      - name: 重启后仍然可用
+      # schema.sql 的每条 DEFINE 都带 IF NOT EXISTS、initial_data.sql 全是 UPSERT，
+      # 所以两个文件在有数据的库上重导应该是空操作。这一步就是在验证这一点：
+      # 一次性服务导完就退出了，`restart` 不会把它们带起来，必须显式再跑一遍。
+      - name: 重跑导入后数据仍然完好
         run: |
+          set -euo pipefail
+          docker compose run --rm --no-deps schema-init
+          docker compose run --rm --no-deps seed-init
           docker compose restart soulauth
           curl -fsS --retry 12 --retry-delay 5 --retry-all-errors \
             http://localhost:8080/health
+          # 重导没有把已有数据冲掉：第一步引导出来的管理员仍然能登录。
+          curl -fsS -X POST http://localhost:8080/api/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"ci@example.com","password":"CorrectHorse42!"}' \
+            | grep -q '"token"'
 
       - name: 失败时导出日志
         if: failure()
