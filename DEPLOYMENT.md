@@ -1,103 +1,113 @@
-# SoulAuth 部署指南
+# Deploying SoulAuth
 
-本文档说明如何把 SoulAuth 部署到生产环境。
+> 中文版本见 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。
 
-> **命名空间与数据库必须自始至终一致。** 全文统一用 `auth` / `main`
-> （即 `DATABASE_NAMESPACE` / `DATABASE_NAME` 的默认值）。若你改用别的名字，
-> **导入 SQL 时用的和应用启动时读到的必须是同一对** —— 这是最常见的部署失败原因：
-> schema 建在一处、应用连另一处，进程照常启动、`/health` 照常返回 ok，
-> 直到第一个真实请求才 500。应用现在会在启动时自检并拒绝启动，
-> 但前提仍然是你把这两处对齐。
+How to get SoulAuth running in production.
 
-本文件只保留**部署步骤本身**，因为 `tests/deployment_walkthrough.sh` 逐条执行的
-就是它 —— 它必须和脚本待在同一个仓库里，CI 才能在每次推送时把这份文档跑一遍。
+> **The namespace and database must match everywhere.** This file uses `auth` / `main`
+> throughout (the defaults for `DATABASE_NAMESPACE` / `DATABASE_NAME`). If you pick
+> different names, **the pair you import the SQL into must be the pair the process
+> connects with** — this is the most common way a deployment fails: the schema lands in
+> one place, the process connects to another, it starts fine, `/health` returns ok, and
+> the first real request 500s. The process now checks this at startup and refuses to
+> run, but it can only check what you gave it.
 
-其余内容都在文档站，且更细：
+This file keeps the **deployment steps themselves**, because `tests/deployment_walkthrough.sh`
+executes them one by one — it has to live in the same repository as the script for CI to
+run this document on every push.
 
-| 你要找的 | 去处 |
+Everything else is on the documentation site, in more detail:
+
+| What you want | Where |
 |---|---|
-| Docker Compose / systemd / 反向代理 / 版本升级 | [部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment) |
-| 上线前该改什么 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
-| 备份、密钥轮换、事故处理 | [运维与恢复](https://rcityharold.github.io/SoulAuth-docs/zh/operate/operations-and-recovery) |
-| 故障排除（13 类症状） | [故障排查](https://rcityharold.github.io/SoulAuth-docs/zh/operate/troubleshooting) |
-| 作为 OIDC Provider 接入 | [接入路径](https://rcityharold.github.io/SoulAuth-docs/zh/start/integration-path) |
-| 权限清单 | [管理](https://rcityharold.github.io/SoulAuth-docs/zh/reference/administration) |
+| Docker Compose / systemd / reverse proxy / upgrades | [Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment) |
+| What to change before going live | [Production checklist](https://rcityharold.github.io/SoulAuth-docs/operate/production-checklist) |
+| Backups, key rotation, incident response | [Operations and recovery](https://rcityharold.github.io/SoulAuth-docs/operate/operations-and-recovery) |
+| Troubleshooting (13 symptoms) | [Troubleshooting](https://rcityharold.github.io/SoulAuth-docs/operate/troubleshooting) |
+| Wiring it in as an OIDC provider | [Integration path](https://rcityharold.github.io/SoulAuth-docs/start/integration-path) |
+| The permission list | [Administration](https://rcityharold.github.io/SoulAuth-docs/reference/administration) |
 
 ---
 
-## 环境变量
+## Environment variables
 
-**必填只有四项**（缺任一进程起不来）：
+**Four are required** — the process will not start without them:
 
 ```env
-JWT_SECRET=<至少 32 字符>
+JWT_SECRET=<at least 32 characters>
 APP_URL=https://auth.example.com
 SMTP_HOST=smtp.example.com
 SMTP_FROM=noreply@example.com
 ```
 
-`APP_URL` 是对外地址，不是监听地址。它决定三件事，填错的后果在 §「作为 OIDC
-Provider」里展开：OIDC `issuer`、邮件里链接的前缀、cookie 是否带 `Secure`。
+`APP_URL` is the public address, not the listen address. It decides three things: the
+OIDC `issuer`, the prefix of links in outgoing mail, and whether cookies get `Secure`.
+What goes wrong when it's wrong is covered in
+[Configuration](https://rcityharold.github.io/SoulAuth-docs/reference/configuration),
+under "`APP_URL` is not the listen address".
 
-#### 生产环境额外必填（非环回 `APP_URL` 时强制）
+#### Also required in production (enforced when `APP_URL` is not loopback)
 
-`APP_URL` 的主机不是 `127.0.0.1` / `localhost` / `[::1]` 时，下面两项缺失
-**直接拒绝启动**：
+When the host in `APP_URL` is not `127.0.0.1` / `localhost` / `[::1]`, missing either of
+these is a **hard startup failure**:
 
 ```env
-OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # 或 _PEM 直接给内容
+OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # or _PEM for the contents
 MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
 ```
 
-为什么是拒绝启动而不是警告：**这两项的后果都不在启动时显现**。
+Why refuse to start rather than warn: **neither consequence shows up at startup.**
 
-- 缺签名私钥 → 每次启动临时生成一把，**进程一重启，已签发的 ID Token 全部
-  无法验签**；多副本部署里各副本各签各的，从第一天起就互不认账，
-  表现为随机登录失败。
-- 缺 MFA 密钥 → 从 `JWT_SECRET` 派生，**哪天轮换 `JWT_SECRET`，所有已存的
-  TOTP 密钥变成无法解密**，全体 MFA 用户被锁在门外。
+- No signing key → one is generated per process, so **every ID token already issued
+  stops verifying the moment you restart**. Across replicas each one signs with its own
+  key and they never agree, which shows up as random login failures from day one.
+- No MFA key → it's derived from `JWT_SECRET`, so **the day you rotate `JWT_SECRET`
+  every stored TOTP secret becomes undecryptable** and every MFA user is locked out.
 
-等它自己暴露的时候已经是线上事故。本地开发仍然放行——否则这道闸门会被人用
-环境变量绕过去。
+By the time either surfaces on its own you have an incident. Local development is still
+allowed through — otherwise people route around the gate with an environment variable.
 
-#### 数据库
+#### Database
 
 ```env
-DATABASE_URL=127.0.0.1:8000        # 默认 http://localhost:8000；写 https:// 即走 TLS
+DATABASE_URL=127.0.0.1:8000        # default http://localhost:8000; https:// switches to TLS
 DATABASE_USER=root
 DATABASE_PASS=root
-DATABASE_NAMESPACE=auth            # 默认 auth
-DATABASE_NAME=main                 # 默认 main
+DATABASE_NAMESPACE=auth            # default auth
+DATABASE_NAME=main                 # default main
 DATABASE_CONNECTION_TIMEOUT=30
 ```
 
-**关于数据库链路加密**：`DATABASE_URL` 带 `https://` 前缀即用 TLS 连接器，
-否则走明文。指向非环回地址却用明文时，启动日志会给出一条 WARN —— 那条链路上
-跑的是数据库口令、密码哈希与会话令牌。放在受信私有网段里可以接受，
-跨网段务必用 https。
+**On encrypting the database link**: an `https://` prefix on `DATABASE_URL` selects the
+TLS connector, anything else is plaintext. Pointing at a non-loopback address in
+plaintext logs a WARN at startup — what travels over that link is the database password,
+password hashes, and session tokens. Inside a trusted private segment that is a
+reasonable call; across segments, use https.
 
-> 早期版本无论写不写 `https://` 都只用明文连接器（scheme 会被剥掉后丢弃），
-> 且没有任何提示。若你此前配的是 `https://`，请确认数据库侧确实启用了 TLS。
+> Earlier versions used the plaintext connector whether or not you wrote `https://`
+> (the scheme was stripped and discarded), and said nothing about it. If you configured
+> `https://` back then, check that the database side really has TLS on.
 
-#### 网络与前端
+#### Network and frontend
 
 ```env
-BIND_ADDR=0.0.0.0:8080             # 监听地址，默认 0.0.0.0:8080
+BIND_ADDR=0.0.0.0:8080             # listen address, default 0.0.0.0:8080
 CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
-TRUST_PROXY_HEADERS=true           # 在反向代理后必须开，否则限流按代理 IP 计数
-LOGIN_PAGE_URL=                    # 默认 {APP_URL}/login
-VERIFY_EMAIL_PAGE_URL=             # 默认 {APP_URL}/verify-email
+TRUST_PROXY_HEADERS=true           # required behind a reverse proxy
+LOGIN_PAGE_URL=                    # default {APP_URL}/login
+VERIFY_EMAIL_PAGE_URL=             # default {APP_URL}/verify-email
 ```
 
-`CORS_ALLOWED_ORIGINS` 留空时回落到 `APP_URL` 自身。**不要**指望它是 `*`——
-那等于任何站点都能带着用户的 `Authorization` 头调用本服务。
+`CORS_ALLOWED_ORIGINS` falls back to `APP_URL` itself when empty. **Don't** expect `*` to
+work — that would let any site call this service with the user's `Authorization` header.
 
-`TRUST_PROXY_HEADERS` 在反向代理后**必须开**：不开的话所有请求的来源 IP 都是
-代理的 IP，限流与账号锁定会把全体用户算成同一个客户端——一个人被锁，所有人
-一起被锁。反过来，**没有代理时绝不能开**：那样客户端可以自己伪造
-`X-Forwarded-For` 绕过限流。
+`TRUST_PROXY_HEADERS` **must be on** behind a reverse proxy: without it every request
+carries the proxy's IP, so rate limiting and account lockout count all users as one
+client — one person gets locked out and everyone goes down with them. And it **must be
+off** when there is no proxy: otherwise a client can forge `X-Forwarded-For` and walk
+around the rate limiter.
 
-#### 第三方登录（可选，不配就是不启用）
+#### Social login (optional — leave it unset and it stays off)
 
 ```env
 GOOGLE_CLIENT_ID=
@@ -107,110 +117,120 @@ GITHUB_CLIENT_SECRET=
 OAUTH_REDIRECT_URL=https://auth.example.com/api/auth/callback
 ```
 
-只用邮箱密码登录的部署**不需要填任何一项**。未配置时
-`GET /api/auth/login/google` 返回 **501「本部署未启用」**，而不是拿假凭证去
-换令牌再吐一个看不懂的 OAuth 错误。
+A deployment that only does email and password **needs none of these**. Unconfigured,
+`GET /api/auth/login/google` returns **501 "not enabled in this deployment"** instead of
+taking fake credentials to the token endpoint and returning an OAuth error nobody can
+read.
 
-两条判定规则：
+Two rules decide what counts as configured:
 
-- **只配 id 不配 secret 算未配置**。只配一半比两个都不配更危险——它看起来是
-  开着的。
-- **配了任一 provider 就必须配 `OAUTH_REDIRECT_URL`**，否则拒绝启动。缺它时
-  重定向 URI 会被拼成残缺地址，登录走到第一步才失败。
+- **An id without a secret counts as unconfigured.** Half-configured is worse than not
+  configured at all, because it looks like it's on.
+- **Configure any provider and `OAUTH_REDIRECT_URL` becomes mandatory**, or startup
+  fails. Without it the redirect URI is assembled into a broken address and login dies
+  at the first hop.
 
-可选的端点覆盖（默认走官方端点）：
+Endpoint overrides are optional (the official endpoints are the default):
 
 ```env
 GOOGLE_OAUTH_BASE_URL=
-GITHUB_OAUTH_BASE_URL=https://ghe.example.com    # 自托管 GitHub Enterprise
+GITHUB_OAUTH_BASE_URL=https://ghe.example.com    # self-hosted GitHub Enterprise
 ```
 
-覆盖时沿用该 provider 真实的路径形状，只换根地址：Google 是
-`{base}/o/oauth2/v2/auth` · `/token` · `/oauth2/v2/userinfo`；GitHub 是
-`{base}/login/oauth/{authorize,access_token}` 与 `{base}/api/v3/user[/emails]`
-—— 后者正是 GitHub Enterprise 的约定。
+An override replaces the root and keeps that provider's real path shape: Google is
+`{base}/o/oauth2/v2/auth` · `/token` · `/oauth2/v2/userinfo`; GitHub is
+`{base}/login/oauth/{authorize,access_token}` plus `{base}/api/v3/user[/emails]` — which
+is exactly the GitHub Enterprise convention.
 
-**明文 http 只允许指向环回地址**，且不得带尾斜杠，否则拒绝启动：远端端点走
-明文等于把 `client_secret` 与访问令牌交给链路上的任何人。
+**Plaintext http is only accepted for loopback**, and never with a trailing slash;
+anything else refuses to start. A remote endpoint over plaintext hands your
+`client_secret` and access tokens to everyone on the path.
 
-#### 账号锁定
+#### Account lockout
 
 ```env
-LOCKOUT_MAX_ATTEMPTS=5             # 连续失败多少次后锁定，必须 ≥1
-LOCKOUT_DURATION_MINUTES=15        # 锁定多少分钟，必须 ≥1
-LOCKOUT_RESET_WINDOW_MINUTES=60    # 多久没有新失败就清零计数
-LOCKOUT_USER_ENABLED=true          # 账号维度
-LOCKOUT_IP_ENABLED=true            # IP 维度
+LOCKOUT_MAX_ATTEMPTS=5             # consecutive failures before locking, must be >= 1
+LOCKOUT_DURATION_MINUTES=15        # how long the lock lasts, must be >= 1
+LOCKOUT_RESET_WINDOW_MINUTES=60    # how long without a failure before the count resets
+LOCKOUT_USER_ENABLED=true          # per account
+LOCKOUT_IP_ENABLED=true            # per IP
 ```
 
-前两项为 0 会在启动时被拒绝：0 次尝试即锁定等于任何人一登录就被锁死，
-0 分钟锁定等于没锁 —— 这两种都不是「更严格」，是把服务配坏。
+Zero is rejected at startup for the first two: locking after zero attempts means everyone
+is locked out on their first login, and a zero-minute lock is no lock at all. Neither is
+"stricter" — both are a broken service.
 
-**手工解锁**（需 `soulauth:security.write`，种子里授予 admin 与 security_manager）：
+**Unlocking by hand** (needs `soulauth:security.write`, granted to admin and
+security_manager in the seed data):
 
 ```bash
-# 查状态
+# check
 curl "$APP_URL/api/security/lockout?scope=user&identifier=user%40example.com" \
   -H "Authorization: Bearer $TOKEN"
 # → {"is_locked":true,"remaining_lockout_seconds":812,…}
 
-# 解锁（scope 取 user 或 ip；解锁是幂等的，本来没锁会返回 unlocked:false）
+# unlock (scope is user or ip; unlocking is idempotent and returns unlocked:false
+# when nothing was locked)
 curl -X POST "$APP_URL/api/security/unlock" -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"scope":"user","identifier":"user@example.com"}'
 # → {"unlocked":true}
 ```
 
-用户维度的标识是**邮箱**：锁定计数在登录失败时按邮箱累加，那时还没有用户记录
-可言 —— 不存在的邮箱同样会被计数，否则「有没有留下锁定记录」本身就成了
-账号枚举信道。
+The identifier on the user side is the **email address**: the counter goes up on a failed
+login, at which point there may be no user record at all. Addresses that don't exist are
+counted too — otherwise "did this leave a lockout record" becomes an account enumeration
+channel.
 
-每一次解锁都会写一条 `lockout_cleared` 审计（包括本来就没锁的空操作）。
+Every unlock writes a `lockout_cleared` audit record, including the no-ops.
 
-#### 邮件
+#### Mail
 
 ```env
-SMTP_PORT=587                      # 默认 587
+SMTP_PORT=587                      # default 587
 SMTP_USERNAME=
 SMTP_PASSWORD=
-SMTP_INSECURE=false                # 仅本地测试用
-EMAIL_VERIFICATION_ENABLED=false   # 开启后注册需先验证邮箱
+SMTP_INSECURE=false                # local testing only
+EMAIL_VERIFICATION_ENABLED=false   # when on, registration requires a verified address
 ```
 
-**发信失败只记日志，不阻断请求。** 也就是说 SMTP 配错时，注册会成功而验证信
-永远收不到，日志之外没有任何提示。上线后请实际走一遍注册确认收得到信。
+**A failed send is logged, not propagated.** So with SMTP misconfigured, registration
+succeeds, the verification mail never arrives, and nothing outside the log says so. Walk
+through a real registration after you go live and confirm the mail lands.
 
-#### 其它
+#### Everything else
 
 ```env
-JWT_EXPIRATION=86400               # 会话与访问令牌有效期，秒，默认 1 天
+JWT_EXPIRATION=86400               # session and access token lifetime in seconds, default 1 day
 PASSWORD_MIN_LENGTH=12
-AUTH_SESSION_CACHE_TTL_SECONDS=5   # 0 = 每请求都校验会话
-PROXY_ENABLED=false                # 出站 OAuth 请求走代理
+AUTH_SESSION_CACHE_TTL_SECONDS=5   # 0 = validate the session on every request
+PROXY_ENABLED=false                # route outbound OAuth requests through a proxy
 PROXY_URL=
 ```
 
-`AUTH_SESSION_CACHE_TTL_SECONDS` 是**多副本下的吊销延迟上限**：本实例的登出 /
-改密 / 停用会立刻清缓存，其它副本最多滞后一个 TTL。设为 0 则吊销绝对即时，
-代价是每个请求多两次查询。
+`AUTH_SESSION_CACHE_TTL_SECONDS` is the **upper bound on revocation lag across
+replicas**: a logout, password change, or deactivation clears the cache on the instance
+that handled it immediately, and the others trail by at most one TTL. Set it to 0 and
+revocation is instant, at the cost of two extra queries per request.
 
 
 ---
 
-## 部署步骤
+## Deployment steps
 
-1. **启动 SurrealDB** 并确认可达：
+1. **Start SurrealDB** and confirm it answers:
    ```bash
    surreal start --bind 127.0.0.1:8000 --user root --pass "$DB_PASS" \
      surrealkv:///var/lib/surrealdb/soulauth.db
    curl -f http://127.0.0.1:8000/health && echo " SurrealDB OK"
    ```
 
-2. **准备环境变量**。四项必填，生产环境再加两项（见 §1）：
+2. **Set the environment.** Four required, plus two more in production (see
+   "Environment variables" above):
    ```bash
    export DATABASE_URL=127.0.0.1:8000
-   export DATABASE_NAMESPACE=auth      # 下一步导入时必须用同一个值
-   export DATABASE_NAME=main           # 同上
+   export DATABASE_NAMESPACE=auth      # the import in the next step must use this value
+   export DATABASE_NAME=main           # and this one
    export DATABASE_USER=root
    export DATABASE_PASS="$DB_PASS"
    export JWT_SECRET=$(openssl rand -hex 32)
@@ -221,8 +241,8 @@ PROXY_URL=
    export MFA_SECRET_ENCRYPTION_KEY=$(openssl rand -base64 32)
    ```
 
-3. **准备数据库**。注意这里直接复用上一步导出的变量，
-   保证导入目标与应用启动后连接的是同一个 ns/db：
+3. **Prepare the database.** This reuses the variables exported above on purpose, so the
+   import target and the pair the process connects to cannot drift apart:
    ```bash
    surreal import --endpoint "http://$DATABASE_URL" \
        --user "$DATABASE_USER" --pass "$DATABASE_PASS" \
@@ -233,68 +253,73 @@ PROXY_URL=
        --namespace "$DATABASE_NAMESPACE" --database "$DATABASE_NAME" initial_data.sql
    ```
 
-4. **构建应用程序**：
+   Both files are safe to re-run: every `DEFINE` carries `IF NOT EXISTS` and the seed
+   data is all `UPSERT`.
+
+4. **Build**:
    ```bash
    cargo build --release
    ```
 
-5. **启动应用程序**：
+5. **Run**:
    ```bash
    ./target/release/soulauth
    ```
 
-6. **验证部署**：
+6. **Check it came up**:
    ```bash
    curl http://localhost:8080/health
    # → {"status":"ok","uptime_seconds":12}
    ```
 
-7. **建立第一个管理员**：
+7. **Create the first administrator**:
 
-   全程不需要碰数据库。新实例在启动日志里打一枚一次性引导令牌（`WARN` 级别，
-   默认日志级别下可见），用它换第一个管理员：
+   You never touch the database for this. A fresh instance prints a single-use bootstrap
+   token in its startup log (at `WARN`, so it's visible at the default log level), and
+   you trade that for the first administrator:
 
    ```bash
-   # ① 从启动日志里取令牌
+   # ① take the token from the startup log
    #    WARN No administrator found. Bootstrap token for this process: 7f3a…
    #
-   #    多副本部署时用 SOULAUTH_BOOTSTRAP_TOKEN 固定它；设为空串则完全
-   #    关闭这条路径。
+   #    Across replicas, pin it with SOULAUTH_BOOTSTRAP_TOKEN; set that to an empty
+   #    string to close the path entirely.
 
-   # ② 用它建管理员。密码需满足策略：至少 12 个字符（PASSWORD_MIN_LENGTH），
-   #    且含大写 / 小写 / 数字 / 符号四类中的三类
+   # ② create the administrator. The password has to satisfy the policy: at least
+   #    12 characters (PASSWORD_MIN_LENGTH) and three of the four classes
+   #    upper / lower / digit / symbol
    curl -X POST http://localhost:8080/api/bootstrap/admin \
      -H 'Content-Type: application/json' \
      -d '{"token":"7f3a…","email":"admin@your-domain.com",
           "username":"admin","password":"CorrectHorse42!"}'
    # → {"user_id":"…","email":"admin@your-domain.com","is_admin":true}
 
-   # ③ 登录拿会话令牌（引导响应里不含令牌）
+   # ③ log in for a session token (the bootstrap response does not contain one)
    curl -X POST http://localhost:8080/api/auth/login \
      -H 'Content-Type: application/json' \
      -d '{"email":"admin@your-domain.com","password":"CorrectHorse42!"}'
 
-   # ④ 确认权限已生效
+   # ④ confirm the permissions took
    curl http://localhost:8080/api/auth/me -H "Authorization: Bearer <token>"
    # → "is_admin": true
    ```
 
-   这道门是一次性的：系统里一旦存在管理员，端点永久拒绝，且对「令牌错」与
-   「门已关」返回**逐字相同**的响应 —— 一枚失效令牌因此无法用来探测某个实例
-   是否已经初始化。
+   The door is single-use: once an administrator exists the endpoint refuses forever, and
+   it returns a **byte-identical** response for "wrong token" and "door already closed" —
+   so a dead token can't be used to probe whether an instance has been initialised.
 
-   令牌是**这个进程**的（日志原话 `for this process`）：重启一次就换一枚，
-   得回去看新的那行 `WARN`。
+   The token belongs to **that process** (the log says `for this process`): restart and
+   you get a new one, so go read the new `WARN` line.
 
-## 验证这份文档本身
+## Verifying this document
 
-`tests/deployment_walkthrough.sh` 会照上面 §3 的步骤 1-7 从零跑一遍，
-最后断言拿到一个 `is_admin: true` 的管理员：
+`tests/deployment_walkthrough.sh` runs steps 1–7 of "Deployment steps" above from an
+empty database and asserts it ends with an administrator whose `is_admin` is true:
 
 ```bash
 cargo build && ./tests/deployment_walkthrough.sh
 ```
 
-改动本文档的部署步骤后请一并跑它。参数名写错、ns/db 三处不一致这类问题，
-只有真正执行才会暴露。
-
+Run it whenever you change the steps here. A misspelled flag, or an ns/db pair that
+disagrees between the three places it appears, only shows up when something actually
+executes them.

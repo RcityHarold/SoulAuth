@@ -9,7 +9,7 @@ OPTION IMPORT;
 --
 -- 它关掉事件、live query、字段处理与结果输出 —— 导入本来就不需要这些。
 --
--- 不加的后果不是「慢一点」：Quickstart 第 2 步、DEPLOYMENT.md 第 2 步、
+-- 不加的后果不是「慢一点」：Quickstart 第 2 步、DEPLOYMENT.md 第 3 步、
 -- integration job、docker job 会同时断。这一条曾经在本机（3.0）全绿、在 CI
 -- 拉到的最新版（3.2.4）全红，差别仅仅是安装那天 latest 指向哪里；现在 CI 与
 -- docker-compose 都把版本钉死了，但文件本身对两代都成立才是根本的那道保险。

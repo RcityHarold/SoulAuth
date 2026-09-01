@@ -222,7 +222,7 @@ surprises people during incident response.
 ### Things that are deliberately not done
 
 - SoulAuth **does not terminate TLS**. Put it behind a reverse proxy; see
-  [DEPLOYMENT.md](DEPLOYMENT.md), section "反向代理与 TLS".
+  [Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment#reverse-proxy).
 - It performs **no DDL**. Schema changes go through `schema.sql` by hand, so the
   application account never needs schema privileges.
 - Mail delivery failures are logged, not surfaced to the caller. Registration
@@ -289,8 +289,9 @@ Two consequences that cost debugging time when missed:
   confidential client and add a BFF rather than falling back to a public client.
 
 Registration, the exact parameters a consumer needs, and three behaviours an
-integrator cannot discover without reading the source are documented in
-[DEPLOYMENT.md](DEPLOYMENT.md), section "作为 OIDC Provider 接入".
+integrator cannot discover without reading the source are documented under
+[Register a client](https://rcityharold.github.io/SoulAuth-docs/integrate/register-a-client) and
+[OIDC and clients](https://rcityharold.github.io/SoulAuth-docs/reference/oidc-and-clients).
 
 ---
 
@@ -300,9 +301,11 @@ Four variables are required: `JWT_SECRET`, `APP_URL`, `SMTP_HOST`, `SMTP_FROM`.
 Everything else has a default or is genuinely optional — including both OAuth
 providers.
 
-The full table, the production gates, reverse-proxy and multi-replica notes, and
-a troubleshooting index organised by *symptom that points the wrong way* live in
-[DEPLOYMENT.md](DEPLOYMENT.md).
+The full table and the production gates are in [DEPLOYMENT.md](DEPLOYMENT.md).
+Reverse-proxy and multi-replica notes, and a troubleshooting index organised by
+*symptom that points the wrong way*, are on the documentation site:
+[Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment) and
+[Troubleshooting](https://rcityharold.github.io/SoulAuth-docs/operate/troubleshooting).
 
 ---
 
@@ -329,7 +332,9 @@ tests/
   smtp_sink.py     zero-dependency SMTP receiver
   mock_oauth.py    zero-dependency Google/GitHub stand-in
   totp.py          RFC 6238 code generation, self-checked against the RFC vectors
-DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshooting
+DEPLOYMENT.md      deployment steps and the environment-variable reference
+DEPLOYMENT.zh-CN.md
+                   the same, in Chinese
 ```
 
 ---

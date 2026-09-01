@@ -2683,8 +2683,8 @@ fn j11_schemas_match_rust_types() {
 /// 这条守的是「照抄即失败」的命令。两次都发生过：
 ///
 /// - `surreal import --conn …` —— `--conn` 是 SurrealDB 2.x 之前的写法，3.x 上
-///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，OIDC_GUIDE.md 里那份复制
-///   又活了很久。
+///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，当时另一份 md 里的复制
+///   又活了很久（那份已删）。
 /// - schema.sql 缺 `OPTION IMPORT;` —— 3.0 上导得进，3.2 上整份导入失败且
 ///   一张表不留。本机与 CI 的差别仅仅是安装那天 latest 指向哪个版本。
 ///
@@ -2696,7 +2696,7 @@ fn j12_documented_commands_use_current_cli() {
         "README.md",
         "README.zh-CN.md",
         "DEPLOYMENT.md",
-        "OIDC_GUIDE.md",
+        "DEPLOYMENT.zh-CN.md",
     ];
     for doc in docs {
         let body = read(doc);
@@ -2819,6 +2819,186 @@ fn j14_readme_test_counts_are_real() {
         );
         for n in claimed {
             assert_eq!(n, actual, "{doc} 声称单测 {n} 项，实际 {actual} 项");
+        }
+    }
+}
+
+/// J15 · 中英两份部署文档的结构必须一致
+///
+/// DEPLOYMENT.md 是主版本，DEPLOYMENT.zh-CN.md 是同一份内容的中文。
+/// 两份分开维护，改了一边忘了另一边是迟早的事，而这种偏差没人会主动去核
+/// —— 除非有守卫盯着标题层级序列。
+///
+/// 只比结构不比字数：散文可以长短不同，章节的层级和顺序不行。
+/// 比对前要剥掉围栏代码块，否则 bash 注释里的 `# xxx` 会被当成一级标题。
+#[test]
+fn j15_deployment_docs_have_the_same_shape() {
+    fn shape(doc: &str) -> Vec<String> {
+        let body = read(doc);
+        let mut out = Vec::new();
+        let mut in_fence = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let t = line.trim_start();
+            if t.starts_with('#') {
+                out.push(t.chars().take_while(|c| *c == '#').collect());
+            }
+        }
+        out
+    }
+    let en = shape("DEPLOYMENT.md");
+    let zh = shape("DEPLOYMENT.zh-CN.md");
+    assert!(
+        en.len() > 5,
+        "只解析出 {} 个标题 —— 解析逻辑失效了",
+        en.len()
+    );
+    assert_eq!(
+        en,
+        zh,
+        "两份部署文档的标题层级对不上：EN {} 个 / ZH {} 个。\n           改了一边就要改另一边",
+        en.len(),
+        zh.len()
+    );
+
+    // 两份都必须指向对方，否则读者停在自己看不懂的那一份上。
+    assert!(
+        read("DEPLOYMENT.md").contains("DEPLOYMENT.zh-CN.md"),
+        "DEPLOYMENT.md 里没有指向中文版的链接"
+    );
+    assert!(
+        read("DEPLOYMENT.zh-CN.md").contains("](DEPLOYMENT.md)"),
+        "DEPLOYMENT.zh-CN.md 里没有指向英文版的链接"
+    );
+}
+
+/// J16 · 指向某一节的引用，那一节必须真的存在
+///
+/// DEPLOYMENT.md 从 864 行修剪到 300 行时，删掉的章节留下了四个指针：
+/// 文档自己有三处（`§1`、`§3`、`§「作为 OIDC Provider」`），README 英文版
+/// 有两处 `section "…"` —— 而且写的还是中文章节名。
+///
+/// 这类断链不会让任何东西失败，只会让读者扑空。
+#[test]
+fn j16_section_references_resolve() {
+    fn headings(doc: &str) -> Vec<String> {
+        let body = read(doc);
+        let mut out = Vec::new();
+        let mut in_fence = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let t = line.trim_start();
+            if t.starts_with('#') {
+                out.push(t.trim_start_matches('#').trim().to_string());
+            }
+        }
+        out
+    }
+
+    let deploy = headings("DEPLOYMENT.md");
+    let deploy_zh = headings("DEPLOYMENT.zh-CN.md");
+    assert!(!deploy.is_empty() && !deploy_zh.is_empty());
+
+    // ① `section "X"` —— README 指向 DEPLOYMENT.md 的某一节。
+    for doc in ["README.md", "README.zh-CN.md"] {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let Some(at) = line.find("section \"") else {
+                continue;
+            };
+            let rest = &line[at + 9..];
+            let Some(end) = rest.find('"') else { continue };
+            let name = &rest[..end];
+            assert!(
+                deploy.iter().any(|h| h == name) || deploy_zh.iter().any(|h| h == name),
+                "{doc}:{} 指向 `section \"{name}\"`，但两份部署文档里都没有这一节",
+                i + 1
+            );
+        }
+    }
+
+    // ② 仓库内 md 之间的链接必须指向真实存在的文件。
+    //
+    // 这条是上面两条的主动版：`section "X"` 与 `§「X」` 只在有人写出那种引用时
+    // 才生效，而文件链接每次改名都会被扫到。DEPLOYMENT.md 拆成中英两份时，
+    // 靠的就是它确认没有漏改。
+    let md_docs = [
+        "README.md",
+        "README.zh-CN.md",
+        "DEPLOYMENT.md",
+        "DEPLOYMENT.zh-CN.md",
+        "SECURITY.md",
+    ];
+    let mut checked = 0usize;
+    for doc in md_docs {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let mut from = 0usize;
+            while let Some(rel) = line[from..].find("](") {
+                let at = from + rel + 2;
+                let Some(end) = line[at..].find(')') else {
+                    break;
+                };
+                let target = &line[at..at + end];
+                from = at + end;
+                // 只看仓库内的 md 链接，跳过 http(s) 与页内锚点。
+                if !target.ends_with(".md") || target.contains("://") {
+                    continue;
+                }
+                let path = std::path::Path::new(target);
+                assert!(
+                    path.exists(),
+                    "{doc}:{} 链到 `{target}`，但这个文件不存在",
+                    i + 1
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 5, "只查了 {checked} 条 md 链接 —— 解析逻辑失效了");
+
+    // ③ `§「X」` —— 部署文档内部的自引用。
+    for (doc, hs) in [
+        ("DEPLOYMENT.md", &deploy),
+        ("DEPLOYMENT.zh-CN.md", &deploy_zh),
+    ] {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let Some(at) = line.find("§「") else {
+                continue;
+            };
+            let rest = &line[at + "§「".len()..];
+            let Some(end) = rest.find('」') else {
+                continue;
+            };
+            let name = &rest[..end];
+            assert!(
+                hs.iter().any(|h| h == name),
+                "{doc}:{} 指向 §「{name}」，但本文没有这一节",
+                i + 1
+            );
+        }
+        // 章节没有编号，`§1` / `§3` 这类引用一定是修剪后的残留。
+        for (i, line) in body.lines().enumerate() {
+            for n in 1..=9 {
+                assert!(
+                    !line.contains(&format!("§{n}")),
+                    "{doc}:{} 用了 `§{n}`，但本文的章节没有编号 —— 按标题名引用",
+                    i + 1
+                );
+            }
         }
     }
 }

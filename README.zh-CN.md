@@ -81,7 +81,7 @@ cargo run
 以及会话 cookie 是否带 `Secure`。
 
 一旦把 `APP_URL` 指向非环回地址，生产闸门就会生效——见
-[生产姿态](#生产姿态)与 [DEPLOYMENT.md](DEPLOYMENT.md)。
+[生产姿态](#生产姿态)与 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。
 
 系统没有默认账号。新实例在启动日志里打一枚一次性令牌（`WARN` 级别，默认日志级别
 下可见），用它建第一个管理员，全程不碰数据库：
@@ -204,8 +204,8 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 
 ### 刻意没做的事
 
-- **不终结 TLS**。生产部署请放在反向代理之后，见 [DEPLOYMENT.md](DEPLOYMENT.md)
-  的「反向代理与 TLS」一节。
+- **不终结 TLS**。生产部署请放在反向代理之后，见文档站
+  [部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment#反向代理配置)。
 - **不执行任何 DDL**。表结构变更一律手工执行 `schema.sql`，
   这样应用账号永远不需要 schema 权限。
 - **发信失败只记日志，不阻断请求**。SMTP 配错时注册照样成功，
@@ -264,7 +264,8 @@ cargo build && ./tests/integration.sh   # 27 组 353 项断言
   而不是退回 public 客户端了事。
 
 注册命令、接入方需要的确切参数，以及**三条不读源码就不可能知道的行为**，
-都写在 [DEPLOYMENT.md](DEPLOYMENT.md) 的「作为 OIDC Provider 接入」一节。
+都写在文档站的[注册客户端](https://rcityharold.github.io/SoulAuth-docs/zh/integrate/register-a-client)与
+[OIDC 与客户端](https://rcityharold.github.io/SoulAuth-docs/zh/reference/oidc-and-clients)。
 
 ---
 
@@ -273,8 +274,9 @@ cargo build && ./tests/integration.sh   # 27 组 353 项断言
 必填只有四项：`JWT_SECRET`、`APP_URL`、`SMTP_HOST`、`SMTP_FROM`。其余都有
 默认值或确实可选——**包括两个 OAuth provider**。
 
-完整清单、生产闸门、反向代理与多副本注意事项，以及一份按「症状指向错误方向」
-组织的故障排除索引，都在 [DEPLOYMENT.md](DEPLOYMENT.md)。
+完整清单与生产闸门在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。反向代理与
+多副本注意事项、以及一份按「症状指向错误方向」组织的故障排除索引，在文档站的
+[部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment)与[故障排查](https://rcityharold.github.io/SoulAuth-docs/zh/operate/troubleshooting)。
 
 ---
 
@@ -300,7 +302,9 @@ tests/
   smtp_sink.py     零依赖收信端
   mock_oauth.py    零依赖的 Google / GitHub 替身
   totp.py          RFC 6238 验证码生成，已用 RFC 标准向量自校
-DEPLOYMENT.md      运维：配置、升级、接入、故障排除
+DEPLOYMENT.md      部署步骤与环境变量参考（英文，主版本）
+DEPLOYMENT.zh-CN.md
+                   同上，中文
 ```
 
 ---
@@ -330,7 +334,8 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
 | 开放访问之前 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
 | 每个端点、参数与错误 | [API 参考](https://rcityharold.github.io/SoulAuth-docs/zh/reference/api-conventions) |
 
-部署步骤在 [DEPLOYMENT.md](DEPLOYMENT.md) —— 那份文件正是
+部署步骤在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md) —— 它和英文主版本
+`DEPLOYMENT.md` 是同一份内容，后者正是
 `tests/deployment_walkthrough.sh` 每次推送都要执行一遍的对象。
 
 ---

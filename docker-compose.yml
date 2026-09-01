@@ -59,7 +59,7 @@ services:
   # 一次性服务：把 schema 与种子数据导进去，成功后退出。
   #
   # 用 SurrealDB 官方镜像而不是在应用里做运行期 DDL —— 认证服务不应该拥有
-  # 改自己表结构的权限，那条边界在 DEPLOYMENT.md 里已经定了。
+  # 改自己表结构的权限，那条边界写在 README「刻意没做的事」里。
   # 两个一次性服务，各跑一条 surreal import 就退出。
   #
   # 为什么拆成两个而不是一个 shell 脚本：官方镜像是 distroless —— 没有 curl，
