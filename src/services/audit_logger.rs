@@ -5,16 +5,23 @@
 //! 但**全代码库没有任何地方写过它们** —— `log_user_activity` 只有 5 个调用点，
 //! 全在用户档案/偏好/账号状态那几个接口上。结果就是审计报表永远是空的。
 //!
-//! 这个模块负责在认证链路上补齐埋点。两条硬性约束：
+//! 这个模块负责在认证链路上补齐埋点。三条硬性约束：
 //!
-//! * **绝不影响主流程**：写入是 fire-and-forget，失败只打日志；
+//! * **绝不影响主流程**：`record` 不落库，只把事件投进队列就返回；
+//! * **绝不丢事件**：队列由一个专用写入任务消费，写失败会重试，
+//!   进程关闭时先把队列排空再退出（见 `flush`）；
 //! * **绝不记录凭据**：只记 action / 分类 / 状态 / IP / UA 和少量非敏感上下文。
+//!
+//! 这里以前是 `tokio::spawn` 一个一次性任务直接写库：写失败只打一行日志，
+//! 而进程一退出，还没跑起来的那些任务连日志都不会留。
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use chrono::Utc;
 use serde_json::json;
-use tracing::error;
+use tokio::sync::{mpsc, oneshot};
+use tracing::{error, warn};
 
 use crate::{
     models::user_activity::{ActivityCategory, ActivityStatus},
@@ -37,9 +44,27 @@ pub mod actions {
     pub const LOCKOUT_CLEARED: &str = "lockout_cleared";
 }
 
+/// 队列容量。
+///
+/// 满了不是丢事件，而是让 `record` 退化成「起一个任务等队列」——
+/// 也就是改动前的行为。给得宽一点，正常负载下走不到那条分支。
+const QUEUE_CAPACITY: usize = 4096;
+
+/// 单条事件的写入重试次数。数据库抖一下不该让事件消失。
+const WRITE_ATTEMPTS: u32 = 3;
+
+/// 关闭时等待队列排空的上限。超时宁可退出，也不能把进程挂在这里。
+const FLUSH_TIMEOUT: Duration = Duration::from_secs(5);
+
+enum Msg {
+    Event(Box<AuditEvent>),
+    /// 排空信号：写入任务处理到它时，说明它前面的事件都已落库。
+    Flush(oneshot::Sender<()>),
+}
+
 #[derive(Clone)]
 pub struct AuditLogger {
-    db: Arc<Database>,
+    tx: mpsc::Sender<Msg>,
 }
 
 /// 一条待写入的审计事件。
@@ -85,22 +110,91 @@ impl AuditEvent {
 }
 
 impl AuditLogger {
+    /// 建队列并起写入任务。写入任务与进程同生命周期。
     pub fn new(db: Arc<Database>) -> Self {
-        Self { db }
-    }
+        let (tx, mut rx) = mpsc::channel::<Msg>(QUEUE_CAPACITY);
 
-    /// 异步写入，不阻塞也不影响调用方。
-    pub fn record(&self, event: AuditEvent) {
-        let db = self.db.clone();
         tokio::spawn(async move {
-            if let Err(e) = write_event(&db, event).await {
-                error!("Failed to write audit event: {e}");
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    Msg::Event(event) => write_with_retry(&db, *event).await,
+                    // 排空信号按序到达：能收到它，就说明它前面排队的事件
+                    // 都已经写完了。回执发不出去只意味着等待方先走了。
+                    Msg::Flush(ack) => {
+                        let _ = ack.send(());
+                    }
+                }
             }
         });
+
+        Self { tx }
+    }
+
+    /// 记录一条事件。不落库，只投队列，因此不阻塞调用方。
+    pub fn record(&self, event: AuditEvent) {
+        let msg = Msg::Event(Box::new(event));
+        match self.tx.try_send(msg) {
+            Ok(()) => {}
+            Err(mpsc::error::TrySendError::Full(msg)) => {
+                // 队列满说明写入任务被数据库拖住了。这时**不丢**事件：
+                // 起一个任务去等位置，代价是这一条的顺序可能落到后面。
+                warn!("Audit queue is full; the writer is falling behind");
+                let tx = self.tx.clone();
+                tokio::spawn(async move {
+                    if tx.send(msg).await.is_err() {
+                        error!("Audit event dropped: the writer has stopped");
+                    }
+                });
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                error!("Audit event dropped: the writer has stopped");
+            }
+        }
+    }
+
+    /// 等队列里已排队的事件全部落库。
+    ///
+    /// 关闭流程在停止接受新请求之后调用它 —— 这一步是「进程退出不丢事件」
+    /// 的全部依据。超时就放弃等待：卡住不退出比丢几条事件更糟。
+    pub async fn flush(&self) {
+        let (ack, wait) = oneshot::channel();
+        if self.tx.send(Msg::Flush(ack)).await.is_err() {
+            return;
+        }
+        if tokio::time::timeout(FLUSH_TIMEOUT, wait).await.is_err() {
+            warn!("Audit queue did not drain within {FLUSH_TIMEOUT:?}");
+        }
     }
 }
 
-async fn write_event(db: &Database, event: AuditEvent) -> crate::error::Result<()> {
+/// 写一条事件，失败重试。
+///
+/// 重试的是数据库抖动这类瞬时故障。用尽仍失败才记日志 —— 那一行是最后的线索，
+/// 所以要带上 action，不能只有一句 "Failed to write audit event"。
+async fn write_with_retry(db: &Database, event: AuditEvent) {
+    let action = event.action;
+    let mut last_err = None;
+
+    for attempt in 1..=WRITE_ATTEMPTS {
+        match write_event(db, &event).await {
+            Ok(()) => return,
+            Err(e) => {
+                last_err = Some(e);
+                if attempt < WRITE_ATTEMPTS {
+                    tokio::time::sleep(Duration::from_millis(50 * u64::from(attempt))).await;
+                }
+            }
+        }
+    }
+
+    error!(
+        action,
+        "Failed to write audit event after {WRITE_ATTEMPTS} attempts: {}",
+        last_err.map(|e| e.to_string()).unwrap_or_default()
+    );
+}
+
+async fn write_event(db: &Database, event: &AuditEvent) -> crate::error::Result<()> {
     // user_id 是 `option<record<actor_identity>>`：没有对应主体时写 NONE。
     //
     // 审计归因到**身份根**而不是 user 行 —— 这也是 GA-06 要求的方向：

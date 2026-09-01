@@ -328,7 +328,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(Extension(app_state))
         .layer(Extension(auth_service))
         .layer(Extension(auth_cache))
-        .layer(Extension(audit_logger))
+        .layer(Extension(audit_logger.clone()))
         .layer(Extension(config.clone()))
         .layer(Extension(oidc_service))
         .layer(Extension(oidc_client_service))
@@ -342,7 +342,43 @@ async fn main() -> anyhow::Result<()> {
     info!("Server listening on {}", addr);
     axum::Server::bind(&addr)
         .serve(app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal())
         .await?;
 
+    // 停止接受新请求之后再排空审计队列。顺序不能反：先排空的话，
+    // 排空期间进来的请求又会往队列里塞新事件。
+    info!("Draining the audit queue");
+    audit_logger.flush().await;
+    info!("Shutdown complete");
+
     Ok(())
+}
+
+/// 等一个关闭信号。
+///
+/// 此前进程没有任何关闭处理：SIGTERM 直接终止，在途请求被拦腰打断，
+/// 排队中的审计事件也一并消失。容器编排、systemd、`docker compose down`
+/// 发的都是 SIGTERM，所以这不是边缘情况，是每次正常停机都会走的路径。
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl+C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        () = ctrl_c => info!("Received Ctrl+C, shutting down"),
+        () = terminate => info!("Received SIGTERM, shutting down"),
+    }
 }
