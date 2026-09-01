@@ -74,7 +74,9 @@ import_sql initial_data.sql
 step 5 "启动应用程序"
 ( cd "$ROOT"; RUST_LOG=soulauth=warn exec ./target/debug/soulauth ) > "$WORK/app.log" 2>&1 &
 AP_PID=$!; disown $AP_PID
-for i in $(seq 30); do curl -sSf -o /dev/null --max-time 2 "http://127.0.0.1:${AP}/health" 2>/dev/null && break; sleep 0.5; done
+# 等 90 秒而不是 15：首次访问会现场生成一把 2048 位 RSA 密钥，生成时间方差很大，
+# 共享 runner 上会比本机慢一个量级。
+for i in $(seq 180); do curl -sSf -o /dev/null --max-time 2 "http://127.0.0.1:${AP}/health" 2>/dev/null && break; sleep 0.5; done
 
 step 6 "验证部署 curl /health"
 H=$(curl -sSf --max-time 5 "http://127.0.0.1:${AP}/health" 2>/dev/null)

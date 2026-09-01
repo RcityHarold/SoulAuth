@@ -60,6 +60,17 @@ services:
   #
   # 用 SurrealDB 官方镜像而不是在应用里做运行期 DDL —— 认证服务不应该拥有
   # 改自己表结构的权限，那条边界在 DEPLOYMENT.md 里已经定了。
+  # 两个一次性服务，各跑一条 surreal import 就退出。
+  #
+  # 为什么拆成两个而不是一个 shell 脚本：官方镜像是 distroless —— 没有 curl，
+  # 也**没有 /bin/sh**。此前这里写的是 entrypoint: ["/bin/sh","-c"] 加一段带
+  # set -e、管道和 for 循环的脚本，容器起不来：
+  #   exec: "/bin/sh": stat /bin/sh: no such file or directory
+  # compose 里一个服务只能跑一条命令，所以两条 import 拆成两个服务串起来。
+  #
+  # 也不再需要「先探测再导入」：schema.sql 的 262 条 DEFINE 现在全带
+  # IF NOT EXISTS，重复导入是 OK 而不是 already exists；initial_data.sql 本来
+  # 就全是 UPSERT。两者都可以无条件重跑。
   schema-init:
     image: surrealdb/surrealdb:v3.2.4
     depends_on:
@@ -67,33 +78,31 @@ services:
         condition: service_healthy
     volumes:
       - ./schema.sql:/sql/schema.sql:ro
-      - ./initial_data.sql:/sql/initial_data.sql:ro
-    entrypoint: ["/bin/sh", "-c"]
     command:
-      # 先探测再导入。
-      #
-      # schema.sql 里 195 条 DEFINE 只有 8 条带 IF NOT EXISTS，在已经初始化过的
-      # 库上重跑会报 "already exists" 而退出非零 —— 而下游的
-      # service_completed_successfully 会因此让每次重启后的 soulauth 都起不来。
-      # 所以这里不能无条件导入。
-      #
-      # 判据用种子里的 role:admin，与应用启动时 ensure_schema_initialised 的
-      # 判据一致：它同时覆盖「schema 没导」与「导错了 ns/db」两种失败。
-      #
-      # 注意参数是 --endpoint 而不是 --conn：后者是 SurrealDB 2.x 之前的写法，
-      # 在 3.x 上会报一句没什么帮助的错。
-      - |
-        set -e
-        SQL="--endpoint http://surrealdb:8000 --user root --pass root --namespace auth --database main"
-        if echo 'SELECT VALUE id FROM role:admin;' \
-             | /surreal sql $$SQL --json 2>/dev/null | grep -q 'role:admin'; then
-          echo "schema already present in auth/main; skipping import"
-          exit 0
-        fi
-        for f in schema initial_data; do
-          /surreal import $$SQL "/sql/$${f}.sql"
-        done
-        echo "schema and seed data imported into auth/main"
+      - import
+      - --endpoint=http://surrealdb:8000
+      - --user=root
+      - --pass=root
+      - --namespace=auth
+      - --database=main
+      - /sql/schema.sql
+    restart: "no"
+
+  seed-init:
+    image: surrealdb/surrealdb:v3.2.4
+    depends_on:
+      schema-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./initial_data.sql:/sql/initial_data.sql:ro
+    command:
+      - import
+      - --endpoint=http://surrealdb:8000
+      - --user=root
+      - --pass=root
+      - --namespace=auth
+      - --database=main
+      - /sql/initial_data.sql
     restart: "no"
 
   soulauth:
@@ -101,7 +110,7 @@ services:
       context: .
       dockerfile: Dockerfile
     depends_on:
-      schema-init:
+      seed-init:
         condition: service_completed_successfully
     env_file:
       - .env

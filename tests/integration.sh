@@ -189,13 +189,23 @@ cleanup() {
 }
 trap cleanup EXIT
 
+# 就绪等待。
+#
+# 超时给到 90 秒而不是 20：应用的就绪探针打的是 /api/oidc/jwks，而首次访问它会
+# **现场生成一把 2048 位 RSA 密钥**（没配 OIDC_RSA_PRIVATE_KEY_PATH 时的开发行为，
+# 启动日志里那句 "generating an ephemeral RSA key" 就是它）。生成时间是找素数，
+# 本质随机，方差很大：本机空载约 5 秒，共享 runner 上偶尔超过 20 秒。
+#
+# 症状是 CI 间歇性 `exit 2`，而服务日志里什么错都没有 —— 因为根本不是错，
+# 是等得不够久。整套跑一次全程约 3 分钟，这里多等 70 秒的代价可以忽略。
+WAIT_TIMEOUT_TICKS="${WAIT_TIMEOUT_TICKS:-180}"   # ×0.5s = 90 秒
 wait_for() {
     local url="$1" name="$2" n=0
-    while [ $n -lt 40 ]; do
+    while [ $n -lt "$WAIT_TIMEOUT_TICKS" ]; do
         [ "$(curl -sS -o /dev/null -w '%{http_code}' --max-time 2 "$url" 2>/dev/null)" != "000" ] && return 0
         sleep 0.5; n=$((n+1))
     done
-    printf '%s %s 未能在 20 秒内就绪\n' "$(c_red ✗)" "$name"; return 1
+    printf '%s %s 未能在 %s 秒内就绪\n' "$(c_red ✗)" "$name" "$((WAIT_TIMEOUT_TICKS / 2))"; return 1
 }
 
 start_db() {

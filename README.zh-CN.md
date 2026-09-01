@@ -13,7 +13,7 @@
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
-单元测试 158 项（零外部依赖）· 集成测试 27 组 353 项断言
+单元测试 170 项（零外部依赖）· 集成测试 27 组 353 项断言
 ```
 
 ![SoulAuth 架构](docs/figures/architecture.zh.png)
@@ -218,7 +218,7 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 两层，分工不同，谁也替代不了谁。
 
 ```bash
-cargo test              # 单元测试 158 项，零外部依赖
+cargo test              # 单元测试 170 项，零外部依赖
 cargo build && ./tests/integration.sh   # 27 组 353 项断言
 ```
 
