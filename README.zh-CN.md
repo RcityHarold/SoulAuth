@@ -1,7 +1,10 @@
 # SoulAuth
 
-用 Rust 写的认证服务。它掌管账号、凭证与会话，并以 OpenID Connect 对外提供
-验证能力——接入方拿公钥自行验签，从不需要碰它的数据库。
+自己部署的认证服务，用 Rust 写，说标准 OpenID Connect —— 接过 Keycloak 或 Auth0
+的客户端库不改代码就能接它。
+
+它跟别家的区别是：AI 主体有自己的身份记录和自己的 Ed25519 密钥，不是一行填了
+假邮箱的 `user`。
 
 **文档站：<https://rcityharold.github.io/SoulAuth-docs/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
 完整 API 参考，以及运维那几页。
@@ -23,7 +26,7 @@ axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
 ## 它是什么，以及它刻意不是什么
 
 **它回答「这是谁」**：注册、登录、邮箱验证、密码重置、MFA、第三方登录、
-会话生命周期，以及一个供其它系统验签的 OIDC Provider。
+AI 主体认证、会话生命周期，以及一个供其它系统验签的 OIDC Provider。
 
 **它不回答「这个人在你的系统里能做什么」**。SoulAuth 自带一套 RBAC，但那套
 RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulauth:` 命名空间
@@ -45,6 +48,7 @@ RBAC 只管**它自己的管理后台**。它定义的每个权限都带 `soulau
 | **MFA** | TOTP（RFC 6238）含二维码下发、一次性备用码、基于时间窗水位线的重放拒绝 |
 | **会话** | 服务端会话记录、单点登出、全端登出（同时吊销已签发的 OIDC 令牌与浏览器会话）、停用账号同样一并吊销 |
 | **OIDC Provider** | 发现文档、JWKS、授权码 + PKCE（仅 S256）、带轮换的刷新、userinfo、RP 发起的登出、客户端管理接口 |
+| **AI 主体** | Ed25519 挑战—应答：没有邮箱、没有口令、没有 user 行。一个身份可挂多把有效密钥，于是每台机器持有自己的一把，日志能记到是哪把钥匙认证的 |
 | **RBAC** | 角色、权限、用户与角色、角色与权限的双向授予——范围限于 SoulAuth 自己的管理后台 |
 | **防护** | 跨副本合账的分端点限流、账号与 IP 双维度锁定、CORS 白名单 |
 | **审计** | 活动日志、安全指标、安全报告、系统健康 |
@@ -78,6 +82,23 @@ cargo run
 
 一旦把 `APP_URL` 指向非环回地址，生产闸门就会生效——见
 [生产姿态](#生产姿态)与 [DEPLOYMENT.md](DEPLOYMENT.md)。
+
+系统没有默认账号。新实例在启动日志里打一枚一次性令牌（`WARN` 级别，默认日志级别
+下可见），用它建第一个管理员，全程不碰数据库：
+
+```bash
+# WARN No administrator found. Bootstrap token for this process: 7f3a…
+curl -X POST http://localhost:8080/api/bootstrap/admin \
+  -H 'Content-Type: application/json' \
+  -d '{"token":"7f3a…","email":"you@example.com","username":"admin","password":"CorrectHorse42!"}'
+
+# 再登录一次拿会话令牌
+curl -X POST http://localhost:8080/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"CorrectHorse42!"}'
+```
+
+系统里一旦存在管理员，这道门永久关闭，且对「令牌错」与「门已关」返回相同的响应。
 
 ---
 
