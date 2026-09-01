@@ -108,7 +108,7 @@ impl AuditService {
             })?;
 
         // 时间列以字符串投影出来（SDK 无法把 Value::Datetime 转成 serde_json::Value）。
-        let duration_rows: Vec<Value> = duration_result.take(0).unwrap_or_default();
+        let duration_rows = take_rows(&mut duration_result, "lockout durations")?;
         let spans: Vec<i64> = duration_rows
             .iter()
             .filter_map(|r| {
@@ -170,7 +170,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let ip_rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let ip_rows = take_rows(&mut result, "lockout IP counts")?;
 
         // 先把窗口内所有仍在锁定中的 IP 一次取回来。
         //
@@ -191,7 +191,7 @@ impl AuditService {
                     error!("Failed to load locked IPs: {}", e);
                     AuthError::DatabaseError("Query execution failed".to_string())
                 })?;
-            r.take(0).unwrap_or_default()
+            take_rows(&mut r, "currently locked IPs")?
         };
         let locked: std::collections::HashSet<String> = locked_ips
             .iter()
@@ -227,7 +227,14 @@ impl AuditService {
         // 2. Login attempts from unusual locations
         // 3. Multiple account access attempts
 
-        let query = "SELECT ip_address, user_id, action, count() as count, math::min(timestamp) as first_seen, math::max(timestamp) as last_seen FROM user_activity WHERE timestamp >= $start_time AND (action = 'login_failed' OR action = 'permission_denied') GROUP BY ip_address, user_id, action ORDER BY count DESC LIMIT 50";
+        // `user_id` 必须投影成字符串。它是 `record<actor_identity>`，SDK 转不成
+        // `serde_json::Value`，整个结果集会解析失败 —— 而这个函数同时喂给
+        // `/api/audit/security-report` 与 `/security-metrics` 两个端点。
+        //
+        // 这条以前被 `.take(0).unwrap_or_default()` 吞掉，两个端点一直返回
+        // 200 加一份空的可疑活动列表。同文件里 `get_top_active_users` 的同类
+        // 查询从一开始就写的是 `type::string(user_id)`，只有这里漏了。
+        let query = "SELECT ip_address, type::string(user_id) AS user_id, action, count() as count, math::min(timestamp) as first_seen, math::max(timestamp) as last_seen FROM user_activity WHERE timestamp >= $start_time AND (action = 'login_failed' OR action = 'permission_denied') GROUP BY ip_address, user_id, action ORDER BY count DESC LIMIT 50";
 
         let mut result = self
             .db
@@ -241,7 +248,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let activity_rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let activity_rows = take_rows(&mut result, "suspicious activities")?;
 
         let mut suspicious = Vec::new();
         for r in &activity_rows {
@@ -290,7 +297,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let rows = take_rows(&mut result, "activity categories")?;
         let categories: Vec<(String, i64)> = rows
             .iter()
             .map(|r| (row::str_field(r, "category"), row::i64_field(r, "count")))
@@ -329,7 +336,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let rows = take_rows(&mut result, "activity statuses")?;
         let statuses: Vec<(String, i64)> = rows
             .iter()
             .map(|r| (row::str_field(r, "status"), row::i64_field(r, "count")))
@@ -370,7 +377,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let rows = take_rows(&mut result, "top users")?;
 
         let mut compact_rows: Vec<(String, i64, i64)> = Vec::new();
         let mut user_keys: Vec<String> = Vec::new();
@@ -421,7 +428,7 @@ impl AuditService {
                     AuthError::DatabaseError("Query execution failed".to_string())
                 })?;
 
-            let user_rows: Vec<Value> = user_result.take(0).unwrap_or_default();
+            let user_rows = take_rows(&mut user_result, "user activity")?;
             for row in user_rows {
                 let obj = match row {
                     Value::Object(o) => o,
@@ -489,7 +496,7 @@ impl AuditService {
                 AuthError::DatabaseError("Query execution failed".to_string())
             })?;
 
-        let hourly_rows: Vec<Value> = result.take(0).unwrap_or_default();
+        let hourly_rows = take_rows(&mut result, "hourly activity")?;
         let hourly_data: Vec<(i32, i64)> = hourly_rows
             .iter()
             .map(|r| (row::i64_field(r, "hour") as i32, row::i64_field(r, "count")))
@@ -738,6 +745,21 @@ impl AuditService {
             "Low".to_string()
         }
     }
+}
+
+/// 取结果集的第 0 组；反序列化失败**上抛**，不当成空数据。
+///
+/// 这个文件里原先一律写 `.take(0).unwrap_or_default()`：查询本身成功、行解析
+/// 失败时接口照样 200，看板一片空白 —— 监控分不出「这段时间没有事件」和
+/// 「这次读取失败了」。下面那段注释记着这个坑真的发生过一次。
+fn take_rows(
+    result: &mut surrealdb::IndexedResults,
+    what: &str,
+) -> ApiResult<Vec<serde_json::Value>> {
+    result.take(0).map_err(|e| {
+        error!("Failed to read {what}: {e}");
+        AuthError::DatabaseError("Query result could not be read".to_string())
+    })
 }
 
 /// SurrealDB 返回的每一行都是**对象**，不是元组。

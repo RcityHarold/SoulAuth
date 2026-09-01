@@ -13,7 +13,7 @@
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
-单元测试 170 项（零外部依赖）· 集成测试 27 组 353 项断言
+单元测试 179 项（零外部依赖）· 集成测试 27 组 353 项断言
 ```
 
 ![SoulAuth 架构](docs/figures/architecture.zh.png)
@@ -218,7 +218,7 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 两层，分工不同，谁也替代不了谁。
 
 ```bash
-cargo test              # 单元测试 170 项，零外部依赖
+cargo test              # 单元测试 179 项，零外部依赖
 cargo build && ./tests/integration.sh   # 27 组 353 项断言
 ```
 
@@ -311,10 +311,14 @@ DEPLOYMENT.zh-CN.md
 
 ## 已知限制
 
+- **一致性测试里有 10 条不变式尚未成立。** 它们标了 `#[ignore]` 而不是删掉，
+  每条都注明属于哪个 Stage，`cargo test --test conformance -- --ignored` 会列出全部。
+  覆盖的是身份、凭证、审计与领域仓储隔离。
 - **不含前端。** SoulAuth 是纯 API。邮件链接与 OAuth 后的重定向都指向
   `APP_URL` 下的路径——`/verify-email`、`/reset-password/{token}`、`/login`、
-  `/oauth/callback`、`/initialize-password`。后三个是写死的路径，
-  前两个可覆盖。
+  `/oauth/callback`、`/initialize-password`。前三个可覆盖
+  （`VERIFY_EMAIL_PAGE_URL`、`RESET_PASSWORD_PAGE_URL`、`LOGIN_PAGE_URL`），
+  后两个是写死的路径。
 - `GET /api/me/profile` 与 `/api/me/preferences` 在对应的 `POST` 建立记录之前
   返回 404，而不是空对象。
 - 注册接口在邮箱重复时返回 409，可用于探测某个邮箱是否已注册；而密码重置

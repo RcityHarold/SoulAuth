@@ -465,3 +465,23 @@ DEFINE FIELD IF NOT EXISTS consumed ON ai_actor_challenge TYPE bool DEFAULT fals
 
 DEFINE INDEX IF NOT EXISTS ai_actor_challenge_nonce_idx ON ai_actor_challenge COLUMNS nonce UNIQUE;
 DEFINE INDEX IF NOT EXISTS ai_actor_challenge_expiry_idx ON ai_actor_challenge COLUMNS expires_at;
+
+-- 首个管理员的引导闸门。
+--
+-- 只有一行，record id 固定为 `bootstrap_claim:singleton`。存在即表示这道门
+-- 已被某个请求抢到。抢占用 `CREATE`：SurrealDB 对已存在的 record id 直接报
+-- `already exists`，所以「检查 + 占用」是一条语句、一次原子操作。
+--
+-- 引导流程后续任何一步失败都会把这一行删掉，让运维可以重来 —— 否则实例会卡在
+-- 「没有管理员，而门已经关死」的状态。
+DEFINE TABLE IF NOT EXISTS bootstrap_claim SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS claimed_at ON bootstrap_claim TYPE datetime;
+DEFINE FIELD IF NOT EXISTS email ON bootstrap_claim TYPE string;
+-- claiming    : 账号还在建
+-- role_pending: 账号建好了，但授予 admin 失败 —— 带同一枚令牌、同一个邮箱
+--               重试会认这一行，直接给 user_id 补授角色
+-- done        : 引导完成
+DEFINE FIELD IF NOT EXISTS stage ON bootstrap_claim TYPE string DEFAULT 'claiming';
+-- 只在 role_pending 时有值。恢复时**只认这个 id**，绝不按邮箱去认领一个已存在的
+-- 账号 —— 注册是开放的，按邮箱认领等于让人抢注 admin@… 白捡管理员。
+DEFINE FIELD IF NOT EXISTS user_id ON bootstrap_claim TYPE option<string>;

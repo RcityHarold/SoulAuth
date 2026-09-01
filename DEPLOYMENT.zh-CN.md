@@ -45,8 +45,12 @@ SMTP_FROM=noreply@example.com
 
 #### 生产环境额外必填（非环回 `APP_URL` 时强制）
 
-`APP_URL` 的主机不是 `127.0.0.1` / `localhost` / `[::1]` 时，下面两项缺失
-**直接拒绝启动**：
+`APP_URL` 的主机不是 `127.0.0.1` / `localhost` / `[::1]` 时，**`APP_URL` 本身必须是
+https** —— 明文会让会话 cookie 掉 `Secure`、邮件里的链接走明文，并且 OIDC `issuer`
+违反 Discovery 规范，按规范校验的接入方会直接拒绝。TLS 请在 SoulAuth 前面终结，
+这里填对外那个 https 地址。
+
+在此之上，下面两项缺失**直接拒绝启动**：
 
 ```env
 OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # 或 _PEM 直接给内容
@@ -91,10 +95,15 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 TRUST_PROXY_HEADERS=true           # 在反向代理后必须开，否则限流按代理 IP 计数
 LOGIN_PAGE_URL=                    # 默认 {APP_URL}/login
 VERIFY_EMAIL_PAGE_URL=             # 默认 {APP_URL}/verify-email
+RESET_PASSWORD_PAGE_URL=           # 默认 {APP_URL}/reset-password
 ```
 
-`CORS_ALLOWED_ORIGINS` 留空时回落到 `APP_URL` 自身。**不要**指望它是 `*`——
+`CORS_ALLOWED_ORIGINS` 留空时回落到 `APP_URL` 自身。填 `*` 会在启动时被拒绝 ——
 那等于任何站点都能带着用户的 `Authorization` 头调用本服务。
+
+三个页面地址是邮件链接与登录后跳转的落点。前端不在 `APP_URL` 上时才需要配。
+重置令牌以**路径段**的形式追加在 `RESET_PASSWORD_PAGE_URL` 后面（`{页面}/{令牌}`），
+验证令牌走的是查询参数（`{页面}?token=...`）。
 
 `TRUST_PROXY_HEADERS` 在反向代理后**必须开**：不开的话所有请求的来源 IP 都是
 代理的 IP，限流与账号锁定会把全体用户算成同一个客户端——一个人被锁，所有人
@@ -120,7 +129,9 @@ OAUTH_REDIRECT_URL=https://auth.example.com/api/auth/callback
 - **只配 id 不配 secret 算未配置**。只配一半比两个都不配更危险——它看起来是
   开着的。
 - **配了任一 provider 就必须配 `OAUTH_REDIRECT_URL`**，否则拒绝启动。缺它时
-  重定向 URI 会被拼成残缺地址，登录走到第一步才失败。
+  重定向 URI 会被拼成残缺地址，登录走到第一步才失败。它的判据与下面的端点覆盖
+  相同：必须是绝对的 https URL，明文 http 只允许精确指向环回地址 —— 远端明文回调
+  等于把授权码放在链路上裸奔。
 
 可选的端点覆盖（默认走官方端点）：
 

@@ -87,6 +87,27 @@ pub enum AuthError {
 
     #[error("Unauthorized: {0}")]
     Unauthorized(String),
+
+    /// 账号或 IP 被暴力破解防护锁定。
+    ///
+    /// 单列一个变体是因为它要带 `locked_until_seconds` —— 契约里写着
+    /// 「仅 `account_locked` 携带」，客户端拿它显示倒计时。塞进 `message`
+    /// 让人用正则去抠更糟。
+    #[error("{message}")]
+    AccountLocked {
+        message: String,
+        /// 与 `LockoutCheckResult::remaining_lockout_seconds` 同型。
+        /// `None` 序列化成 `null`，与收口前的响应体逐字一致。
+        locked_until_seconds: Option<i64>,
+    },
+
+    /// 依赖的组件暂时不可用，重试可能成功。
+    ///
+    /// 与 `DatabaseError` 的区别在语义而不在成因：这条告诉调用方「等一下再来」，
+    /// 那条是「这次请求本身出了问题」。登录路径上的锁定检查失败走这里 ——
+    /// 它既不能放行（等于在数据库抖动窗口内关掉暴力破解防护），也不该报 500。
+    #[error("Service unavailable: {0}")]
+    ServiceUnavailable(String),
 }
 
 impl From<reqwest::Error> for AuthError {
@@ -144,6 +165,8 @@ impl AuthError {
             AuthError::BadRequest(_) => "bad_request",
             AuthError::NotConfigured(_) => "not_configured",
             AuthError::Unauthorized(_) => "unauthorized",
+            AuthError::AccountLocked { .. } => "account_locked",
+            AuthError::ServiceUnavailable(_) => "service_unavailable",
         }
     }
 
@@ -175,6 +198,8 @@ impl AuthError {
             | AuthError::ValidationError(_)
             | AuthError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AuthError::NotConfigured(_) => StatusCode::NOT_IMPLEMENTED,
+            AuthError::AccountLocked { .. } => StatusCode::TOO_MANY_REQUESTS,
+            AuthError::ServiceUnavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
         }
     }
 
@@ -190,7 +215,9 @@ impl AuthError {
             | AuthError::Forbidden(msg)
             | AuthError::BadRequest(msg)
             | AuthError::NotConfigured(msg)
-            | AuthError::Unauthorized(msg) => msg.clone(),
+            | AuthError::Unauthorized(msg)
+            | AuthError::ServiceUnavailable(msg) => msg.clone(),
+            AuthError::AccountLocked { message, .. } => message.clone(),
             other => other.to_string(),
         }
     }
@@ -205,6 +232,13 @@ impl AuthError {
             AuthError::MissingPermission(p) => {
                 vec![("required_permission", serde_json::Value::String(p.clone()))]
             }
+            AuthError::AccountLocked {
+                locked_until_seconds,
+                ..
+            } => vec![(
+                "locked_until_seconds",
+                serde_json::json!(locked_until_seconds),
+            )],
             _ => Vec::new(),
         }
     }

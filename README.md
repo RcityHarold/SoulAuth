@@ -14,7 +14,7 @@ the machine-readable contract, and the operations pages.
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 paths / 84 operations · ~22k lines
-170 unit tests (no external dependencies) · 27 integration groups / 353 assertions
+179 unit tests (no external dependencies) · 27 integration groups / 353 assertions
 ```
 
 ![SoulAuth architecture](docs/figures/architecture.en.png)
@@ -235,7 +235,7 @@ surprises people during incident response.
 Two layers with different jobs. Neither substitutes for the other.
 
 ```bash
-cargo test              # 170 unit tests, no external dependencies
+cargo test              # 179 unit tests, no external dependencies
 cargo build && ./tests/integration.sh   # 27 groups, 353 assertions
 ```
 
@@ -341,10 +341,15 @@ DEPLOYMENT.zh-CN.md
 
 ## Known limitations
 
+- **The conformance suite carries 10 invariants that do not hold yet.** They are
+  `#[ignore]`d rather than deleted, each labelled with the stage it belongs to, and
+  `cargo test --test conformance -- --ignored` prints the list. They cover identity,
+  credentials, audit and repository separation.
 - **No front-end.** SoulAuth is an API. Mail links and post-OAuth redirects
   point at paths under `APP_URL` — `/verify-email`, `/reset-password/{token}`,
-  `/login`, `/oauth/callback`, `/initialize-password`. The last three are fixed
-  paths; the others are overridable.
+  `/login`, `/oauth/callback`, `/initialize-password`. The first three are
+  overridable (`VERIFY_EMAIL_PAGE_URL`, `RESET_PASSWORD_PAGE_URL`,
+  `LOGIN_PAGE_URL`); the last two are fixed paths.
 - `GET /api/me/profile` and `/api/me/preferences` return 404 before the
   corresponding `POST` creates the record, rather than an empty object.
 - Registration returns 409 on a duplicate address, which allows probing whether

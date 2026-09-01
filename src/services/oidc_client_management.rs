@@ -159,6 +159,24 @@ impl OidcClientService {
     }
 
     // 获取客户端列表
+    /// 活跃客户端总数 —— 与 `list_clients` 的 `WHERE` 保持同一个判据。
+    ///
+    /// 路由层以前拿 `clients.len()` 当 `total`。那是**当前这一页**的条数：
+    /// 120 个客户端、每页 50，第一页报 50、第三页报 20，分页 UI 永远算不出
+    /// 总页数。审计与活动那几个分页端点一直是真的 `count()` 查询，只有这里没有。
+    pub async fn count_clients(&self) -> Result<i32> {
+        let sql = "SELECT count() AS count FROM oidc_client WHERE is_active = true GROUP ALL";
+        let rows: Vec<serde_json::Value> = self
+            .db
+            .query_take0_vec_no_bind("oidc_client_count", sql)
+            .await?;
+        Ok(rows
+            .first()
+            .and_then(|row| row.get("count"))
+            .and_then(|c| c.as_i64())
+            .unwrap_or(0) as i32)
+    }
+
     pub async fn list_clients(
         &self,
         limit: Option<i32>,

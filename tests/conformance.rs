@@ -2037,6 +2037,28 @@ fn j6_error_shape_is_uniform() {
         }
     }
 
+    // 1b. 路由层不得再自己组装 `(StatusCode, Json<..>)` 当错误返回。
+    //
+    // `routes/auth.rs` 曾经有 11 个 handler 这么写：状态码手抄一遍、错误码取
+    // `AuthError::code()`、文案再覆写一遍 —— 两份映射并排放着。响应体形状有
+    // 下面第 3 条守着，状态码映射却没人守，改一处漏一处只是时间问题。
+    // 现在全部收进 `AuthError`，这条断言防止它再长回来。
+    for (file, body) in sources() {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        assert!(
+            !production.contains("(StatusCode, Json<serde_json::Value>)"),
+            "{file} 自己组装 `(StatusCode, Json)` 当错误返回 —— \
+             状态码与错误码会分成两份映射。改成返回 AuthError；\
+             要带补充字段就加变体，让 `AuthError::details()` 挂上去。"
+        );
+    }
+
     // 2. 两个权限宏必须产出同一个错误。分叉过一次，不能再分叉第二次。
     let mw = read("src/utils/permission_middleware.rs");
     assert!(
@@ -2076,6 +2098,7 @@ fn j6_error_shape_is_uniform() {
 
     let mut ad_hoc = Vec::new();
     let mut checked = 0usize;
+    let mut sources_with_error_bodies: Vec<String> = Vec::new();
     for (file, body) in sources() {
         let production = match body.find("#[cfg(test)]") {
             Some(i) => &body[..i],
@@ -2107,8 +2130,15 @@ fn j6_error_shape_is_uniform() {
                 continue;
             }
             checked += 1;
+            if !sources_with_error_bodies.contains(&file) {
+                sources_with_error_bodies.push(file.clone());
+            }
 
-            // 统一信封的两种合法写法，以及 OIDC 的 RFC 形状。
+            // 统一信封的合法写法，以及 OIDC 的 RFC 形状。
+            //
+            // `"error": code` 这一支是 `routes/auth.rs` 那套手工组装留下的；
+            // 那批已经收进 `AuthError`（见上面 1b），留着是因为别处还可能
+            // 用同样的模板写法，删掉会把这条判据变窄。
             let templated = block.contains("\"error\": code")
                 || block.contains("\"error\": error")
                 || block.contains("\"error\": self.code()");
@@ -2140,10 +2170,19 @@ fn j6_error_shape_is_uniform() {
             }
         }
     }
-    assert!(
-        checked >= 5,
-        "只扫到 {checked} 个错误体 —— 取值逻辑坏了，断言等于空转"
-    );
+    // 下界不写死数字，而是点名那几个**必然存在**的来源。
+    //
+    // 原先写的是 `checked >= 5`，校准依据是当时 `routes/auth.rs` 里那一批手工
+    // 错误体。它们被收进 `AuthError` 之后（见上面 1b），合法的自造错误体只剩
+    // 三个：OIDC 的两处 RFC 6749 §5.2，和限流中间件那一处。数字下界于是跟着
+    // 重构漂移，而它本来要守的根本不是数量，是「提取逻辑还认得出错误体吗」。
+    for must in ["routes/oidc.rs", "utils/rate_limit_middleware.rs"] {
+        assert!(
+            sources_with_error_bodies.iter().any(|f| f == must),
+            "{must} 里的错误体一个都没扫到（全仓共扫到 {checked} 个）—— \
+             取值逻辑坏了，断言等于空转"
+        );
+    }
     assert!(
         ad_hoc.is_empty(),
         "错误体形状与契约不符：\n{}",

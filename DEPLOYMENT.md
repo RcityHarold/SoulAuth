@@ -48,8 +48,13 @@ under "`APP_URL` is not the listen address".
 
 #### Also required in production (enforced when `APP_URL` is not loopback)
 
-When the host in `APP_URL` is not `127.0.0.1` / `localhost` / `[::1]`, missing either of
-these is a **hard startup failure**:
+When the host in `APP_URL` is not `127.0.0.1` / `localhost` / `[::1]`, **`APP_URL` itself
+must be https** — plaintext there costs the session cookie its `Secure` flag, sends mail
+links unencrypted, and produces an OIDC `issuer` that violates the Discovery spec, which
+conforming relying parties reject. Terminate TLS in front of SoulAuth and put the public
+https address here.
+
+On top of that, missing either of these is a **hard startup failure**:
 
 ```env
 OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # or _PEM for the contents
@@ -96,10 +101,16 @@ CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 TRUST_PROXY_HEADERS=true           # required behind a reverse proxy
 LOGIN_PAGE_URL=                    # default {APP_URL}/login
 VERIFY_EMAIL_PAGE_URL=             # default {APP_URL}/verify-email
+RESET_PASSWORD_PAGE_URL=           # default {APP_URL}/reset-password
 ```
 
-`CORS_ALLOWED_ORIGINS` falls back to `APP_URL` itself when empty. **Don't** expect `*` to
-work — that would let any site call this service with the user's `Authorization` header.
+`CORS_ALLOWED_ORIGINS` falls back to `APP_URL` itself when empty. `*` is rejected at
+startup — it would let any site call this service with the user's `Authorization` header.
+
+The three page URLs are where mail links and post-login redirects land. Set them when
+your frontend lives somewhere other than `APP_URL`. The reset token is appended to
+`RESET_PASSWORD_PAGE_URL` as a path segment (`{page}/{token}`); the verification token
+goes on as a query parameter (`{page}?token=...`).
 
 `TRUST_PROXY_HEADERS` **must be on** behind a reverse proxy: without it every request
 carries the proxy's IP, so rate limiting and account lockout count all users as one
@@ -128,7 +139,9 @@ Two rules decide what counts as configured:
   configured at all, because it looks like it's on.
 - **Configure any provider and `OAUTH_REDIRECT_URL` becomes mandatory**, or startup
   fails. Without it the redirect URI is assembled into a broken address and login dies
-  at the first hop.
+  at the first hop. It follows the same rule as the endpoint overrides below: an
+  absolute https URL, or plaintext http only for an exact loopback host — a remote
+  plaintext callback puts the authorization code on the wire in the clear.
 
 Endpoint overrides are optional (the official endpoints are the default):
 

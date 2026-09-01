@@ -134,6 +134,24 @@ fn github_endpoints(base: Option<&str>) -> (String, String, String, String) {
     }
 }
 
+/// 把 URL 里的 `user:password@` 换成 `***@`，其余原样返回。
+///
+/// 代理地址常常带凭据，而这条日志是 info 级别 —— 会进日志收集、进工单附件。
+/// 解析失败（不是 URL）时返回一个不含原文的占位串：宁可少一条线索，
+/// 也不能把可能带口令的字符串原样打出去。
+fn redact_credentials(url: &str) -> String {
+    let Some((scheme, rest)) = url.split_once("://") else {
+        return "<malformed proxy url>".to_string();
+    };
+    // authority 到第一个 '/'、'?' 或 '#' 为止。
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    match authority.rsplit_once('@') {
+        Some((_creds, host)) => format!("{scheme}://***@{host}{tail}"),
+        None => url.to_string(),
+    }
+}
+
 impl OAuthService {
     pub fn new(config: Config) -> Result<Self> {
         let base = |v: &Option<String>| {
@@ -232,9 +250,18 @@ impl OAuthService {
 
         if self.config.proxy_enabled {
             if let Some(proxy_url) = &self.config.proxy_url {
-                let proxy_url = proxy_url.replace("https://", "http://"); // 强制使用 http 协议
-                info!("Using proxy: {}", proxy_url);
-                client_builder = client_builder.proxy(Proxy::all(&proxy_url).map_err(|e| {
+                // 这里以前做两件错事：
+                //
+                //   let proxy_url = proxy_url.replace("https://", "http://");
+                //   info!("Using proxy: {}", proxy_url);
+                //
+                // 一是把运维配的 https 代理**降级成明文**（而且是子串替换，
+                // 不限于 scheme 位置）；二是把完整 PROXY_URL 打进日志，
+                // 而代理地址里常常带 `user:password@`。
+                //
+                // 现在原样使用运维给的 scheme，日志只打脱敏后的地址。
+                info!("Using proxy: {}", redact_credentials(proxy_url));
+                client_builder = client_builder.proxy(Proxy::all(proxy_url).map_err(|e| {
                     AuthError::OAuthError(format!("Failed to create proxy: {}", e))
                 })?);
             }
@@ -516,5 +543,30 @@ mod tests {
             .expect("auth url");
 
         assert!(url.contains("state=eyJhbGciOiJIUzI1NiJ9.state.sig"));
+    }
+
+    use super::redact_credentials;
+
+    #[test]
+    fn proxy_credentials_never_reach_the_log() {
+        assert_eq!(
+            redact_credentials("http://user:pass@proxy.example:3128"),
+            "http://***@proxy.example:3128"
+        );
+        assert_eq!(
+            redact_credentials("https://user:pass@proxy.example:3128/path?q=1"),
+            "https://***@proxy.example:3128/path?q=1"
+        );
+        // `@` 出现在路径里不算凭据，authority 段没有 `@` 就原样返回。
+        assert_eq!(
+            redact_credentials("http://proxy.example:3128/a@b"),
+            "http://proxy.example:3128/a@b"
+        );
+        assert_eq!(
+            redact_credentials("http://proxy.example:3128"),
+            "http://proxy.example:3128"
+        );
+        // 解析不出来时宁可什么都不打，也不能把可能带口令的原文吐出去。
+        assert_eq!(redact_credentials("not a url"), "<malformed proxy url>");
     }
 }

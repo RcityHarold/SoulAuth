@@ -184,6 +184,11 @@ groups:
         default: "derived from APP_URL"
         description: "Landing page for verification links."
         description_zh: "验证链接落点。"
+      - name: RESET_PASSWORD_PAGE_URL
+        required: false
+        default: "derived from APP_URL"
+        description: "Landing page for password reset links. The token is appended as a path segment."
+        description_zh: "密码重置链接落点。令牌以路径段的形式追加在后面。"
   - id: federation
     note: "All optional. With no provider configured, the corresponding endpoints return 501."
     note_zh: "全部可选。一个 provider 都不配时，对应端点返回 501。"

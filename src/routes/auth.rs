@@ -3,7 +3,7 @@ use std::{future::Future, net::SocketAddr, sync::Arc};
 use axum::{
     extract::{ConnectInfo, Path, Query, TypedHeader},
     headers::{authorization::Bearer, Authorization},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue},
     response::IntoResponse,
     routing::{get, post},
     Extension, Json, Router,
@@ -117,16 +117,6 @@ pub(crate) fn request_context(
 
 /// 错误响应体。
 ///
-/// 形状与 `AuthError::into_response` 逐字一致：`error` 是**稳定的机器可读码**，
-/// `message` 是可以改措辞的人话。
-///
-/// 这几个 handler 没走 `AuthError`（它们要在同一个函数里混合 401/403/409 且
-/// 带自己的审计埋点），所以形状只能靠这里手工对齐 —— `tests/conformance.rs::j6`
-/// 静态守住两边不分叉。
-fn error_body(code: &str, message: &str) -> Json<serde_json::Value> {
-    Json(json!({ "error": code, "message": message }))
-}
-
 /// 执行锁定检查；数据库鉴权态过期时先重连再试一次。
 ///
 /// 与旧实现的关键区别：重试后仍失败**不再放行**。登录本来就要读写数据库，
@@ -135,7 +125,7 @@ async fn run_lockout_check_with_reauth<C, CFut, R, RFut>(
     scope: &str,
     check: C,
     reauth: R,
-) -> std::result::Result<LockoutCheckResult, (StatusCode, Json<serde_json::Value>)>
+) -> std::result::Result<LockoutCheckResult, AuthError>
 where
     C: Fn() -> CFut,
     CFut: Future<Output = Result<LockoutCheckResult>>,
@@ -154,7 +144,9 @@ where
                     "{} lockout check failed after reauth: {:?}",
                     scope, retry_err
                 );
-                Err(service_unavailable())
+                Err(AuthError::ServiceUnavailable(
+                    "Please retry in a moment".to_string(),
+                ))
             }
         },
         Err(reauth_err) => {
@@ -162,7 +154,9 @@ where
                 "{} lockout check failed while reauthing: {:?}",
                 scope, reauth_err
             );
-            Err(service_unavailable())
+            Err(AuthError::ServiceUnavailable(
+                "Please retry in a moment".to_string(),
+            ))
         }
     }
 }
@@ -179,26 +173,15 @@ fn failure_reason(error: &AuthError) -> &'static str {
     }
 }
 
-fn service_unavailable() -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        error_body("service_unavailable", "Please retry in a moment"),
-    )
-}
-
 /// 账号/IP 被锁定时的 429。
 ///
-/// `error` / `message` 与全站同形；`locked_until_seconds` 是本错误**已文档化的
-/// 补充字段** —— 客户端需要它才能显示倒计时，塞进 `message` 让人正则去抠更糟。
-fn locked_response(result: &LockoutCheckResult) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        StatusCode::TOO_MANY_REQUESTS,
-        Json(json!({
-            "error": "account_locked",
-            "message": result.message,
-            "locked_until_seconds": result.remaining_lockout_seconds
-        })),
-    )
+/// `locked_until_seconds` 由 `AuthError::details()` 统一挂上 —— 契约里写着
+/// 「仅 `account_locked` 携带」，这里只负责把值填进去。
+fn locked_response(result: &LockoutCheckResult) -> AuthError {
+    AuthError::AccountLocked {
+        message: result.message.clone(),
+        locked_until_seconds: result.remaining_lockout_seconds,
+    }
 }
 
 pub fn router() -> Router {
@@ -262,33 +245,14 @@ async fn register(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<CreateUserRequest>,
-) -> std::result::Result<Json<AuthResponse>, (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<Json<AuthResponse>, AuthError> {
     let ctx = request_context(&addr, &headers, &config);
 
-    let (result, _session_key) = auth_service.register(req, &ctx).await.map_err(|e| {
+    // 这里原本重写了一遍状态码与文案。码取的是 `e.code()`，状态码却是手抄的
+    // —— 两份映射并排放着，改一处漏一处只是时间问题。现在直接把 `AuthError`
+    // 交出去，状态码、码、文案全部由 `error.rs` 那一份决定。
+    let (result, _session_key) = auth_service.register(req, &ctx).await.inspect_err(|e| {
         error!("Registration failed: {:?}", e);
-        // 码统一取 `AuthError::code()`，与走 IntoResponse 的端点同源；
-        // 这里只覆写面向人的措辞。
-        let (status, message) = match &e {
-            AuthError::EmailExists => {
-                (StatusCode::CONFLICT, "Email already registered".to_string())
-            }
-            AuthError::UsernameExists => (
-                StatusCode::CONFLICT,
-                "Username already registered".to_string(),
-            ),
-            AuthError::ValidationError(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            AuthError::DatabaseError(_) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Internal server error".to_string(),
-            ),
-            _ => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Registration failed".to_string(),
-            ),
-        };
-
-        (status, error_body(e.code(), &message))
     })?;
 
     Ok(Json(result))
@@ -303,7 +267,7 @@ async fn login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<axum::response::Response, AuthError> {
     let ctx = request_context(&addr, &headers, &config);
     let (outcome, session_key) =
         perform_login(&auth_service, &app_state, &audit, &db, &req, &ctx).await?;
@@ -319,7 +283,7 @@ async fn admin_login(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<LoginRequest>,
-) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<axum::response::Response, AuthError> {
     let ctx = request_context(&addr, &headers, &config);
     let (outcome, session_key) =
         perform_login(&auth_service, &app_state, &audit, &db, &req, &ctx).await?;
@@ -340,16 +304,13 @@ fn login_response(
     config: &Config,
     outcome: LoginResponse,
     session_key: Option<&str>,
-) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<axum::response::Response, AuthError> {
     let session_cookie = match (&outcome, session_key) {
         (LoginResponse::Authenticated(auth), Some(session_key)) => Some(
             create_browser_session_token(&auth.user.id, session_key, &config.jwt_secret).map_err(
                 |e| {
                     error!("Failed to create browser session token: {:?}", e);
-                    (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        error_body("internal_error", "Failed to establish session"),
-                    )
+                    AuthError::ServerError("Failed to establish session".to_string())
                 },
             )?,
         ),
@@ -368,10 +329,7 @@ fn login_response(
         );
         let value = HeaderValue::from_str(&cookie).map_err(|e| {
             error!("Invalid session cookie: {e}");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                error_body("internal_error", "Failed to establish session"),
-            )
+            AuthError::ServerError("Failed to establish session".to_string())
         })?;
         response.headers_mut().append(header::SET_COOKIE, value);
     }
@@ -382,22 +340,15 @@ fn login_response(
 async fn ensure_admin_console_access(
     db: Arc<Database>,
     user_id: &str,
-) -> std::result::Result<(), (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<(), AuthError> {
     let allowed = is_admin_console_user(db, user_id).await.map_err(|e| {
         error!("Admin permission check failed after login: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            error_body("internal_error", "Failed to verify admin permissions"),
-        )
+        AuthError::ServerError("Failed to verify admin permissions".to_string())
     })?;
 
     if !allowed {
-        return Err((
-            StatusCode::FORBIDDEN,
-            error_body(
-                "forbidden",
-                "Current account does not have admin console access",
-            ),
+        return Err(AuthError::Forbidden(
+            "Current account does not have admin console access".to_string(),
         ));
     }
 
@@ -412,7 +363,7 @@ async fn perform_login(
     db: &Arc<Database>,
     req: &LoginRequest,
     ctx: &RequestContext,
-) -> std::result::Result<(LoginResponse, Option<String>), (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<(LoginResponse, Option<String>), AuthError> {
     ensure_not_locked_out(app_state, &req.email, &ctx.ip_address).await?;
 
     let outcome = auth_service
@@ -437,23 +388,13 @@ async fn perform_login(
                 .with_details(json!({ "reason": failure_reason(&e) })),
             );
 
-            // 「用户不存在」对外与「口令错」同码同文案，避免账号枚举。
-            let code = match e {
-                AuthError::UserNotFound => AuthError::InvalidCredentials.code(),
-                ref other => other.code(),
-            };
-            let (status, message) = match e {
-                AuthError::InvalidCredentials | AuthError::UserNotFound => {
-                    (StatusCode::UNAUTHORIZED, "Invalid email or password")
-                }
-                AuthError::EmailNotVerified => (StatusCode::FORBIDDEN, "Email not verified"),
-                AuthError::AccountSuspended => (StatusCode::FORBIDDEN, "Account suspended"),
-                AuthError::AccountInactive => (StatusCode::FORBIDDEN, "Account inactive"),
-                AuthError::AccountDeleted => (StatusCode::FORBIDDEN, "Account deleted"),
-                _ => (StatusCode::INTERNAL_SERVER_ERROR, "Login failed"),
-            };
-
-            (status, error_body(code, message))
+            // 「用户不存在」对外与「口令错」变成同一个错误，避免账号枚举。
+            // 这是本函数唯一需要**改写**错误的地方；其余变体的状态码与文案
+            // 一律由 `AuthError` 那一份映射决定，不在这里抄第二遍。
+            match e {
+                AuthError::UserNotFound => AuthError::InvalidCredentials,
+                other => other,
+            }
         })?;
 
     Ok(match outcome {
@@ -532,7 +473,7 @@ async fn ensure_not_locked_out(
     app_state: &Arc<AppState>,
     email: &str,
     ip: &str,
-) -> std::result::Result<(), (StatusCode, Json<serde_json::Value>)> {
+) -> std::result::Result<(), AuthError> {
     let ip_lockout = run_lockout_check_with_reauth(
         "ip lockout",
         || app_state.lockout_service.check_ip_lockout(ip),
@@ -694,14 +635,9 @@ async fn mfa_login_verify(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<MfaLoginVerifyRequest>,
-) -> std::result::Result<axum::response::Response, (StatusCode, Json<serde_json::Value>)> {
-    let challenge =
-        decode_mfa_challenge_token(&request.temp_token, &config.jwt_secret).map_err(|_| {
-            (
-                StatusCode::UNAUTHORIZED,
-                error_body("invalid_token", "Invalid or expired MFA token"),
-            )
-        })?;
+) -> std::result::Result<axum::response::Response, AuthError> {
+    let challenge = decode_mfa_challenge_token(&request.temp_token, &config.jwt_secret)
+        .map_err(|_| AuthError::TokenError("Invalid or expired MFA token".to_string()))?;
 
     let ctx = request_context(&addr, &headers, &config);
     ensure_not_locked_out(&app_state, &challenge.email, &ctx.ip_address).await?;
@@ -720,21 +656,14 @@ async fn mfa_login_verify(
                 .await
         }
         (None, None) => {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                error_body(
-                    "validation_error",
-                    "Either totp_code or backup_code is required",
-                ),
+            return Err(AuthError::ValidationError(
+                "Either totp_code or backup_code is required".to_string(),
             ))
         }
     }
     .map_err(|e| {
         error!("MFA verification failed: {:?}", e);
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            error_body("internal_error", "MFA verification failed"),
-        )
+        AuthError::ServerError("MFA verification failed".to_string())
     })?;
 
     if !verification.verified {
@@ -750,10 +679,7 @@ async fn mfa_login_verify(
             .with_user(challenge.user_id.clone()),
         );
         warn!("MFA verification rejected for {}", challenge.email);
-        return Err((
-            StatusCode::UNAUTHORIZED,
-            error_body("invalid_credentials", "Invalid verification code"),
-        ));
+        return Err(AuthError::InvalidCredentials);
     }
 
     if request.admin {
@@ -761,18 +687,11 @@ async fn mfa_login_verify(
             .await
             .map_err(|e| {
                 error!("Admin permission check failed after MFA: {:?}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    error_body("internal_error", "Failed to verify admin permissions"),
-                )
+                AuthError::ServerError("Failed to verify admin permissions".to_string())
             })?;
         if !allowed {
-            return Err((
-                StatusCode::FORBIDDEN,
-                error_body(
-                    "forbidden",
-                    "Current account does not have admin console access",
-                ),
+            return Err(AuthError::Forbidden(
+                "Current account does not have admin console access".to_string(),
             ));
         }
     }
@@ -780,15 +699,8 @@ async fn mfa_login_verify(
     let issued = auth_service
         .complete_mfa_login(&challenge.user_id, &ctx)
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             error!("Failed to complete MFA login: {:?}", e);
-            let status = match e {
-                AuthError::AccountSuspended
-                | AuthError::AccountInactive
-                | AuthError::AccountDeleted => StatusCode::FORBIDDEN,
-                _ => StatusCode::INTERNAL_SERVER_ERROR,
-            };
-            (status, error_body(e.code(), "Login failed"))
         })?;
 
     // 走完两步才清零。

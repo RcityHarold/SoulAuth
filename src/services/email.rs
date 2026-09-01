@@ -133,7 +133,17 @@ impl EmailService {
             .parse::<Mailbox>()
             .map_err(|e| AuthError::ServerError(format!("Invalid to address: {}", e)))?;
 
-        let reset_link = format!("{}/reset-password/{}", self.config.app_url, token);
+        // 页面地址可覆盖，令牌仍然走路径段。
+        //
+        // 没有跟验证信统一成 `?token=`：那会让所有已经按
+        // `/reset-password/:token` 建好路由的前端在升级后全部 404。
+        // 默认值 `{app_url}/reset-password` 拼出来与改动前逐字相同。
+        let page = self.config.reset_password_page_url();
+        let reset_link = format!(
+            "{}/{}",
+            page.trim_end_matches('/'),
+            urlencoding::encode(token)
+        );
 
         let email = Message::builder()
             .from(from_address)
