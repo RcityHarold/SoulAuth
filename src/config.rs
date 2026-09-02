@@ -79,6 +79,19 @@ pub struct Config {
     /// MFA TOTP 密钥的加密密钥（base64 编码的 32 字节）。
     /// 不配置时从 `jwt_secret` 派生，并在启动时告警。
     pub mfa_encryption_key: Option<String>,
+    /// 本副本的审计链标识。
+    ///
+    /// 审计哈希链按**副本**分：seq 由写入进程在内存里递增，多副本各写各的链。
+    /// 两个副本用同一个 chain_id 会撞唯一索引，后来的那个副本每一条审计事件
+    /// 都写不进去。默认值是 `BIND_ADDR`，只够本地单进程用；对外提供服务时
+    /// **必须显式设置**，否则拒绝启动。
+    pub instance_id: Option<String>,
+    /// 审计 checkpoint 的 Ed25519 签名私钥（base64 的 32 字节种子）。
+    ///
+    /// 与 `jwt_secret`、`mfa_encryption_key` 是三把不同的钥匙，**不从任何一把派生**：
+    /// 共用一把意味着轮换其中一个用途会连带作废另外两个，而审计完整性恰恰
+    /// 最不该被顺手轮换破坏。
+    pub audit_integrity_key: Option<String>,
     /// 前端登录页地址。`/api/oidc/authorize` 在用户未登录时跳到这里。
     /// 不配置时默认 `{app_url}/login`。
     pub login_page_url: Option<String>,
@@ -334,6 +347,8 @@ impl Config {
             login_page_url: optional("LOGIN_PAGE_URL"),
             verify_email_page_url: optional("VERIFY_EMAIL_PAGE_URL"),
             reset_password_page_url: optional("RESET_PASSWORD_PAGE_URL"),
+            instance_id: optional("SOULAUTH_INSTANCE_ID"),
+            audit_integrity_key: optional("AUDIT_INTEGRITY_KEY"),
             bind_addr: optional("BIND_ADDR").unwrap_or_else(|| "0.0.0.0:8080".to_string()),
             session_cache_ttl_seconds: parse_with_default("AUTH_SESSION_CACHE_TTL_SECONDS", 5u64)?,
             lockout_max_attempts: parse_with_default("LOCKOUT_MAX_ATTEMPTS", 5u32)?,
@@ -480,6 +495,44 @@ impl Config {
             });
         }
 
+        // 本副本的审计链标识。
+        //
+        // 不猜：默认值 `BIND_ADDR` 在编排环境里每个 Pod 都一样，两个副本会共用
+        // 一条链，后者的审计事件被唯一索引静默拒绝。这类「静默丢事件」正是
+        // 哈希链要消灭的东西，所以宁可让它在启动时就炸。
+        if self
+            .instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .is_none()
+        {
+            return Err(ConfigError::Invalid {
+                name: "SOULAUTH_INSTANCE_ID",
+                reason: "must be set explicitly when APP_URL is not a loopback address; \
+                        it names this replica's audit hash chain, and two replicas sharing \
+                        one name collide on the unique index, which silently drops the \
+                        later replica's audit events. Use the pod or host name"
+                    .to_string(),
+            });
+        }
+
+        // 审计 checkpoint 的签名密钥。
+        //
+        // 没有它，哈希链仍然写，但没有任何 checkpoint 被签出来 —— 于是拥有全库
+        // 写权限的人可以从任意一行起把链整段重算，而没有任何签名能拆穿它。
+        // 这一项与上面两项同属「后果不在启动时显现」那一类，所以同样拒绝启动。
+        if self.audit_integrity_key.is_none() {
+            return Err(ConfigError::Invalid {
+                name: "AUDIT_INTEGRITY_KEY",
+                reason: "a dedicated audit integrity key is required when APP_URL is not a \
+                        loopback address; without it no checkpoint is signed, and a hash \
+                        chain alone can be recomputed by anyone holding database write \
+                        access. Generate one with `openssl rand -base64 32`"
+                    .to_string(),
+            });
+        }
+
         Ok(())
     }
 
@@ -518,6 +571,30 @@ impl Config {
         self.reset_password_page_url
             .clone()
             .unwrap_or_else(|| format!("{}/reset-password", self.app_url.trim_end_matches('/')))
+    }
+
+    /// 本副本的审计链标识。
+    ///
+    /// 没有显式配置时用 `BIND_ADDR`。
+    ///
+    /// 曾经想过回落到 `{HOSTNAME}:{BIND_ADDR}` —— 容器里 HOSTNAME 天然各不相同，
+    /// 看起来很合适。放弃了，两个理由：
+    ///
+    /// * 那是一次**猜测**。猜错的后果是两个副本共用一条链，后者的审计事件被
+    ///   唯一索引静默拒绝 —— 恰好是这条链要消灭的那类故障。
+    /// * `HOSTNAME` 不是 SoulAuth 的配置项，运维不设它，把它登记进配置注册表
+    ///   是误导；不登记又会让「运行时读到的环境变量必须在注册表里」这条守卫
+    ///   出现盲区。
+    ///
+    /// 所以生产环境**必须显式设**（见 `check_production_secrets`），
+    /// 本地开发单进程时 `BIND_ADDR` 已经足够唯一。
+    pub fn audit_chain_id(&self) -> String {
+        self.instance_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or(&self.bind_addr)
+            .to_string()
     }
 
     /// CORS 允许的来源列表：显式白名单优先，否则回落到自身 `app_url`。
@@ -569,6 +646,8 @@ impl Config {
             login_page_url: None,
             verify_email_page_url: None,
             reset_password_page_url: None,
+            instance_id: None,
+            audit_integrity_key: None,
             bind_addr: "0.0.0.0:8080".to_string(),
             session_cache_ttl_seconds: 5,
             lockout_max_attempts: 5,
@@ -653,6 +732,18 @@ mod tests {
         );
 
         config.mfa_encryption_key = Some("k".to_string());
+        assert!(
+            config.check_production_secrets().is_err(),
+            "缺审计完整性密钥应拒绝启动"
+        );
+
+        config.audit_integrity_key = Some("k".to_string());
+        assert!(
+            config.check_production_secrets().is_err(),
+            "缺副本标识应拒绝启动 —— 默认值在编排环境里每个 Pod 都一样"
+        );
+
+        config.instance_id = Some("pod-a".to_string());
         assert!(config.check_production_secrets().is_ok());
     }
 
@@ -684,8 +775,11 @@ mod tests {
         ] {
             let mut config = Config::test_default();
             config.app_url = url.to_string();
+            // 三把密钥都配齐，确保这条断言测的是 scheme 而不是缺密钥。
             config.oidc_rsa_private_key_pem = Some("pem".to_string());
             config.mfa_encryption_key = Some("k".to_string());
+            config.audit_integrity_key = Some("k".to_string());
+            config.instance_id = Some("pod-a".to_string());
             assert!(
                 config.check_production_secrets().is_err(),
                 "{url} 是明文的对外地址，应拒绝启动"

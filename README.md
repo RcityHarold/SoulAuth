@@ -14,7 +14,7 @@ the machine-readable contract, and the operations pages.
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 paths / 84 operations · ~22k lines
-179 unit tests (no external dependencies) · 27 integration groups / 353 assertions
+188 unit tests (no external dependencies) · 27 integration groups / 355 assertions
 ```
 
 ![SoulAuth architecture](docs/figures/architecture.en.png)
@@ -235,8 +235,8 @@ surprises people during incident response.
 Two layers with different jobs. Neither substitutes for the other.
 
 ```bash
-cargo test              # 179 unit tests, no external dependencies
-cargo build && ./tests/integration.sh   # 27 groups, 353 assertions
+cargo test              # 188 unit tests, no external dependencies
+cargo build && ./tests/integration.sh   # 27 groups, 355 assertions
 ```
 
 **Unit tests** cover pure logic and consistency invariants — permission names
@@ -341,7 +341,7 @@ DEPLOYMENT.zh-CN.md
 
 ## Known limitations
 
-- **The conformance suite carries 10 invariants that do not hold yet.** They are
+- **The conformance suite carries 9 invariants that do not hold yet.** They are
   `#[ignore]`d rather than deleted, each labelled with the stage it belongs to, and
   `cargo test --test conformance -- --ignored` prints the list. They cover identity,
   credentials, audit and repository separation.

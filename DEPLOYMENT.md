@@ -54,20 +54,29 @@ links unencrypted, and produces an OIDC `issuer` that violates the Discovery spe
 conforming relying parties reject. Terminate TLS in front of SoulAuth and put the public
 https address here.
 
-On top of that, missing either of these is a **hard startup failure**:
+On top of that, missing any of these three is a **hard startup failure**:
 
 ```env
 OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # or _PEM for the contents
 MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
+AUDIT_INTEGRITY_KEY=<openssl rand -base64 32>
 ```
 
-Why refuse to start rather than warn: **neither consequence shows up at startup.**
+Why refuse to start rather than warn: **none of the three consequences shows up at
+startup.**
 
 - No signing key → one is generated per process, so **every ID token already issued
   stops verifying the moment you restart**. Across replicas each one signs with its own
   key and they never agree, which shows up as random login failures from day one.
 - No MFA key → it's derived from `JWT_SECRET`, so **the day you rotate `JWT_SECRET`
   every stored TOTP secret becomes undecryptable** and every MFA user is locked out.
+- No audit integrity key → the hash chain is still written but **no checkpoint is ever
+  signed**, and a chain on its own can be recomputed end to end by anyone holding
+  database write access. You find out on the day you need the log as evidence.
+
+These are three separate keys on purpose. Rotating one must not invalidate the other
+two, and audit integrity is the one that should least of all be broken by a routine
+rotation elsewhere.
 
 By the time either surfaces on its own you have an incident. Local development is still
 allowed through — otherwise people route around the gate with an environment variable.
@@ -97,6 +106,7 @@ reasonable call; across segments, use https.
 
 ```env
 BIND_ADDR=0.0.0.0:8080             # listen address, default 0.0.0.0:8080
+SOULAUTH_INSTANCE_ID=              # this replica's audit chain; required in production
 CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 TRUST_PROXY_HEADERS=true           # required behind a reverse proxy
 LOGIN_PAGE_URL=                    # default {APP_URL}/login

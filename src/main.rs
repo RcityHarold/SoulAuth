@@ -26,6 +26,7 @@ use crate::{
     config::Config,
     services::{
         account_lockout::AccountLockoutService,
+        audit_integrity,
         audit_logger::AuditLogger,
         auth::AuthService,
         auth_cache::AuthCache,
@@ -212,7 +213,13 @@ async fn main() -> anyhow::Result<()> {
             .with_shared_backend(shared_db.clone()),
     );
 
-    let audit_logger = Arc::new(AuditLogger::new(shared_db.clone()));
+    // 审计链按副本分，chain_id 默认取 {HOSTNAME}:{BIND_ADDR}。
+    let audit_chain_id = config.audit_chain_id();
+    info!(chain_id = %audit_chain_id, "Audit chain");
+    let audit_logger = Arc::new(AuditLogger::start(
+        shared_db.clone(),
+        audit_chain_id.clone(),
+    ));
     let lockout_service = Arc::new(AccountLockoutService::new(
         shared_db.clone(),
         config.clone(),
@@ -273,6 +280,49 @@ async fn main() -> anyhow::Result<()> {
             cleanup_auth_cache.purge_expired().await;
         }
     });
+
+    // 审计 checkpoint：把当前链头签下来。
+    //
+    // 只有哈希链的话，拥有全库写权限的人可以从被改那一行起把整条链重算一遍，
+    // 链自洽如初。checkpoint 用一把**不在数据库里**的私钥签名，重算过的链头
+    // 对不上已签发的签名 —— 这是「整段历史被替换」唯一的检出点。
+    //
+    // 没配密钥就不签。这在生产环境起不来（`check_production_secrets` 会拒绝），
+    // 所以走到这条分支的只有本地开发。
+    match config
+        .audit_integrity_key
+        .as_deref()
+        .map(audit_integrity::CheckpointSigner::from_seed_b64)
+        .transpose()
+    {
+        Ok(Some(signer)) => {
+            let checkpoint_db = shared_db.clone();
+            let checkpoint_chain_id = audit_chain_id.clone();
+            tokio::spawn(async move {
+                let mut interval = interval(Duration::from_secs(3600));
+                loop {
+                    interval.tick().await;
+                    match audit_integrity::issue_checkpoint(
+                        &checkpoint_db,
+                        &signer,
+                        &checkpoint_chain_id,
+                    )
+                    .await
+                    {
+                        Ok(Some(seq)) => info!("Audit checkpoint issued up to seq {seq}"),
+                        Ok(None) => {}
+                        Err(e) => error!("Failed to issue an audit checkpoint: {e}"),
+                    }
+                }
+            });
+        }
+        Ok(None) => {
+            warn!("AUDIT_INTEGRITY_KEY is not set; audit checkpoints will not be signed");
+        }
+        // 密钥格式错要在启动时炸掉。放行的话审计看起来在跑，实际一条
+        // checkpoint 都签不出来，而这件事只有在需要证据的那天才会被发现。
+        Err(e) => return Err(anyhow::anyhow!("Invalid AUDIT_INTEGRITY_KEY: {e}")),
+    }
 
     // SurrealDB 的 HTTP 鉴权态会因空闲而过期，定期保活。
     let keepalive_db = shared_db.clone();

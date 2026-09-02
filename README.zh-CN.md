@@ -13,7 +13,7 @@
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
-单元测试 179 项（零外部依赖）· 集成测试 27 组 353 项断言
+单元测试 188 项（零外部依赖）· 集成测试 27 组 355 项断言
 ```
 
 ![SoulAuth 架构](docs/figures/architecture.zh.png)
@@ -218,8 +218,8 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 两层，分工不同，谁也替代不了谁。
 
 ```bash
-cargo test              # 单元测试 179 项，零外部依赖
-cargo build && ./tests/integration.sh   # 27 组 353 项断言
+cargo test              # 单元测试 188 项，零外部依赖
+cargo build && ./tests/integration.sh   # 27 组 355 项断言
 ```
 
 **单元测试**管纯逻辑与一致性不变量：权限名与种子数据是否对得上、端点路径
@@ -311,7 +311,7 @@ DEPLOYMENT.zh-CN.md
 
 ## 已知限制
 
-- **一致性测试里有 10 条不变式尚未成立。** 它们标了 `#[ignore]` 而不是删掉，
+- **一致性测试里有 9 条不变式尚未成立。** 它们标了 `#[ignore]` 而不是删掉，
   每条都注明属于哪个 Stage，`cargo test --test conformance -- --ignored` 会列出全部。
   覆盖的是身份、凭证、审计与领域仓储隔离。
 - **不含前端。** SoulAuth 是纯 API。邮件链接与 OAuth 后的重定向都指向

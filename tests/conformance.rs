@@ -867,7 +867,6 @@ fn f3_no_raw_secrets_in_audit() {
 /// 哈希链检测单条修改、删除与乱序；独立签名的 checkpoint 检测整段历史替换。
 /// 两者都有，`tamper-evident` 才是架构事实而不是宣传性形容。
 #[test]
-#[ignore = "V2 Stage 5 —— 无哈希链、无 checkpoint，审计就是一张普通表"]
 fn f4_audit_is_tamper_evident() {
     let table = if table_exists("audit_event") {
         "audit_event"
@@ -3100,6 +3099,46 @@ fn j17_env_example_matches_the_config_contract() {
     assert!(
         extra.is_empty(),
         ".env.example 里有但契约里没有：{extra:?} —— 部署者会填一个没人读的键"
+    );
+}
+
+/// J18 · 审计写入者只能有一个
+///
+/// `AuditLogger::start` 会 spawn 一个写入任务，并在内存里维护本副本那条哈希链
+/// 的链头（`seq` 与 `previous_hash`）。因此**每个进程只能有一个**。
+///
+/// 这条不是假想。`permission_middleware` 与 `user_management` 拿不到
+/// Extension，于是写成 `AuditLogger::new(db).record(...)` —— 每记一条事件就
+/// 现造一个。在旧的 fire-and-forget 实现下这只是浪费；改成队列之后，它意味着
+/// 每条事件 spawn 一个写入任务、各自读链头、各自从同一个号往下递增，
+/// 于是全部撞在 `(chain_id, seq)` 的唯一索引上，审计静默丢失。
+///
+/// 当时暴露它的是一次签名变更带来的编译错误。签名不变的话，编译器一句话都
+/// 不会说 —— 所以要有这条。
+#[test]
+fn j18_the_audit_writer_is_a_singleton() {
+    for (file, body) in sources() {
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        if file == "main.rs" {
+            continue;
+        }
+        assert!(
+            !production.contains("AuditLogger::start("),
+            "{file} 自己起了一个审计写入任务 —— 每个进程只能有一个，\
+             它在内存里维护链头。拿不到 Extension 的地方用 `AuditLogger::global()`。"
+        );
+    }
+
+    // `main.rs` 必须**恰好**起一次。一次都不起的话，`global()` 永远是 None，
+    // 所有走它的埋点会安静地什么都不做。
+    let main = read("src/main.rs");
+    assert_eq!(
+        main.matches("AuditLogger::start(").count(),
+        1,
+        "main.rs 必须恰好启动一次审计写入任务"
     );
 }
 

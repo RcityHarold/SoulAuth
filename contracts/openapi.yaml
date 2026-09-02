@@ -1260,6 +1260,37 @@ components:
       - description
       - estimated_impact
       type: object
+    AuditIntegrityReport:
+      properties:
+        intact:
+          type: boolean
+        checked:
+          type: integer
+        unchained:
+          type: integer
+        chains:
+          type: integer
+        broken_chain:
+          type: string
+          nullable: true
+        broken_at:
+          type: integer
+          nullable: true
+        broken_reason:
+          type: string
+          nullable: true
+        checkpoints:
+          type: integer
+        checkpoints_verified:
+          type: integer
+      required:
+      - intact
+      - checked
+      - unchained
+      - chains
+      - checkpoints
+      - checkpoints_verified
+      type: object
     SecurityReport:
       properties:
         authentication_analysis:
@@ -2195,6 +2226,35 @@ paths:
         in: query
         required: false
         schema: *id002
+  /api/audit/integrity:
+    get:
+      tags:
+      - Audit
+      operationId: audit_verify_integrity
+      description: >-
+        Verify the audit hash chain and the signed checkpoints. Recomputes every
+        chained row's hash, checks the links and the sequence for gaps, and verifies
+        each checkpoint signature against this instance's own public key.
+      description_zh: >-
+        校验审计哈希链与已签名的 checkpoint。逐行重算摘要、检查链接与序号缺口，
+        并用本实例自己的公钥验证每个 checkpoint 的签名。
+      security:
+      - bearerAuth: []
+      x-required-permissions:
+      - soulauth:audit.read
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditIntegrityReport'
+        default:
+          description: Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /api/audit/security-report:
     get:
       tags:

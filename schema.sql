@@ -331,6 +331,40 @@ DEFINE INDEX IF NOT EXISTS user_activity_user_idx ON user_activity COLUMNS user_
 DEFINE INDEX IF NOT EXISTS user_activity_timestamp_idx ON user_activity COLUMNS timestamp;
 DEFINE INDEX IF NOT EXISTS user_activity_category_idx ON user_activity COLUMNS category;
 
+-- 审计哈希链。
+--
+-- 单条修改、删除与乱序都会断链：改一行内容它的 event_hash 对不上，
+-- 删一行则下一行的 previous_hash 指向一个不存在的前驱，seq 也会缺号。
+--
+-- 三个字段都是 option：本次改动之前写入的行没有链，校验端点会把它们单独
+-- 计为 unchained，而不是当成断链 —— 升级不该把历史数据报成被篡改。
+-- 链按**副本**分。seq 由写入进程在内存里递增，多副本各写各的链：
+-- 唯一索引若只建在 seq 上，第二个副本的每一条事件都会撞号并被拒绝，
+-- 表现是「从第二个副本起审计静默丢失」—— 恰好是哈希链要消灭的那类故障。
+--
+-- 全局单链的另一种做法是让数据库原子发号，代价是每条审计写入都要跨副本
+-- 串行化，并且那条发号记录成为整个集群审计的单点。按副本分链没有跨副本
+-- 协调，每条链各自完整，f4 的判据同样成立。
+DEFINE FIELD IF NOT EXISTS chain_id ON user_activity TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS seq ON user_activity TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS previous_hash ON user_activity TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS event_hash ON user_activity TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS user_activity_chain_seq_idx ON user_activity COLUMNS chain_id, seq UNIQUE;
+
+-- 审计 checkpoint。
+--
+-- 只有哈希链挡不住拥有全库写权限的人：他可以从被改的那一行起把整条链重算一遍。
+-- checkpoint 记录某个时刻的链头，并用一把**不在数据库里**的 Ed25519 私钥签名，
+-- 于是「整段历史被替换」也能被发现 —— 重算过的链头对不上已签发的签名。
+DEFINE TABLE IF NOT EXISTS audit_checkpoint SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS chain_id ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS seq_to ON audit_checkpoint TYPE number;
+DEFINE FIELD IF NOT EXISTS head_hash ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON audit_checkpoint TYPE number;
+DEFINE FIELD IF NOT EXISTS public_key ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS signature ON audit_checkpoint TYPE string;
+DEFINE INDEX IF NOT EXISTS audit_checkpoint_chain_seq_idx ON audit_checkpoint COLUMNS chain_id, seq_to UNIQUE;
+
 -- ===============================
 -- OIDC SSO 相关表结构
 -- ===============================

@@ -616,7 +616,12 @@ impl UserManagementService {
         user_agent: &str,
         details: serde_json::Value,
     ) -> Result<(), AuthError> {
-        AuditLogger::new(self.db.clone()).record(
+        // 用进程内那个唯一的 logger，不要现造：`AuditLogger::start` 会 spawn
+        // 一个写入任务并维护链头，每条事件造一个等于每条事件一条链。
+        let Some(audit) = AuditLogger::global() else {
+            return Ok(());
+        };
+        audit.record(
             AuditEvent::new(action, category, status, ip_address, user_agent)
                 .with_user(user_id)
                 .with_details(details),

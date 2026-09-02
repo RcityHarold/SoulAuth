@@ -6,9 +6,10 @@ use std::cmp::Reverse;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
+    config::Config,
     error::{AuthError, Result as ApiResult},
     require_permission,
-    services::{audit::AuditService, database::Database},
+    services::{audit::AuditService, audit_integrity, database::Database},
     utils::jwt::AuthedUser,
 };
 
@@ -19,6 +20,7 @@ pub fn audit_routes() -> Router {
         .route("/activity-summary", get(get_activity_summary))
         .route("/system-health", get(get_system_health))
         .route("/security-report", get(generate_security_report))
+        .route("/integrity", get(verify_integrity))
 }
 
 #[derive(Deserialize)]
@@ -1121,4 +1123,210 @@ async fn active_user_rate(
         .await?;
 
     Ok((rows.len() as f64 / total_users as f64) * 100.0)
+}
+
+/// 审计完整性校验的结果。
+#[derive(Serialize)]
+pub struct AuditIntegrityReport {
+    /// 链是否完整：既没有断链，也没有缺号，且至少有一个 checkpoint 验签通过。
+    pub intact: bool,
+    /// 本次检查覆盖的行数。
+    pub checked: i64,
+    /// 本次改动之前写入、没有链的行数。它们不算断链。
+    pub unchained: i64,
+    /// 覆盖的链条数。多副本部署每个副本一条链。
+    pub chains: i64,
+    /// 第一处对不上的位置：哪条链、哪个 `seq`。链完好时为 null。
+    pub broken_chain: Option<String>,
+    pub broken_at: Option<i64>,
+    /// 断在哪一类上：`event_hash` / `previous_hash` / `missing_seq`。
+    pub broken_reason: Option<String>,
+    /// checkpoint 总数，以及其中签名与公钥都对得上的数量。
+    pub checkpoints: i64,
+    pub checkpoints_verified: i64,
+}
+
+/// 校验审计哈希链与 checkpoint 签名。
+///
+/// 两层缺一不可，所以两层都查：
+///
+/// * **链**：逐行重算 `event_hash`，并确认它的 `previous_hash` 等于前一行的
+///   `event_hash`、`seq` 没有缺号。改一行、删一行、插一行都会在这里现形。
+/// * **checkpoint**：验签名，**并且**比对公钥是不是本实例配置的那一把。
+///   只验签名不够 —— 公钥是跟着记录存的，能改记录的人可以连公钥一起换成
+///   自己的，那样一条伪造的 checkpoint 也能自洽。
+async fn verify_integrity(
+    user: AuthedUser,
+    Extension(db): Extension<Arc<Database>>,
+    Extension(config): Extension<Config>,
+) -> ApiResult<Json<AuditIntegrityReport>> {
+    let user_id = user.id()?;
+    require_permission!(&db, &user_id, crate::models::permission::names::AUDIT_READ);
+
+    // 时间列投影成字符串、record 列也投影成字符串：SDK 把 `Value::Datetime`
+    // 与 record 转成 `serde_json::Value` 会失败，整个结果集一起解析不出来。
+    // 按 (chain_id, seq) 排序：链是**按副本**分的，seq 只在一条链内单调。
+    // 把所有行当成一条链，会在副本交界处误报断链。
+    let sql = "SELECT chain_id, seq, previous_hash, event_hash, action, category, status, \
+               type::string(user_id) AS user_id, ip_address, user_agent, details, timestamp \
+               FROM user_activity WHERE seq != NONE ORDER BY chain_id ASC, seq ASC";
+    let rows: Vec<serde_json::Value> = db
+        .query_take0_vec_no_bind("audit_integrity_scan", sql)
+        .await
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+
+    let total: Vec<serde_json::Value> = db
+        .query_take0_vec_no_bind(
+            "audit_integrity_total",
+            "SELECT count() AS count FROM user_activity WHERE seq = NONE GROUP ALL",
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+    let unchained = total
+        .first()
+        .and_then(|r| r.get("count"))
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
+
+    let mut previous_hash = audit_integrity::GENESIS_HASH.to_string();
+    let mut expected_seq = 1i64;
+    let mut broken_at = None;
+    let mut broken_chain = None;
+    let mut broken_reason = None;
+    let mut checked = 0i64;
+    let mut current_chain = String::new();
+    let mut chains = 0i64;
+
+    for row in &rows {
+        let str_of = |key: &str| {
+            row.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let chain_id = str_of("chain_id");
+        let seq = row
+            .get("seq")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        checked += 1;
+
+        // 换链就从创世位置重新起算。
+        if chain_id != current_chain {
+            current_chain = chain_id.clone();
+            previous_hash = audit_integrity::GENESIS_HASH.to_string();
+            expected_seq = 1;
+            chains += 1;
+        }
+
+        if seq != expected_seq {
+            broken_chain = Some(chain_id);
+            broken_at = Some(seq);
+            broken_reason = Some("missing_seq".to_string());
+            break;
+        }
+        if str_of("previous_hash") != previous_hash {
+            broken_chain = Some(chain_id);
+            broken_at = Some(seq);
+            broken_reason = Some("previous_hash".to_string());
+            break;
+        }
+
+        let details_json = row
+            .get("details")
+            .map(|d| serde_json::to_string(d).unwrap_or_default())
+            .unwrap_or_else(|| "{}".to_string());
+        let recomputed = audit_integrity::event_hash(&audit_integrity::DigestInput {
+            chain_id: &chain_id,
+            seq,
+            previous_hash: &previous_hash,
+            action: &str_of("action"),
+            category: &str_of("category"),
+            status: &str_of("status"),
+            user_id: &str_of("user_id"),
+            ip_address: &str_of("ip_address"),
+            user_agent: &str_of("user_agent"),
+            details_json: &details_json,
+            timestamp: row
+                .get("timestamp")
+                .and_then(serde_json::Value::as_i64)
+                .unwrap_or(0),
+        });
+        let stored = str_of("event_hash");
+        if recomputed != stored {
+            broken_chain = Some(chain_id);
+            broken_at = Some(seq);
+            broken_reason = Some("event_hash".to_string());
+            break;
+        }
+
+        previous_hash = stored;
+        expected_seq = seq + 1;
+    }
+
+    // checkpoint 那一层。
+    let cps: Vec<serde_json::Value> = db
+        .query_take0_vec_no_bind(
+            "audit_integrity_checkpoints",
+            "SELECT chain_id, seq_to, head_hash, created_at, public_key, signature \
+             FROM audit_checkpoint ORDER BY chain_id ASC, seq_to ASC",
+        )
+        .await
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+
+    // 本实例配置的公钥。checkpoint 里存的公钥必须与它一致，否则那条 checkpoint
+    // 是别人签的，验得过也不算数。
+    let own_public_key = config
+        .audit_integrity_key
+        .as_deref()
+        .and_then(|seed| audit_integrity::CheckpointSigner::from_seed_b64(seed).ok())
+        .map(|signer| signer.public_key_b64());
+
+    let mut verified = 0i64;
+    for cp in &cps {
+        let str_of = |key: &str| {
+            cp.get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let public_key = str_of("public_key");
+        if own_public_key.as_deref() != Some(public_key.as_str()) {
+            continue;
+        }
+        let seq_to = cp
+            .get("seq_to")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        let created_at = cp
+            .get("created_at")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0);
+        if audit_integrity::verify_checkpoint(
+            &public_key,
+            &str_of("signature"),
+            &str_of("chain_id"),
+            seq_to,
+            &str_of("head_hash"),
+            created_at,
+        ) {
+            verified += 1;
+        }
+    }
+
+    // 「完好」的判据要两层都满足。只有链而没有一个可验的 checkpoint 时，
+    // 一个拥有全库写权限的人可以把整条链重算，因此不能报 intact。
+    // 链上一条记录都没有时（全新实例）也不报 intact，那时无从证明什么。
+    let chain_ok = broken_at.is_none() && checked > 0;
+    Ok(Json(AuditIntegrityReport {
+        intact: chain_ok && verified > 0,
+        checked,
+        unchained,
+        chains,
+        broken_chain,
+        broken_at,
+        broken_reason,
+        checkpoints: cps.len() as i64,
+        checkpoints_verified: verified,
+    }))
 }

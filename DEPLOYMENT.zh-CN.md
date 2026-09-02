@@ -50,20 +50,27 @@ https** —— 明文会让会话 cookie 掉 `Secure`、邮件里的链接走明
 违反 Discovery 规范，按规范校验的接入方会直接拒绝。TLS 请在 SoulAuth 前面终结，
 这里填对外那个 https 地址。
 
-在此之上，下面两项缺失**直接拒绝启动**：
+在此之上，下面三项缺任一**直接拒绝启动**：
 
 ```env
 OIDC_RSA_PRIVATE_KEY_PATH=/etc/soulauth/oidc-signing.pem   # 或 _PEM 直接给内容
 MFA_SECRET_ENCRYPTION_KEY=<openssl rand -base64 32>
+AUDIT_INTEGRITY_KEY=<openssl rand -base64 32>
 ```
 
-为什么是拒绝启动而不是警告：**这两项的后果都不在启动时显现**。
+为什么是拒绝启动而不是警告：**这三项的后果都不在启动时显现**。
 
 - 缺签名私钥 → 每次启动临时生成一把，**进程一重启，已签发的 ID Token 全部
   无法验签**；多副本部署里各副本各签各的，从第一天起就互不认账，
   表现为随机登录失败。
 - 缺 MFA 密钥 → 从 `JWT_SECRET` 派生，**哪天轮换 `JWT_SECRET`，所有已存的
   TOTP 密钥变成无法解密**，全体 MFA 用户被锁在门外。
+- 缺审计完整性密钥 → 哈希链照写，但**没有任何 checkpoint 被签出来**，
+  而只有链的话，拥有数据库写权限的人可以把它整段重算。这件事要等到你真的
+  需要拿日志当证据的那天才会发现。
+
+三把钥匙是刻意分开的：轮换其中一把不该作废另外两把，而审计完整性恰恰
+最不该被别处的例行轮换破坏。
 
 等它自己暴露的时候已经是线上事故。本地开发仍然放行——否则这道闸门会被人用
 环境变量绕过去。
@@ -91,6 +98,7 @@ DATABASE_CONNECTION_TIMEOUT=30
 
 ```env
 BIND_ADDR=0.0.0.0:8080             # 监听地址，默认 0.0.0.0:8080
+SOULAUTH_INSTANCE_ID=              # 本副本的审计链，生产环境必填
 CORS_ALLOWED_ORIGINS=https://app.example.com,https://admin.example.com
 TRUST_PROXY_HEADERS=true           # 在反向代理后必须开，否则限流按代理 IP 计数
 LOGIN_PAGE_URL=                    # 默认 {APP_URL}/login
