@@ -2187,6 +2187,50 @@ fi
 
 fi
 
+# ── 27. 优雅关闭：SIGTERM 不该丢审计事件 ──
+#
+# 审计写入是队列 + 专用写入任务，`record` 投完队列就返回。这带来一个新的失败
+# 模式：进程在写入任务把队列消费完之前退出，排队中的事件就没了。
+#
+# 这一组是唯一验证那条关闭路径的地方 —— 其余每一处停服务用的都是 `kill -9`，
+# 走不到它。断言建在两件可观测的事实上，不建在日志文案上（这里
+# RUST_LOG=soulauth=warn，关闭那两行 info 根本不会打出来）：
+#   ① 进程收到 SIGTERM 后自己退出，而不是被拖住；
+#   ② 关闭前那一刻提交的事件，关闭之后能在库里查到。
+#
+# ② 是必要条件而不是充分条件：那条事件也可能在信号到达之前就已经写完了，
+# 那样这条断言只是空转。它拦得住的是「关闭路径把队列整个丢掉」这类改动，
+# 拦不住「排空只完成了一半」。要拦后者得能控制写入任务的时序，
+# 那需要一个测试专用的注入点 —— 目前没有，写在这里免得有人高估它。
+printf '\n%s\n' "$(c_dim "── 27. 优雅关闭 ──")"
+
+SHUT_EMAIL="shutdown-$(date +%s%N | tail -c 7)@example.com"
+BEFORE="$(sql_count "SELECT count() AS count FROM user_activity WHERE action = 'login_failed' GROUP ALL")"
+
+# 一次注定失败的登录 = 一条 login_failed 审计事件，然后立刻发 SIGTERM。
+req POST /api/auth/login -H 'Content-Type: application/json' \
+    -d "{\"email\":\"${SHUT_EMAIL}\",\"password\":\"WrongPassword1!\"}" > /dev/null
+kill -TERM "$APP_PID" 2>/dev/null
+
+# 等它自己退出。上限给 15 秒：排空的超时是 5 秒，留足余量。
+n=0
+while [ $n -lt 30 ] && kill -0 "$APP_PID" 2>/dev/null; do sleep 0.5; n=$((n+1)); done
+if kill -0 "$APP_PID" 2>/dev/null; then
+    bad "SIGTERM 后进程自行退出" "15 秒后仍在运行，优雅关闭卡住了"
+    kill -9 "$APP_PID" 2>/dev/null
+else
+    ok "SIGTERM 后进程自行退出"
+fi
+
+AFTER="$(sql_count "SELECT count() AS count FROM user_activity WHERE action = 'login_failed' GROUP ALL")"
+if [ "$AFTER" -gt "$BEFORE" ]; then
+    ok "关闭前提交的审计事件已落库"
+else
+    bad "关闭前提交的审计事件已落库" "关闭前 ${BEFORE} 条，关闭后 ${AFTER} 条 —— 事件在退出时丢了"
+fi
+
+# 后面还有断言要读日志，这里不重启；APP_PID 已经退出，cleanup 的 kill -9 是空操作。
+
 PANICS="$(grep -c 'panicked' "$WORK/app.log" 2>/dev/null)"; PANICS="${PANICS:-0}"
 eq 0 "$PANICS" "服务日志中无 panic"
 
@@ -2202,7 +2246,7 @@ printf '\n%s\n' "─────────────────────
 #
 # 所以把它写下来。加断言时把这个数一起改大，这跟文档站那份读数是同一条纪律：
 # 数字要么是跑出来的，要么就不该出现。
-MIN_PASS=353
+MIN_PASS=355
 if [ "$PASS" -lt "$MIN_PASS" ]; then
     printf '%s  通过 %d 项，少于下界 %d —— 有断言被静默跳过了\n' \
         "$(c_red 覆盖不足)" "$PASS" "$MIN_PASS"

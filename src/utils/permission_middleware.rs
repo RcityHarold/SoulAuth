@@ -10,17 +10,20 @@
 /// 审计子系统一直在查 `permission_denied`，但此前没有任何地方写过它。
 /// 这里放在宏里统一埋点，所有走 `require_permission!` 的接口自动覆盖。
 #[doc(hidden)]
-pub fn record_permission_denied(
-    db: &std::sync::Arc<crate::services::database::Database>,
-    user_id: &str,
-    permission: &str,
-) {
+///
+/// 不再收 `db`：写入走进程内唯一的 `AuditLogger`，那里已经持有连接。
+/// 每次拒绝都现造一个 logger 会 spawn 一个写入任务、各自维护链头，
+/// 于是每条事件自成一链。
+pub fn record_permission_denied(user_id: &str, permission: &str) {
     use crate::{
         models::user_activity::{ActivityCategory, ActivityStatus},
         services::audit_logger::{actions, AuditEvent, AuditLogger},
     };
 
-    AuditLogger::new(db.clone()).record(
+    let Some(audit) = AuditLogger::global() else {
+        return;
+    };
+    audit.record(
         AuditEvent::new(
             actions::PERMISSION_DENIED,
             ActivityCategory::Permissions,
@@ -47,7 +50,6 @@ macro_rules! require_permission {
             Ok(has_permission) => {
                 if !has_permission {
                     $crate::utils::permission_middleware::record_permission_denied(
-                        &$db.clone(),
                         $user_id,
                         $permission,
                     );

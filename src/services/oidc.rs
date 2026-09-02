@@ -156,14 +156,16 @@ impl OidcService {
             return Err(anyhow!("Invalid redirect URI"));
         }
 
-        // 验证响应类型
+        // 验证响应类型。只认 `code` —— 与发现文档的
+        // `response_types_supported: ["code"]` 以及授权端唯一的那条分支保持一致。
         let response_types: Vec<ResponseType> = request
             .response_type
             .split_whitespace()
             .map(|rt| match rt {
                 "code" => Ok(ResponseType::Code),
-                "id_token" => Ok(ResponseType::IdToken),
-                _ => Err(anyhow!("Unsupported response type")),
+                _ => Err(anyhow!(
+                    "unsupported response type; this endpoint implements response_type=code only"
+                )),
             })
             .collect::<Result<Vec<_>>>()?;
 

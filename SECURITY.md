@@ -1,41 +1,46 @@
 # Security
 
-## 报告漏洞
+## Reporting a vulnerability
 
-请不要用公开 issue 报告安全问题。发邮件到项目维护者，或使用 GitHub 的
-private vulnerability reporting。请附上复现步骤——一个能跑的复现比一段描述
-有用得多。
+Please don't report security problems in a public issue. Mail the maintainers, or use
+GitHub's private vulnerability reporting. Include steps to reproduce — a reproduction
+that runs is worth far more than a description.
 
-## 已知的依赖公告，以及为什么它们在本项目里不可达
+## Known advisories, and why they are unreachable here
 
-`cargo audit` 目前会报 7 条。它们全部来自传递依赖或用法之外的 API。
-逐条给出判断依据，这样你不必自己重做一遍分析：
+`cargo audit` currently reports 7. All of them come from transitive dependencies or from
+APIs this project doesn't call. The reasoning is written out below so you don't have to
+redo the analysis:
 
-| 依赖 | 公告 | 为什么不影响 SoulAuth |
+| Dependency | Advisory | Why it doesn't affect SoulAuth |
 |---|---|---|
-| `rsa 0.9` | RUSTSEC-2023-0071（Marvin 时序侧信道）| **无修复版本，且短期不会有。** 该攻击针对 PKCS#1 v1.5 **解密**。本项目只把 `rsa` 当作 PEM/DER 编解码器（读私钥、导出 JWKS 的 n/e），RS256 的**签名运算由 `jsonwebtoken` 经 `ring` 完成**，`rsa` 全程不执行任何私钥数学运算。 |
-| `ring 0.16` | RUSTSEC-2025-0009 | 受影响的是 `ring::aead::quic::HeaderProtectionKey`。本项目不使用 QUIC。 |
-| `ring 0.16` | RUSTSEC-2025-0010（未维护）| 同上；由 `jsonwebtoken 8` 传递引入。 |
-| `idna 0.4` | RUSTSEC-2024-0421（punycode 混淆标签）| redirect_uri 采用**精确字符串比较**，不做 URL 归一化或 IDNA 处理，构不成回跳绕过。邮箱域名校验也是纯字符串检查。 |
-| `rkyv 0.7` | RUSTSEC-2026-0235 | SurrealDB 的传递依赖，本项目不直接使用其序列化路径。 |
-| `atomic-polyfill` | RUSTSEC-2023-0089（未维护）| 传递依赖。 |
-| `proc-macro-error` | RUSTSEC-2024-0370（未维护）| 编译期依赖，不进入运行时。 |
+| `rsa 0.9` | RUSTSEC-2023-0071 (Marvin timing side channel) | **No fixed version exists, and none is coming soon.** The attack targets PKCS#1 v1.5 **decryption**. This project uses `rsa` purely as a PEM/DER codec (reading the private key, exporting `n`/`e` for JWKS); the RS256 **signing is done by `jsonwebtoken` through `ring`**, and `rsa` never performs private-key math at all. |
+| `ring 0.16` | RUSTSEC-2025-0009 | The affected surface is `ring::aead::quic::HeaderProtectionKey`. This project does not use QUIC. |
+| `ring 0.16` | RUSTSEC-2025-0010 (unmaintained) | Same as above; pulled in transitively by `jsonwebtoken 8`. |
+| `idna 0.4` | RUSTSEC-2024-0421 (punycode label confusion) | `redirect_uri` is compared as an **exact string**, with no URL normalisation and no IDNA processing, so there is no redirect bypass to build. Email domain checks are plain string checks too. |
+| `rkyv 0.7` | RUSTSEC-2026-0235 | A transitive dependency of SurrealDB; this project does not use its serialisation path directly. |
+| `atomic-polyfill` | RUSTSEC-2023-0089 (unmaintained) | Transitive. |
+| `proc-macro-error` | RUSTSEC-2024-0370 (unmaintained) | Build-time only; never reaches the runtime. |
 
-### 为什么不升级 `axum` / `jsonwebtoken` 来清掉 `ring 0.16`
+### Why `axum` / `jsonwebtoken` aren't upgraded to clear `ring 0.16`
 
-`ring 0.16` 由 `jsonwebtoken 8` 引入，`hyper 0.14` 由 `axum 0.6` 引入。
-升级要跨 axum 0.6→0.8（`Server` 移除、`TypedHeader` 迁出、提取器改动）与
-jsonwebtoken 8→10，而上表已说明这两条公告在本项目里不可达。
-改动风险大于收益，因此这是一个**有意识的选择**，不是遗漏。
-若你的合规流程要求 `cargo audit` 零命中，可以用 `cargo audit --ignore` 配合上表。
+`ring 0.16` comes from `jsonwebtoken 8`, and `hyper 0.14` from `axum 0.6`. Upgrading
+means going axum 0.6→0.8 (`Server` removed, `TypedHeader` moved out, extractor changes)
+and jsonwebtoken 8→10, while the table above shows both advisories are unreachable here.
+The risk of the change outweighs what it buys, so this is a **deliberate choice**, not an
+oversight. If your compliance process needs `cargo audit` to come back empty, use
+`cargo audit --ignore` together with the table above.
 
-## 已知限制
+## Known limitations
 
-- **数据库连接只支持 root 身份。** 代码走 `surrealdb::opt::auth::Root`，
-  没有 namespace / database 级登录的分支。最小权限数据库账号是待办项。
-  在它落地前，请让 SurrealDB 只监听内网、口令不复用、跨网段用 `https://`。
-- **注册接口会因重复邮箱返回 409**，因此可以探测某个邮箱是否已注册。
-  密码重置与重发验证信刻意不这样做（一律静默 200）。这是可用性与
-  防枚举之间的一次取舍，不是疏漏。
-- **ID Token 有效期硬性上限 300 秒**，对所有客户端一律生效。
-  Phase 0 不提供 RFC 7662 introspection，接入方在令牌有效期内感知不到吊销。
+- **The database connection only authenticates as root.** The code goes through
+  `surrealdb::opt::auth::Root`; there is no branch for namespace-level or
+  database-level login. Until there is, keep SurrealDB on a private network, don't
+  reuse the password anywhere else, and use `https://` across network segments.
+- **Registration returns 409 for a duplicate address**, so it can be used to probe
+  whether an address is already registered. Password reset and resending a verification
+  mail deliberately don't do this — both always return 200. That is a trade between
+  usability and enumeration resistance, not an oversight.
+- **ID token lifetime is hard-capped at 300 seconds** for every client, and there is no
+  RFC 7662 introspection endpoint — so a relying party cannot observe a revocation
+  inside that window. The cap is what bounds it.

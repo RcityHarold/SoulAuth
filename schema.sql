@@ -9,7 +9,7 @@ OPTION IMPORT;
 --
 -- 它关掉事件、live query、字段处理与结果输出 —— 导入本来就不需要这些。
 --
--- 不加的后果不是「慢一点」：Quickstart 第 2 步、DEPLOYMENT.md 第 2 步、
+-- 不加的后果不是「慢一点」：Quickstart 第 2 步、DEPLOYMENT.md 第 3 步、
 -- integration job、docker job 会同时断。这一条曾经在本机（3.0）全绿、在 CI
 -- 拉到的最新版（3.2.4）全红，差别仅仅是安装那天 latest 指向哪里；现在 CI 与
 -- docker-compose 都把版本钉死了，但文件本身对两代都成立才是根本的那道保险。
@@ -331,6 +331,40 @@ DEFINE INDEX IF NOT EXISTS user_activity_user_idx ON user_activity COLUMNS user_
 DEFINE INDEX IF NOT EXISTS user_activity_timestamp_idx ON user_activity COLUMNS timestamp;
 DEFINE INDEX IF NOT EXISTS user_activity_category_idx ON user_activity COLUMNS category;
 
+-- 审计哈希链。
+--
+-- 单条修改、删除与乱序都会断链：改一行内容它的 event_hash 对不上，
+-- 删一行则下一行的 previous_hash 指向一个不存在的前驱，seq 也会缺号。
+--
+-- 三个字段都是 option：本次改动之前写入的行没有链，校验端点会把它们单独
+-- 计为 unchained，而不是当成断链 —— 升级不该把历史数据报成被篡改。
+-- 链按**副本**分。seq 由写入进程在内存里递增，多副本各写各的链：
+-- 唯一索引若只建在 seq 上，第二个副本的每一条事件都会撞号并被拒绝，
+-- 表现是「从第二个副本起审计静默丢失」—— 恰好是哈希链要消灭的那类故障。
+--
+-- 全局单链的另一种做法是让数据库原子发号，代价是每条审计写入都要跨副本
+-- 串行化，并且那条发号记录成为整个集群审计的单点。按副本分链没有跨副本
+-- 协调，每条链各自完整，f4 的判据同样成立。
+DEFINE FIELD IF NOT EXISTS chain_id ON user_activity TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS seq ON user_activity TYPE option<number>;
+DEFINE FIELD IF NOT EXISTS previous_hash ON user_activity TYPE option<string>;
+DEFINE FIELD IF NOT EXISTS event_hash ON user_activity TYPE option<string>;
+DEFINE INDEX IF NOT EXISTS user_activity_chain_seq_idx ON user_activity COLUMNS chain_id, seq UNIQUE;
+
+-- 审计 checkpoint。
+--
+-- 只有哈希链挡不住拥有全库写权限的人：他可以从被改的那一行起把整条链重算一遍。
+-- checkpoint 记录某个时刻的链头，并用一把**不在数据库里**的 Ed25519 私钥签名，
+-- 于是「整段历史被替换」也能被发现 —— 重算过的链头对不上已签发的签名。
+DEFINE TABLE IF NOT EXISTS audit_checkpoint SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS chain_id ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS seq_to ON audit_checkpoint TYPE number;
+DEFINE FIELD IF NOT EXISTS head_hash ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS created_at ON audit_checkpoint TYPE number;
+DEFINE FIELD IF NOT EXISTS public_key ON audit_checkpoint TYPE string;
+DEFINE FIELD IF NOT EXISTS signature ON audit_checkpoint TYPE string;
+DEFINE INDEX IF NOT EXISTS audit_checkpoint_chain_seq_idx ON audit_checkpoint COLUMNS chain_id, seq_to UNIQUE;
+
 -- ===============================
 -- OIDC SSO 相关表结构
 -- ===============================
@@ -465,3 +499,23 @@ DEFINE FIELD IF NOT EXISTS consumed ON ai_actor_challenge TYPE bool DEFAULT fals
 
 DEFINE INDEX IF NOT EXISTS ai_actor_challenge_nonce_idx ON ai_actor_challenge COLUMNS nonce UNIQUE;
 DEFINE INDEX IF NOT EXISTS ai_actor_challenge_expiry_idx ON ai_actor_challenge COLUMNS expires_at;
+
+-- 首个管理员的引导闸门。
+--
+-- 只有一行，record id 固定为 `bootstrap_claim:singleton`。存在即表示这道门
+-- 已被某个请求抢到。抢占用 `CREATE`：SurrealDB 对已存在的 record id 直接报
+-- `already exists`，所以「检查 + 占用」是一条语句、一次原子操作。
+--
+-- 引导流程后续任何一步失败都会把这一行删掉，让运维可以重来 —— 否则实例会卡在
+-- 「没有管理员，而门已经关死」的状态。
+DEFINE TABLE IF NOT EXISTS bootstrap_claim SCHEMAFULL;
+DEFINE FIELD IF NOT EXISTS claimed_at ON bootstrap_claim TYPE datetime;
+DEFINE FIELD IF NOT EXISTS email ON bootstrap_claim TYPE string;
+-- claiming    : 账号还在建
+-- role_pending: 账号建好了，但授予 admin 失败 —— 带同一枚令牌、同一个邮箱
+--               重试会认这一行，直接给 user_id 补授角色
+-- done        : 引导完成
+DEFINE FIELD IF NOT EXISTS stage ON bootstrap_claim TYPE string DEFAULT 'claiming';
+-- 只在 role_pending 时有值。恢复时**只认这个 id**，绝不按邮箱去认领一个已存在的
+-- 账号 —— 注册是开放的，按邮箱认领等于让人抢注 admin@… 白捡管理员。
+DEFINE FIELD IF NOT EXISTS user_id ON bootstrap_claim TYPE option<string>;

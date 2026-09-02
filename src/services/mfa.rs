@@ -143,7 +143,7 @@ impl MfaService {
         info!("Enabling TOTP for user: {}", user_id);
 
         // 获取用户MFA配置
-        let mut mfa_config = self.get_user_mfa(user_id).await?;
+        let mfa_config = self.get_user_mfa(user_id).await?;
 
         if mfa_config.status != MfaStatus::Pending {
             return Err(AuthError::ServerError(
@@ -151,14 +151,11 @@ impl MfaService {
             ));
         }
 
-        // 验证TOTP代码
-        if self.accept_totp_code(&mut mfa_config, &request.totp_code)? {
-            // 更新状态为已启用
-            mfa_config.status = MfaStatus::Enabled;
-            mfa_config.updated_at = Utc::now();
-
-            self.save_user_mfa(&mfa_config).await?;
-
+        // 状态切换折进同一条语句：另起一次整体 UPSERT 会把刚推进的水位写回去。
+        if self
+            .accept_totp_code(&mfa_config, &request.totp_code, ", status = 'Enabled'")
+            .await?
+        {
             info!("TOTP enabled successfully for user: {}", user_id);
             Ok(true)
         } else {
@@ -175,7 +172,7 @@ impl MfaService {
     ) -> Result<MfaVerificationResponse> {
         debug!("Verifying TOTP for user: {}", user_id);
 
-        let mut mfa_config = self.get_user_mfa(user_id).await?;
+        let mfa_config = self.get_user_mfa(user_id).await?;
 
         if mfa_config.status != MfaStatus::Enabled {
             return Ok(MfaVerificationResponse {
@@ -185,9 +182,12 @@ impl MfaService {
             });
         }
 
-        if self.accept_totp_code(&mut mfa_config, &request.totp_code)? {
-            self.save_user_mfa(&mfa_config).await?;
-
+        // 不再 `save_user_mfa`：水位、last_used_at、密钥重加密都已经在那条
+        // 原子语句里写完了，再来一次整体 UPSERT 只会把并发对手推进的水位写回去。
+        if self
+            .accept_totp_code(&mfa_config, &request.totp_code, "")
+            .await?
+        {
             info!("TOTP verification successful for user: {}", user_id);
 
             Ok(MfaVerificationResponse {
@@ -214,7 +214,7 @@ impl MfaService {
     ) -> Result<MfaVerificationResponse> {
         info!("Using backup code for user: {}", user_id);
 
-        let mut mfa_config = self.get_user_mfa(user_id).await?;
+        let mfa_config = self.get_user_mfa(user_id).await?;
 
         if mfa_config.status != MfaStatus::Enabled {
             return Ok(MfaVerificationResponse {
@@ -228,15 +228,24 @@ impl MfaService {
         let hit = mfa_config
             .backup_codes
             .iter()
-            .position(|stored| verify_backup_code(stored, &request.backup_code));
+            .find(|stored| verify_backup_code(stored, &request.backup_code));
 
-        if let Some(index) = hit {
-            // 移除已使用的备用代码
-            mfa_config.backup_codes.remove(index);
-            mfa_config.last_used_at = Some(Utc::now());
-            mfa_config.updated_at = Utc::now();
-
-            self.save_user_mfa(&mfa_config).await?;
+        if let Some(used) = hit {
+            // 消费必须是原子的。这里以前是「按下标从内存数组里 remove →
+            // 整体 UPSERT 写回」：两个并发请求会都命中同一条、都判定通过、
+            // 都签发会话，而备用码按定义是一次性的。
+            //
+            // 改成一条带 `WHERE` 的 UPDATE，按**值**（哈希串本身，逐条加盐所以
+            // 唯一）移除，而不是按下标 —— 按下标的话，另一条码被并发消费导致
+            // 数组前移，就会把本来有效的码误判成失效。
+            if !self.consume_backup_code(&mfa_config.user_id, used).await? {
+                warn!("Backup code was already consumed concurrently for user: {user_id}");
+                return Ok(MfaVerificationResponse {
+                    verified: false,
+                    token: None,
+                    message: Some("Invalid backup code".to_string()),
+                });
+            }
 
             info!("Backup code used successfully for user: {}", user_id);
 
@@ -312,7 +321,8 @@ impl MfaService {
     /// 取出并解密 TOTP 密钥。
     ///
     /// 兼容升级前写入的明文记录：`SecretCipher::decrypt` 对无密文前缀的值原样返回，
-    /// 这些记录会在下一次 `save_user_mfa` 时被自动加密（见 `save_user_mfa`）。
+    /// 这些记录会在下一次校验时被就地加密 —— 见 `accept_totp_code` 里那条
+    /// 原子更新，它顺带把 `totp_secret` 写成密文。
     fn decrypted_secret(&self, mfa_config: &UserMfa) -> Result<String> {
         let stored = mfa_config
             .totp_secret
@@ -346,30 +356,106 @@ impl MfaService {
         Ok(match_totp_step(&totp, code, Utc::now().timestamp()))
     }
 
-    /// 校验 TOTP 并在通过时推进重放水位。
+    /// 校验 TOTP 并**原子地**消费掉它对应的时间步。
     ///
-    /// `mfa_config` 会被就地更新（`last_totp_step` / `last_used_at`），但**不**落库——
-    /// 落库交给调用方，因为不同入口还要改别的字段。
-    fn accept_totp_code(&self, mfa_config: &mut UserMfa, code: &str) -> Result<bool> {
+    /// 这里以前是「读内存水位 → 比较 → 就地推进 → 由调用方整体 UPSERT 落库」。
+    /// 那是一个 check-then-act：两个并发请求可以都读到旧水位、都判定通过、
+    /// 都签发会话 —— 而重放保护存在的全部意义就是「同一个码只能用一次」。
+    ///
+    /// 现在把比较和推进合成一条带 `WHERE` 的 UPDATE 交给数据库：
+    /// 谁先写谁赢，输的那个拿到空结果集，按重放处理。这与授权码单次使用
+    /// （`oidc::update_authorization_code`）是同一个写法 —— 那条路径一直是对的，
+    /// 只是 MFA 这边没跟上。
+    ///
+    /// `extra_set` 让调用方把自己那点状态（启用流程要把 status 置成 Enabled）
+    /// 塞进同一条语句，而不是另起一次会覆盖水位的整体写。
+    async fn accept_totp_code(
+        &self,
+        mfa_config: &UserMfa,
+        code: &str,
+        extra_set: &str,
+    ) -> Result<bool> {
         let secret = self.decrypted_secret(mfa_config)?;
 
         let Some(step) = self.verify_totp_code(&secret, code)? else {
             return Ok(false);
         };
 
-        if let Some(last_step) = mfa_config.last_totp_step {
-            if step <= last_step {
-                warn!(
-                    "Rejected replayed TOTP code for user '{}' (step {step} <= {last_step})",
-                    mfa_config.user_id
-                );
-                return Ok(false);
-            }
+        // 顺带把存量明文密钥就地加密 —— 这件事以前挂在 `save_user_mfa` 上，
+        // 而这条路径不再走那里了。
+        let encrypted = if SecretCipher::is_encrypted(&secret) {
+            mfa_config.totp_secret.clone()
+        } else {
+            Some(self.cipher.encrypt(&secret)?)
+        };
+
+        let query = format!(
+            r#"
+            UPDATE type::record('user_mfa', $user_id) SET
+                last_totp_step = $step,
+                last_used_at = time::now(),
+                updated_at = time::now(),
+                totp_secret = $totp_secret{extra_set}
+            WHERE last_totp_step = NONE OR last_totp_step < $step
+            RETURN VALUE type::string(id)
+        "#
+        );
+
+        let mut result = self
+            .db
+            .raw_query(
+                "mfa_consume_totp_step",
+                &query,
+                serde_json::json!({
+                    "user_id": mfa_config.user_id,
+                    "step": step,
+                    "totp_secret": encrypted,
+                }),
+            )
+            .await?;
+
+        // 只取投影成字符串的 id，不用 `RETURN AFTER`：整条记录里
+        // `created_at` / `updated_at` / `last_used_at` 都是 `datetime`，
+        // SDK 把 `Value::Datetime` 转成 `serde_json::Value` 会失败
+        // —— `get_user_mfa` 的注释里记着同一件事。
+        let consumed: Vec<String> = result.take(0)?;
+        if consumed.is_empty() {
+            warn!(
+                "Rejected replayed TOTP code for user '{}' (step {step} was already consumed)",
+                mfa_config.user_id
+            );
+            return Ok(false);
         }
 
-        mfa_config.last_totp_step = Some(step);
-        mfa_config.last_used_at = Some(Utc::now());
         Ok(true)
+    }
+
+    /// 原子地消费一条备用码。命中并成功移除返回 `true`；已被并发消费返回 `false`。
+    ///
+    /// 与 `accept_totp_code` 同一个道理，也与 `oidc::update_authorization_code`
+    /// 同一个写法：一次性凭据的「检查—消费」必须是数据库里的一条语句。
+    async fn consume_backup_code(&self, user_id: &str, used_hash: &str) -> Result<bool> {
+        let query = r#"
+            UPDATE type::record('user_mfa', $user_id) SET
+                backup_codes = array::complement(backup_codes, [$used]),
+                last_used_at = time::now(),
+                updated_at = time::now()
+            WHERE $used IN backup_codes
+            RETURN VALUE type::string(id)
+        "#;
+
+        let mut result = self
+            .db
+            .raw_query(
+                "mfa_consume_backup_code",
+                query,
+                serde_json::json!({ "user_id": user_id, "used": used_hash }),
+            )
+            .await?;
+
+        // 同样只回字符串 id，理由见 `accept_totp_code`。
+        let consumed: Vec<String> = result.take(0)?;
+        Ok(!consumed.is_empty())
     }
 
     /// 从数据库获取用户MFA配置

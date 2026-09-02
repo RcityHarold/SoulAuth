@@ -36,7 +36,7 @@ use axum::{
 };
 use rand::{distributions::Alphanumeric, Rng};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+use tracing::{error, warn};
 
 use crate::{
     config::Config,
@@ -220,27 +220,81 @@ async fn bootstrap_admin(
         return Err(bootstrap_rejected());
     }
 
-    // ③ 建账号。走与普通注册完全相同的路径 —— 密码策略、邮箱校验、唯一约束
-    //    一个都不能因为「这是第一个用户」而放宽。
-    let (auth_response, _verification) = auth_service
-        .register(
-            CreateUserRequest {
-                email: request.email.clone(),
-                username: Some(request.username.clone()),
-                password: request.password.clone(),
-            },
-            &ctx,
-        )
-        .await?;
+    // ③ 抢占这道门。
+    //
+    // ① 的 `admin_exists` 是一次读，它和后面的写之间隔着两步 —— 两个并发请求
+    // 可以都读到「还没有管理员」、都往下走、都建出一个管理员。整个流程里必须有
+    // 一个**原子**的判据，就是这一步：`CREATE` 到一个固定的 record id 上，
+    // 已存在就直接报错，谁先谁赢。
+    //
+    // ① 那次读并没有因此变得多余：它负责的是「已初始化」与「令牌错」两条路径
+    // 返回逐字相同的答复，那是防探测，不是防并发。
+    //
+    // ④ 建账号，或者认领一次没做完的引导。走与普通注册完全相同的路径 ——
+    //    密码策略、邮箱校验、唯一约束一个都不能因为「这是第一个用户」而放宽。
+    //    拿到 `Resumed(user_id)` 说明上一次卡在「账号建好了、角色没授上」，
+    //    这次带同一枚令牌、同一个邮箱回来，接着把角色补上就行。
+    let rbac = RBACService::new(db.clone());
+    let user_id = match claim_bootstrap(&db, &request.email).await? {
+        Claim::Fresh => {
+            let registered = auth_service
+                .register(
+                    CreateUserRequest {
+                        email: request.email.clone(),
+                        username: Some(request.username.clone()),
+                        password: request.password.clone(),
+                    },
+                    &ctx,
+                )
+                .await;
 
-    let user_id = auth_response.user.id.clone();
+            match registered {
+                Ok((auth_response, _verification)) => {
+                    let user_id = auth_response.user.id.clone();
+                    // 账号一建出来就立刻记进 claim 行。
+                    //
+                    // 放在这里而不是「授予角色失败之后」，是因为进程可能在这两步
+                    // 之间**崩掉** —— 那种情况下没有任何错误分支会跑，claim 行会
+                    // 停在 `claiming` 且没有 user_id，重试认不出来，实例就卡在
+                    // 「邮箱被占、门被占、还是没有管理员」上。
+                    mark_role_pending(&db, &user_id).await;
+                    user_id
+                }
+                Err(e) => {
+                    // 账号都没建出来，这一行留着没有意义，删掉让运维原样重来。
+                    release_bootstrap(&db).await;
+                    return Err(e);
+                }
+            }
+        }
+        Claim::Resumed(user_id) => {
+            warn!(
+                user_id = %user_id,
+                "Resuming a bootstrap that stopped after the account was created"
+            );
+            user_id
+        }
+    };
 
-    // ④ 授予 admin。
+    // ⑤ 授予 admin。
     //
     // 走 `assign_role_as_system`：这次授予没有人类操作者，伪造一个空壳 User
     // 去冒充操作者会污染日志与归因。
-    let rbac = RBACService::new(db.clone());
-    rbac.assign_role_as_system(&user_id, "admin").await?;
+    if let Err(e) = rbac.assign_role_as_system(&user_id, "admin").await {
+        // 这里**不删** claim 行。删了就退回「邮箱被一个没有角色的账号占着，
+        // 而且没法恢复」。它在上一步已经被记成 `role_pending`，
+        // 带同一枚令牌、同一个邮箱再来一次即可从这里续上。
+        error!(
+            user_id = %user_id,
+            "Bootstrap failed while granting the admin role. Retry the same request \
+             with the same token and email — it will resume from here."
+        );
+        return Err(e);
+    }
+
+    // 这道门本来就已经关上了（`admin_exists` 从此为真），标一下只是让运维
+    // 看这张表时能读懂它停在哪。失败无所谓，所以不上抛。
+    finish_bootstrap(&db).await;
 
     audit.record(
         AuditEvent::new(
@@ -265,6 +319,109 @@ async fn bootstrap_admin(
         email: request.email,
         is_admin: true,
     }))
+}
+
+/// 抢占的结果。
+enum Claim {
+    /// 门是新占下的，账号还得建。
+    Fresh,
+    /// 上一次卡在「账号建好了、角色没授上」，接着给这个 user_id 补授即可。
+    Resumed(String),
+}
+
+/// 抢占引导闸门，或者认领一次没做完的引导。
+///
+/// `CREATE` 打在固定 record id `bootstrap_claim:singleton` 上：SurrealDB 对
+/// 已存在的 record id 直接报 `already exists`，于是「检查 + 占用」压成一条语句。
+/// 这是整个流程里唯一的原子判据。
+///
+/// 占不到的时候还要再看一眼那一行：如果它停在 `role_pending`、而且邮箱与这次
+/// 请求一致，那就是同一个人在重试同一次引导，放行去补授角色。
+///
+/// **恢复只认那一行里记着的 `user_id`，不按邮箱查用户。** 注册是开放的，
+/// 按邮箱认领等于让人抢注 `admin@公司.com`，等运维引导时白捡一个管理员。
+async fn claim_bootstrap(db: &Database, email: &str) -> Result<Claim, AuthError> {
+    let create = "CREATE type::record('bootstrap_claim', 'singleton') \
+                  SET claimed_at = time::now(), email = $email, stage = 'claiming'";
+    if db
+        .raw_query(
+            "bootstrap_claim",
+            create,
+            serde_json::json!({ "email": email }),
+        )
+        .await
+        .is_ok()
+    {
+        return Ok(Claim::Fresh);
+    }
+
+    let sql = "SELECT stage, email, user_id FROM type::record('bootstrap_claim', 'singleton')";
+    let rows: Vec<serde_json::Value> = db
+        .query_take0_vec_no_bind("bootstrap_claim_read", sql)
+        .await
+        .map_err(|e| AuthError::DatabaseError(e.to_string()))?;
+
+    let row = rows.first().ok_or_else(|| {
+        warn!("Bootstrap gate is claimed but the claim row could not be read");
+        bootstrap_rejected()
+    })?;
+
+    let stage = row.get("stage").and_then(|v| v.as_str()).unwrap_or("");
+    let claimed_email = row.get("email").and_then(|v| v.as_str()).unwrap_or("");
+    let user_id = row.get("user_id").and_then(|v| v.as_str()).unwrap_or("");
+
+    if stage == "role_pending" && claimed_email == email && !user_id.is_empty() {
+        return Ok(Claim::Resumed(user_id.to_string()));
+    }
+
+    warn!(
+        stage,
+        "Bootstrap gate is already claimed and this request cannot resume it"
+    );
+    Err(bootstrap_rejected())
+}
+
+/// 放开引导闸门，让运维原样重来。只在账号都没建出来时调用。
+///
+/// 失败只记日志不上抛：调用它的时候手上已经有一个更该返回给调用方的错误了，
+/// 用「清理失败」把「引导失败」盖掉，只会让排错更难。
+async fn release_bootstrap(db: &Database) {
+    let sql = "DELETE type::record('bootstrap_claim', 'singleton')";
+    if let Err(e) = db.raw_query_no_bind("bootstrap_release", sql).await {
+        error!(
+            "Failed to release the bootstrap gate: {e}. \
+             This instance now has no administrator and the gate is stuck; \
+             delete bootstrap_claim:singleton by hand to retry."
+        );
+    }
+}
+
+/// 记下「账号已建、角色未授」，让同一枚令牌 + 同一个邮箱的重试能续上。
+async fn mark_role_pending(db: &Database, user_id: &str) {
+    let sql = "UPDATE type::record('bootstrap_claim', 'singleton') \
+               SET stage = 'role_pending', user_id = $user_id";
+    if let Err(e) = db
+        .raw_query(
+            "bootstrap_mark_pending",
+            sql,
+            serde_json::json!({ "user_id": user_id }),
+        )
+        .await
+    {
+        error!(
+            "Failed to record the half-finished bootstrap: {e}. \
+             Account {user_id} exists without the admin role and cannot be resumed \
+             automatically; grant it by hand or clear bootstrap_claim:singleton."
+        );
+    }
+}
+
+/// 标记引导完成。纯粹是给运维看的，门早已由 `admin_exists` 关上。
+async fn finish_bootstrap(db: &Database) {
+    let sql = "UPDATE type::record('bootstrap_claim', 'singleton') SET stage = 'done'";
+    if let Err(e) = db.raw_query_no_bind("bootstrap_finish", sql).await {
+        warn!("Failed to mark the bootstrap claim as done: {e}");
+    }
 }
 
 /// 系统中是否已经存在任何管理员。

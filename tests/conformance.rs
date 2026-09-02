@@ -867,7 +867,6 @@ fn f3_no_raw_secrets_in_audit() {
 /// 哈希链检测单条修改、删除与乱序；独立签名的 checkpoint 检测整段历史替换。
 /// 两者都有，`tamper-evident` 才是架构事实而不是宣传性形容。
 #[test]
-#[ignore = "V2 Stage 5 —— 无哈希链、无 checkpoint，审计就是一张普通表"]
 fn f4_audit_is_tamper_evident() {
     let table = if table_exists("audit_event") {
         "audit_event"
@@ -2037,6 +2036,28 @@ fn j6_error_shape_is_uniform() {
         }
     }
 
+    // 1b. 路由层不得再自己组装 `(StatusCode, Json<..>)` 当错误返回。
+    //
+    // `routes/auth.rs` 曾经有 11 个 handler 这么写：状态码手抄一遍、错误码取
+    // `AuthError::code()`、文案再覆写一遍 —— 两份映射并排放着。响应体形状有
+    // 下面第 3 条守着，状态码映射却没人守，改一处漏一处只是时间问题。
+    // 现在全部收进 `AuthError`，这条断言防止它再长回来。
+    for (file, body) in sources() {
+        if !file.starts_with("routes/") {
+            continue;
+        }
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        assert!(
+            !production.contains("(StatusCode, Json<serde_json::Value>)"),
+            "{file} 自己组装 `(StatusCode, Json)` 当错误返回 —— \
+             状态码与错误码会分成两份映射。改成返回 AuthError；\
+             要带补充字段就加变体，让 `AuthError::details()` 挂上去。"
+        );
+    }
+
     // 2. 两个权限宏必须产出同一个错误。分叉过一次，不能再分叉第二次。
     let mw = read("src/utils/permission_middleware.rs");
     assert!(
@@ -2076,6 +2097,7 @@ fn j6_error_shape_is_uniform() {
 
     let mut ad_hoc = Vec::new();
     let mut checked = 0usize;
+    let mut sources_with_error_bodies: Vec<String> = Vec::new();
     for (file, body) in sources() {
         let production = match body.find("#[cfg(test)]") {
             Some(i) => &body[..i],
@@ -2107,8 +2129,15 @@ fn j6_error_shape_is_uniform() {
                 continue;
             }
             checked += 1;
+            if !sources_with_error_bodies.contains(&file) {
+                sources_with_error_bodies.push(file.clone());
+            }
 
-            // 统一信封的两种合法写法，以及 OIDC 的 RFC 形状。
+            // 统一信封的合法写法，以及 OIDC 的 RFC 形状。
+            //
+            // `"error": code` 这一支是 `routes/auth.rs` 那套手工组装留下的；
+            // 那批已经收进 `AuthError`（见上面 1b），留着是因为别处还可能
+            // 用同样的模板写法，删掉会把这条判据变窄。
             let templated = block.contains("\"error\": code")
                 || block.contains("\"error\": error")
                 || block.contains("\"error\": self.code()");
@@ -2140,10 +2169,19 @@ fn j6_error_shape_is_uniform() {
             }
         }
     }
-    assert!(
-        checked >= 5,
-        "只扫到 {checked} 个错误体 —— 取值逻辑坏了，断言等于空转"
-    );
+    // 下界不写死数字，而是点名那几个**必然存在**的来源。
+    //
+    // 原先写的是 `checked >= 5`，校准依据是当时 `routes/auth.rs` 里那一批手工
+    // 错误体。它们被收进 `AuthError` 之后（见上面 1b），合法的自造错误体只剩
+    // 三个：OIDC 的两处 RFC 6749 §5.2，和限流中间件那一处。数字下界于是跟着
+    // 重构漂移，而它本来要守的根本不是数量，是「提取逻辑还认得出错误体吗」。
+    for must in ["routes/oidc.rs", "utils/rate_limit_middleware.rs"] {
+        assert!(
+            sources_with_error_bodies.iter().any(|f| f == must),
+            "{must} 里的错误体一个都没扫到（全仓共扫到 {checked} 个）—— \
+             取值逻辑坏了，断言等于空转"
+        );
+    }
     assert!(
         ad_hoc.is_empty(),
         "错误体形状与契约不符：\n{}",
@@ -2683,8 +2721,8 @@ fn j11_schemas_match_rust_types() {
 /// 这条守的是「照抄即失败」的命令。两次都发生过：
 ///
 /// - `surreal import --conn …` —— `--conn` 是 SurrealDB 2.x 之前的写法，3.x 上
-///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，OIDC_GUIDE.md 里那份复制
-///   又活了很久。
+///   报的错不指向参数本身；DEPLOYMENT.md 修好之后，当时另一份 md 里的复制
+///   又活了很久（那份已删）。
 /// - schema.sql 缺 `OPTION IMPORT;` —— 3.0 上导得进，3.2 上整份导入失败且
 ///   一张表不留。本机与 CI 的差别仅仅是安装那天 latest 指向哪个版本。
 ///
@@ -2696,7 +2734,7 @@ fn j12_documented_commands_use_current_cli() {
         "README.md",
         "README.zh-CN.md",
         "DEPLOYMENT.md",
-        "OIDC_GUIDE.md",
+        "DEPLOYMENT.zh-CN.md",
     ];
     for doc in docs {
         let body = read(doc);
@@ -2821,6 +2859,287 @@ fn j14_readme_test_counts_are_real() {
             assert_eq!(n, actual, "{doc} 声称单测 {n} 项，实际 {actual} 项");
         }
     }
+}
+
+/// J15 · 中英两份部署文档的结构必须一致
+///
+/// DEPLOYMENT.md 是主版本，DEPLOYMENT.zh-CN.md 是同一份内容的中文。
+/// 两份分开维护，改了一边忘了另一边是迟早的事，而这种偏差没人会主动去核
+/// —— 除非有守卫盯着标题层级序列。
+///
+/// 只比结构不比字数：散文可以长短不同，章节的层级和顺序不行。
+/// 比对前要剥掉围栏代码块，否则 bash 注释里的 `# xxx` 会被当成一级标题。
+#[test]
+fn j15_deployment_docs_have_the_same_shape() {
+    fn shape(doc: &str) -> Vec<String> {
+        let body = read(doc);
+        let mut out = Vec::new();
+        let mut in_fence = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let t = line.trim_start();
+            if t.starts_with('#') {
+                out.push(t.chars().take_while(|c| *c == '#').collect());
+            }
+        }
+        out
+    }
+    let en = shape("DEPLOYMENT.md");
+    let zh = shape("DEPLOYMENT.zh-CN.md");
+    assert!(
+        en.len() > 5,
+        "只解析出 {} 个标题 —— 解析逻辑失效了",
+        en.len()
+    );
+    assert_eq!(
+        en,
+        zh,
+        "两份部署文档的标题层级对不上：EN {} 个 / ZH {} 个。\n           改了一边就要改另一边",
+        en.len(),
+        zh.len()
+    );
+
+    // 两份都必须指向对方，否则读者停在自己看不懂的那一份上。
+    assert!(
+        read("DEPLOYMENT.md").contains("DEPLOYMENT.zh-CN.md"),
+        "DEPLOYMENT.md 里没有指向中文版的链接"
+    );
+    assert!(
+        read("DEPLOYMENT.zh-CN.md").contains("](DEPLOYMENT.md)"),
+        "DEPLOYMENT.zh-CN.md 里没有指向英文版的链接"
+    );
+}
+
+/// J16 · 指向某一节的引用，那一节必须真的存在
+///
+/// DEPLOYMENT.md 从 864 行修剪到 300 行时，删掉的章节留下了四个指针：
+/// 文档自己有三处（`§1`、`§3`、`§「作为 OIDC Provider」`），README 英文版
+/// 有两处 `section "…"` —— 而且写的还是中文章节名。
+///
+/// 这类断链不会让任何东西失败，只会让读者扑空。
+#[test]
+fn j16_section_references_resolve() {
+    fn headings(doc: &str) -> Vec<String> {
+        let body = read(doc);
+        let mut out = Vec::new();
+        let mut in_fence = false;
+        for line in body.lines() {
+            if line.trim_start().starts_with("```") {
+                in_fence = !in_fence;
+                continue;
+            }
+            if in_fence {
+                continue;
+            }
+            let t = line.trim_start();
+            if t.starts_with('#') {
+                out.push(t.trim_start_matches('#').trim().to_string());
+            }
+        }
+        out
+    }
+
+    let deploy = headings("DEPLOYMENT.md");
+    let deploy_zh = headings("DEPLOYMENT.zh-CN.md");
+    assert!(!deploy.is_empty() && !deploy_zh.is_empty());
+
+    // ① `section "X"` —— README 指向 DEPLOYMENT.md 的某一节。
+    for doc in ["README.md", "README.zh-CN.md"] {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let Some(at) = line.find("section \"") else {
+                continue;
+            };
+            let rest = &line[at + 9..];
+            let Some(end) = rest.find('"') else { continue };
+            let name = &rest[..end];
+            assert!(
+                deploy.iter().any(|h| h == name) || deploy_zh.iter().any(|h| h == name),
+                "{doc}:{} 指向 `section \"{name}\"`，但两份部署文档里都没有这一节",
+                i + 1
+            );
+        }
+    }
+
+    // ② 仓库内 md 之间的链接必须指向真实存在的文件。
+    //
+    // 这条是上面两条的主动版：`section "X"` 与 `§「X」` 只在有人写出那种引用时
+    // 才生效，而文件链接每次改名都会被扫到。DEPLOYMENT.md 拆成中英两份时，
+    // 靠的就是它确认没有漏改。
+    let md_docs = [
+        "README.md",
+        "README.zh-CN.md",
+        "DEPLOYMENT.md",
+        "DEPLOYMENT.zh-CN.md",
+        "SECURITY.md",
+    ];
+    let mut checked = 0usize;
+    for doc in md_docs {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let mut from = 0usize;
+            while let Some(rel) = line[from..].find("](") {
+                let at = from + rel + 2;
+                let Some(end) = line[at..].find(')') else {
+                    break;
+                };
+                let target = &line[at..at + end];
+                from = at + end;
+                // 只看仓库内的 md 链接，跳过 http(s) 与页内锚点。
+                if !target.ends_with(".md") || target.contains("://") {
+                    continue;
+                }
+                let path = std::path::Path::new(target);
+                assert!(
+                    path.exists(),
+                    "{doc}:{} 链到 `{target}`，但这个文件不存在",
+                    i + 1
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert!(checked > 5, "只查了 {checked} 条 md 链接 —— 解析逻辑失效了");
+
+    // ③ `§「X」` —— 部署文档内部的自引用。
+    for (doc, hs) in [
+        ("DEPLOYMENT.md", &deploy),
+        ("DEPLOYMENT.zh-CN.md", &deploy_zh),
+    ] {
+        let body = read(doc);
+        for (i, line) in body.lines().enumerate() {
+            let Some(at) = line.find("§「") else {
+                continue;
+            };
+            let rest = &line[at + "§「".len()..];
+            let Some(end) = rest.find('」') else {
+                continue;
+            };
+            let name = &rest[..end];
+            assert!(
+                hs.iter().any(|h| h == name),
+                "{doc}:{} 指向 §「{name}」，但本文没有这一节",
+                i + 1
+            );
+        }
+        // 章节没有编号，`§1` / `§3` 这类引用一定是修剪后的残留。
+        for (i, line) in body.lines().enumerate() {
+            for n in 1..=9 {
+                assert!(
+                    !line.contains(&format!("§{n}")),
+                    "{doc}:{} 用了 `§{n}`，但本文的章节没有编号 —— 按标题名引用",
+                    i + 1
+                );
+            }
+        }
+    }
+}
+
+/// J17 · .env.example 必须与配置契约一一对应
+///
+/// 这是每个部署者复制的那一份，也是唯一一份「照抄就能起来」的配置。
+/// 加了新配置项却忘了写进去，部署者不会知道它存在；删了配置项却留在示例里，
+/// 部署者会照着填一个已经没人读的键。
+///
+/// 两个方向都查。当前 42 对 42。
+#[test]
+fn j17_env_example_matches_the_config_contract() {
+    let contract = read("contracts/configuration.yaml");
+    let mut in_contract: Vec<String> = contract
+        .lines()
+        .filter_map(|l| {
+            let t = l.trim();
+            let rest = t.strip_prefix("- name:")?;
+            let name = rest.trim();
+            name.chars()
+                .all(|c| c.is_ascii_uppercase() || c == '_')
+                .then(|| name.to_string())
+        })
+        .collect();
+
+    let example = read(".env.example");
+    let mut in_example: Vec<String> = example
+        .lines()
+        .filter_map(|l| {
+            let key = l.split('=').next()?;
+            (!key.is_empty()
+                && key.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+                && l.contains('='))
+            .then(|| key.to_string())
+        })
+        .collect();
+
+    assert!(
+        in_contract.len() > 20 && in_example.len() > 20,
+        "契约 {} 项 / 示例 {} 项 —— 解析逻辑失效了",
+        in_contract.len(),
+        in_example.len()
+    );
+
+    in_contract.sort();
+    in_example.sort();
+    let missing: Vec<&String> = in_contract
+        .iter()
+        .filter(|k| !in_example.contains(k))
+        .collect();
+    let extra: Vec<&String> = in_example
+        .iter()
+        .filter(|k| !in_contract.contains(k))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "契约里有但 .env.example 里没有：{missing:?} —— 部署者不会知道这些配置项存在"
+    );
+    assert!(
+        extra.is_empty(),
+        ".env.example 里有但契约里没有：{extra:?} —— 部署者会填一个没人读的键"
+    );
+}
+
+/// J18 · 审计写入者只能有一个
+///
+/// `AuditLogger::start` 会 spawn 一个写入任务，并在内存里维护本副本那条哈希链
+/// 的链头（`seq` 与 `previous_hash`）。因此**每个进程只能有一个**。
+///
+/// 这条不是假想。`permission_middleware` 与 `user_management` 拿不到
+/// Extension，于是写成 `AuditLogger::new(db).record(...)` —— 每记一条事件就
+/// 现造一个。在旧的 fire-and-forget 实现下这只是浪费；改成队列之后，它意味着
+/// 每条事件 spawn 一个写入任务、各自读链头、各自从同一个号往下递增，
+/// 于是全部撞在 `(chain_id, seq)` 的唯一索引上，审计静默丢失。
+///
+/// 当时暴露它的是一次签名变更带来的编译错误。签名不变的话，编译器一句话都
+/// 不会说 —— 所以要有这条。
+#[test]
+fn j18_the_audit_writer_is_a_singleton() {
+    for (file, body) in sources() {
+        let production = match body.find("#[cfg(test)]") {
+            Some(i) => &body[..i],
+            None => &body[..],
+        };
+        if file == "main.rs" {
+            continue;
+        }
+        assert!(
+            !production.contains("AuditLogger::start("),
+            "{file} 自己起了一个审计写入任务 —— 每个进程只能有一个，\
+             它在内存里维护链头。拿不到 Extension 的地方用 `AuditLogger::global()`。"
+        );
+    }
+
+    // `main.rs` 必须**恰好**起一次。一次都不起的话，`global()` 永远是 None，
+    // 所有走它的埋点会安静地什么都不做。
+    let main = read("src/main.rs");
+    assert_eq!(
+        main.matches("AuditLogger::start(").count(),
+        1,
+        "main.rs 必须恰好启动一次审计写入任务"
+    );
 }
 
 /// 被路由 handler 签名引用到的请求/响应类型，及其 serde 字段名。

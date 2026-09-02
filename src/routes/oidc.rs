@@ -601,14 +601,21 @@ async fn validate_authorize_request(
     Ok(())
 }
 
+/// 只认 `code`。
+///
+/// 这里以前也认 `id_token`，可授权端没有第二条分支 —— 认下来之后照样返回
+/// `?code=`。注册侧现在会把非 `code` 的配置挡在门外
+/// （`oidc_client::reject_unsupported_response_types`），但库里可能已经存着
+/// 旧值，所以这一层也要拒：宁可让接入方拿到一个说得清的错误，也不能让它以为
+/// 自己跑的是 implicit。
 fn parse_response_types(response_type: &str) -> Result<Vec<ResponseType>, AuthError> {
     let response_types: Vec<ResponseType> = response_type
         .split_whitespace()
         .map(|value| match value {
             "code" => Ok(ResponseType::Code),
-            "id_token" => Ok(ResponseType::IdToken),
             _ => Err(AuthError::BadRequest(
-                "Unsupported response type".to_string(),
+                "unsupported response type; this endpoint implements response_type=code only"
+                    .to_string(),
             )),
         })
         .collect::<Result<Vec<_>, _>>()?;

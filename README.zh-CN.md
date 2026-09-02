@@ -6,14 +6,14 @@
 它跟别家的区别是：AI 主体有自己的身份记录和自己的 Ed25519 密钥，不是一行填了
 假邮箱的 `user`。
 
-**文档站：<https://rcityharold.github.io/SoulAuth-docs/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
+**文档站：<https://soulauth.trantorlabs.sg/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
 完整 API 参考，以及运维那几页。
 
 > English version: [README.md](README.md)（主版本）
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 条路径 / 84 个 operation · 约 2.2 万行
-单元测试 170 项（零外部依赖）· 集成测试 27 组 353 项断言
+单元测试 188 项（零外部依赖）· 集成测试 27 组 355 项断言
 ```
 
 ![SoulAuth 架构](docs/figures/architecture.zh.png)
@@ -81,7 +81,7 @@ cargo run
 以及会话 cookie 是否带 `Secure`。
 
 一旦把 `APP_URL` 指向非环回地址，生产闸门就会生效——见
-[生产姿态](#生产姿态)与 [DEPLOYMENT.md](DEPLOYMENT.md)。
+[生产姿态](#生产姿态)与 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。
 
 系统没有默认账号。新实例在启动日志里打一枚一次性令牌（`WARN` 级别，默认日志级别
 下可见），用它建第一个管理员，全程不碰数据库：
@@ -204,8 +204,8 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 
 ### 刻意没做的事
 
-- **不终结 TLS**。生产部署请放在反向代理之后，见 [DEPLOYMENT.md](DEPLOYMENT.md)
-  的「反向代理与 TLS」一节。
+- **不终结 TLS**。生产部署请放在反向代理之后，见文档站
+  [部署](https://soulauth.trantorlabs.sg/zh/operate/deployment#反向代理配置)。
 - **不执行任何 DDL**。表结构变更一律手工执行 `schema.sql`，
   这样应用账号永远不需要 schema 权限。
 - **发信失败只记日志，不阻断请求**。SMTP 配错时注册照样成功，
@@ -218,8 +218,8 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 两层，分工不同，谁也替代不了谁。
 
 ```bash
-cargo test              # 单元测试 170 项，零外部依赖
-cargo build && ./tests/integration.sh   # 27 组 353 项断言
+cargo test              # 单元测试 188 项，零外部依赖
+cargo build && ./tests/integration.sh   # 27 组 355 项断言
 ```
 
 **单元测试**管纯逻辑与一致性不变量：权限名与种子数据是否对得上、端点路径
@@ -264,7 +264,8 @@ cargo build && ./tests/integration.sh   # 27 组 353 项断言
   而不是退回 public 客户端了事。
 
 注册命令、接入方需要的确切参数，以及**三条不读源码就不可能知道的行为**，
-都写在 [DEPLOYMENT.md](DEPLOYMENT.md) 的「作为 OIDC Provider 接入」一节。
+都写在文档站的[注册客户端](https://soulauth.trantorlabs.sg/zh/integrate/register-a-client)与
+[OIDC 与客户端](https://soulauth.trantorlabs.sg/zh/reference/oidc-and-clients)。
 
 ---
 
@@ -273,8 +274,9 @@ cargo build && ./tests/integration.sh   # 27 组 353 项断言
 必填只有四项：`JWT_SECRET`、`APP_URL`、`SMTP_HOST`、`SMTP_FROM`。其余都有
 默认值或确实可选——**包括两个 OAuth provider**。
 
-完整清单、生产闸门、反向代理与多副本注意事项，以及一份按「症状指向错误方向」
-组织的故障排除索引，都在 [DEPLOYMENT.md](DEPLOYMENT.md)。
+完整清单与生产闸门在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。反向代理与
+多副本注意事项、以及一份按「症状指向错误方向」组织的故障排除索引，在文档站的
+[部署](https://soulauth.trantorlabs.sg/zh/operate/deployment)与[故障排查](https://soulauth.trantorlabs.sg/zh/operate/troubleshooting)。
 
 ---
 
@@ -300,17 +302,23 @@ tests/
   smtp_sink.py     零依赖收信端
   mock_oauth.py    零依赖的 Google / GitHub 替身
   totp.py          RFC 6238 验证码生成，已用 RFC 标准向量自校
-DEPLOYMENT.md      运维：配置、升级、接入、故障排除
+DEPLOYMENT.md      部署步骤与环境变量参考（英文，主版本）
+DEPLOYMENT.zh-CN.md
+                   同上，中文
 ```
 
 ---
 
 ## 已知限制
 
+- **一致性测试里有 9 条不变式尚未成立。** 它们标了 `#[ignore]` 而不是删掉，
+  每条都注明属于哪个 Stage，`cargo test --test conformance -- --ignored` 会列出全部。
+  覆盖的是身份、凭证、审计与领域仓储隔离。
 - **不含前端。** SoulAuth 是纯 API。邮件链接与 OAuth 后的重定向都指向
   `APP_URL` 下的路径——`/verify-email`、`/reset-password/{token}`、`/login`、
-  `/oauth/callback`、`/initialize-password`。后三个是写死的路径，
-  前两个可覆盖。
+  `/oauth/callback`、`/initialize-password`。前三个可覆盖
+  （`VERIFY_EMAIL_PAGE_URL`、`RESET_PASSWORD_PAGE_URL`、`LOGIN_PAGE_URL`），
+  后两个是写死的路径。
 - `GET /api/me/profile` 与 `/api/me/preferences` 在对应的 `POST` 建立记录之前
   返回 404，而不是空对象。
 - 注册接口在邮箱重复时返回 409，可用于探测某个邮箱是否已注册；而密码重置
@@ -324,13 +332,14 @@ DEPLOYMENT.md      运维：配置、升级、接入、故障排除
 
 | | |
 |---|---|
-| 五分钟跑起来 | [快速上手](https://rcityharold.github.io/SoulAuth-docs/zh/start/quickstart) |
-| 决定怎么接入 | [接入路径](https://rcityharold.github.io/SoulAuth-docs/zh/start/integration-path) |
-| 接一个 OIDC 客户端 | [授权码流程](https://rcityharold.github.io/SoulAuth-docs/zh/integrate/authorization-code-flow) |
-| 开放访问之前 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
-| 每个端点、参数与错误 | [API 参考](https://rcityharold.github.io/SoulAuth-docs/zh/reference/api-conventions) |
+| 五分钟跑起来 | [快速上手](https://soulauth.trantorlabs.sg/zh/start/quickstart) |
+| 决定怎么接入 | [接入路径](https://soulauth.trantorlabs.sg/zh/start/integration-path) |
+| 接一个 OIDC 客户端 | [授权码流程](https://soulauth.trantorlabs.sg/zh/integrate/authorization-code-flow) |
+| 开放访问之前 | [生产清单](https://soulauth.trantorlabs.sg/zh/operate/production-checklist) |
+| 每个端点、参数与错误 | [API 参考](https://soulauth.trantorlabs.sg/zh/reference/api-conventions) |
 
-部署步骤在 [DEPLOYMENT.md](DEPLOYMENT.md) —— 那份文件正是
+部署步骤在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md) —— 它和英文主版本
+`DEPLOYMENT.md` 是同一份内容，后者正是
 `tests/deployment_walkthrough.sh` 每次推送都要执行一遍的对象。
 
 ---

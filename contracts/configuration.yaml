@@ -52,6 +52,16 @@ groups:
         default: ""
         description: "Same key, inline PEM (\\n is unescaped). Without it every restart generates a new key: previously issued ID tokens all fail verification, and replicas do not accept each other's."
         description_zh: "同上，内联 PEM（\\\\n 会被还原）。不配则每次启动换一把新密钥，此前签发的 ID Token 全部验不过，副本之间也互不认账。"
+      - name: SOULAUTH_INSTANCE_ID
+        required: false
+        default: "BIND_ADDR"
+        description: "Identifies this replica's audit hash chain. Each replica writes its own chain; two replicas sharing an id collide on the unique index and the later one's audit events are rejected. Required once APP_URL is not loopback — the default only distinguishes processes on one host."
+        description_zh: "标识本副本的审计哈希链。每个副本各写一条链；两个副本共用同一个标识会撞唯一索引，后者的审计事件写不进去。APP_URL 非环回时必填 —— 默认值只能区分同一台机器上的多个进程。"
+      - name: AUDIT_INTEGRITY_KEY
+        required: false
+        default: "none"
+        description: "Ed25519 seed (base64, 32 bytes) that signs audit checkpoints. Required once APP_URL is not loopback. Without it no checkpoint is signed, and a hash chain alone can be recomputed by anyone with database write access."
+        description_zh: "签名审计 checkpoint 的 Ed25519 种子（base64，32 字节）。APP_URL 非环回时必填。没有它就没有 checkpoint 被签出来，而只有哈希链挡不住拥有数据库写权限的人整段重算。"
       - name: MFA_SECRET_ENCRYPTION_KEY
         required: conditional
         default: ""
@@ -184,6 +194,11 @@ groups:
         default: "derived from APP_URL"
         description: "Landing page for verification links."
         description_zh: "验证链接落点。"
+      - name: RESET_PASSWORD_PAGE_URL
+        required: false
+        default: "derived from APP_URL"
+        description: "Landing page for password reset links. The token is appended as a path segment."
+        description_zh: "密码重置链接落点。令牌以路径段的形式追加在后面。"
   - id: federation
     note: "All optional. With no provider configured, the corresponding endpoints return 501."
     note_zh: "全部可选。一个 provider 都不配时，对应端点返回 501。"

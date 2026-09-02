@@ -7,14 +7,14 @@ changes.
 What it does differently: an AI actor gets an identity record and an Ed25519 key of its
 own, rather than a `user` row with a made-up email address on it.
 
-**Documentation: <https://rcityharold.github.io/SoulAuth-docs/>** — integration guides, the full API reference rendered from
+**Documentation: <https://soulauth.trantorlabs.sg/>** — integration guides, the full API reference rendered from
 the machine-readable contract, and the operations pages.
 
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
 
 ```
 axum 0.6 · SurrealDB 3.0 · 71 paths / 84 operations · ~22k lines
-170 unit tests (no external dependencies) · 27 integration groups / 353 assertions
+188 unit tests (no external dependencies) · 27 integration groups / 355 assertions
 ```
 
 ![SoulAuth architecture](docs/figures/architecture.en.png)
@@ -222,7 +222,7 @@ surprises people during incident response.
 ### Things that are deliberately not done
 
 - SoulAuth **does not terminate TLS**. Put it behind a reverse proxy; see
-  [DEPLOYMENT.md](DEPLOYMENT.md), section "反向代理与 TLS".
+  [Deployment](https://soulauth.trantorlabs.sg/operate/deployment#reverse-proxy).
 - It performs **no DDL**. Schema changes go through `schema.sql` by hand, so the
   application account never needs schema privileges.
 - Mail delivery failures are logged, not surfaced to the caller. Registration
@@ -235,8 +235,8 @@ surprises people during incident response.
 Two layers with different jobs. Neither substitutes for the other.
 
 ```bash
-cargo test              # 170 unit tests, no external dependencies
-cargo build && ./tests/integration.sh   # 27 groups, 353 assertions
+cargo test              # 188 unit tests, no external dependencies
+cargo build && ./tests/integration.sh   # 27 groups, 355 assertions
 ```
 
 **Unit tests** cover pure logic and consistency invariants — permission names
@@ -289,8 +289,9 @@ Two consequences that cost debugging time when missed:
   confidential client and add a BFF rather than falling back to a public client.
 
 Registration, the exact parameters a consumer needs, and three behaviours an
-integrator cannot discover without reading the source are documented in
-[DEPLOYMENT.md](DEPLOYMENT.md), section "作为 OIDC Provider 接入".
+integrator cannot discover without reading the source are documented under
+[Register a client](https://soulauth.trantorlabs.sg/integrate/register-a-client) and
+[OIDC and clients](https://soulauth.trantorlabs.sg/reference/oidc-and-clients).
 
 ---
 
@@ -300,9 +301,11 @@ Four variables are required: `JWT_SECRET`, `APP_URL`, `SMTP_HOST`, `SMTP_FROM`.
 Everything else has a default or is genuinely optional — including both OAuth
 providers.
 
-The full table, the production gates, reverse-proxy and multi-replica notes, and
-a troubleshooting index organised by *symptom that points the wrong way* live in
-[DEPLOYMENT.md](DEPLOYMENT.md).
+The full table and the production gates are in [DEPLOYMENT.md](DEPLOYMENT.md).
+Reverse-proxy and multi-replica notes, and a troubleshooting index organised by
+*symptom that points the wrong way*, are on the documentation site:
+[Deployment](https://soulauth.trantorlabs.sg/operate/deployment) and
+[Troubleshooting](https://soulauth.trantorlabs.sg/operate/troubleshooting).
 
 ---
 
@@ -329,17 +332,24 @@ tests/
   smtp_sink.py     zero-dependency SMTP receiver
   mock_oauth.py    zero-dependency Google/GitHub stand-in
   totp.py          RFC 6238 code generation, self-checked against the RFC vectors
-DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshooting
+DEPLOYMENT.md      deployment steps and the environment-variable reference
+DEPLOYMENT.zh-CN.md
+                   the same, in Chinese
 ```
 
 ---
 
 ## Known limitations
 
+- **The conformance suite carries 9 invariants that do not hold yet.** They are
+  `#[ignore]`d rather than deleted, each labelled with the stage it belongs to, and
+  `cargo test --test conformance -- --ignored` prints the list. They cover identity,
+  credentials, audit and repository separation.
 - **No front-end.** SoulAuth is an API. Mail links and post-OAuth redirects
   point at paths under `APP_URL` — `/verify-email`, `/reset-password/{token}`,
-  `/login`, `/oauth/callback`, `/initialize-password`. The last three are fixed
-  paths; the others are overridable.
+  `/login`, `/oauth/callback`, `/initialize-password`. The first three are
+  overridable (`VERIFY_EMAIL_PAGE_URL`, `RESET_PASSWORD_PAGE_URL`,
+  `LOGIN_PAGE_URL`); the last two are fixed paths.
 - `GET /api/me/profile` and `/api/me/preferences` return 404 before the
   corresponding `POST` creates the record, rather than an empty object.
 - Registration returns 409 on a duplicate address, which allows probing whether
@@ -357,11 +367,11 @@ DEPLOYMENT.md      operations: configuration, upgrades, integration, troubleshoo
 
 | | |
 |---|---|
-| Running in five minutes | [Quickstart](https://rcityharold.github.io/SoulAuth-docs/start/quickstart) |
-| Choosing an integration | [Integration path](https://rcityharold.github.io/SoulAuth-docs/start/integration-path) |
-| Wiring an OIDC client | [Authorization Code flow](https://rcityharold.github.io/SoulAuth-docs/integrate/authorization-code-flow) |
-| Before you open it up | [Production checklist](https://rcityharold.github.io/SoulAuth-docs/operate/production-checklist) |
-| Every endpoint, parameter and error | [API reference](https://rcityharold.github.io/SoulAuth-docs/reference/api-conventions) |
+| Running in five minutes | [Quickstart](https://soulauth.trantorlabs.sg/start/quickstart) |
+| Choosing an integration | [Integration path](https://soulauth.trantorlabs.sg/start/integration-path) |
+| Wiring an OIDC client | [Authorization Code flow](https://soulauth.trantorlabs.sg/integrate/authorization-code-flow) |
+| Before you open it up | [Production checklist](https://soulauth.trantorlabs.sg/operate/production-checklist) |
+| Every endpoint, parameter and error | [API reference](https://soulauth.trantorlabs.sg/reference/api-conventions) |
 
 Deployment steps live in [DEPLOYMENT.md](DEPLOYMENT.md) — that file is what
 `tests/deployment_walkthrough.sh` executes on every push.
