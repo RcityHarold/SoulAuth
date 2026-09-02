@@ -385,3 +385,10 @@ Apache-2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 Known dependency advisories and why they are not reachable in this codebase are
 documented in [SECURITY.md](SECURITY.md) — worth reading before you file an
 issue about `cargo audit` output.
+
+## Contributing
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers the three commands to run before opening a
+pull request, and the handful of places where a number in this repository is an
+assertion rather than decoration. [CHANGELOG.md](CHANGELOG.md) records what changed and
+what an upgrade requires.

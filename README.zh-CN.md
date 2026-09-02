@@ -350,3 +350,9 @@ Apache-2.0，见 [LICENSE](LICENSE) 与 [NOTICE](NOTICE)。
 
 已知的依赖公告、以及它们为什么在本项目里不可达，写在
 [SECURITY.md](SECURITY.md)。就 `cargo audit` 的输出提 issue 之前请先看那里。
+
+## 参与
+
+[CONTRIBUTING.zh-CN.md](CONTRIBUTING.zh-CN.md) 写了提 PR 之前要跑的三条命令，
+以及这个仓库里那几处「数字是断言而不是装饰」的地方。
+[CHANGELOG.md](CHANGELOG.md) 记录改了什么、以及升级需要做什么。

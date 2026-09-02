@@ -2890,30 +2890,38 @@ fn j15_deployment_docs_have_the_same_shape() {
         }
         out
     }
-    let en = shape("DEPLOYMENT.md");
-    let zh = shape("DEPLOYMENT.zh-CN.md");
-    assert!(
-        en.len() > 5,
-        "只解析出 {} 个标题 —— 解析逻辑失效了",
-        en.len()
-    );
-    assert_eq!(
-        en,
-        zh,
-        "两份部署文档的标题层级对不上：EN {} 个 / ZH {} 个。\n           改了一边就要改另一边",
-        en.len(),
-        zh.len()
-    );
+    // 成对维护的双语文档。两份分开写，改了一边忘了另一边是迟早的事，
+    // 而这种偏差没人会主动去核 —— 除非有守卫盯着标题层级序列。
+    for (en_doc, zh_doc) in [
+        ("DEPLOYMENT.md", "DEPLOYMENT.zh-CN.md"),
+        ("CONTRIBUTING.md", "CONTRIBUTING.zh-CN.md"),
+    ] {
+        let en = shape(en_doc);
+        let zh = shape(zh_doc);
+        assert!(
+            en.len() > 5,
+            "{en_doc} 只解析出 {} 个标题 —— 解析逻辑失效了",
+            en.len()
+        );
+        assert_eq!(
+            en,
+            zh,
+            "{en_doc} 与 {zh_doc} 的标题层级对不上：EN {} 个 / ZH {} 个。\n  \
+             改了一边就要改另一边",
+            en.len(),
+            zh.len()
+        );
 
-    // 两份都必须指向对方，否则读者停在自己看不懂的那一份上。
-    assert!(
-        read("DEPLOYMENT.md").contains("DEPLOYMENT.zh-CN.md"),
-        "DEPLOYMENT.md 里没有指向中文版的链接"
-    );
-    assert!(
-        read("DEPLOYMENT.zh-CN.md").contains("](DEPLOYMENT.md)"),
-        "DEPLOYMENT.zh-CN.md 里没有指向英文版的链接"
-    );
+        // 两份都必须指向对方，否则读者停在自己看不懂的那一份上。
+        assert!(
+            read(en_doc).contains(zh_doc),
+            "{en_doc} 里没有指向中文版的链接"
+        );
+        assert!(
+            read(zh_doc).contains(&format!("]({en_doc})")),
+            "{zh_doc} 里没有指向英文版的链接"
+        );
+    }
 }
 
 /// J16 · 指向某一节的引用，那一节必须真的存在
@@ -2978,6 +2986,9 @@ fn j16_section_references_resolve() {
         "DEPLOYMENT.md",
         "DEPLOYMENT.zh-CN.md",
         "SECURITY.md",
+        "CONTRIBUTING.md",
+        "CONTRIBUTING.zh-CN.md",
+        "CHANGELOG.md",
     ];
     let mut checked = 0usize;
     for doc in md_docs {
