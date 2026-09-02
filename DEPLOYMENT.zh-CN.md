@@ -18,12 +18,12 @@
 
 | 你要找的 | 去处 |
 |---|---|
-| Docker Compose / systemd / 反向代理 / 版本升级 | [部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment) |
-| 上线前该改什么 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
-| 备份、密钥轮换、事故处理 | [运维与恢复](https://rcityharold.github.io/SoulAuth-docs/zh/operate/operations-and-recovery) |
-| 故障排除（13 类症状） | [故障排查](https://rcityharold.github.io/SoulAuth-docs/zh/operate/troubleshooting) |
-| 作为 OIDC Provider 接入 | [接入路径](https://rcityharold.github.io/SoulAuth-docs/zh/start/integration-path) |
-| 权限清单 | [管理](https://rcityharold.github.io/SoulAuth-docs/zh/reference/administration) |
+| Docker Compose / systemd / 反向代理 / 版本升级 | [部署](https://soulauth.trantorlabs.sg/zh/operate/deployment) |
+| 上线前该改什么 | [生产清单](https://soulauth.trantorlabs.sg/zh/operate/production-checklist) |
+| 备份、密钥轮换、事故处理 | [运维与恢复](https://soulauth.trantorlabs.sg/zh/operate/operations-and-recovery) |
+| 故障排除（13 类症状） | [故障排查](https://soulauth.trantorlabs.sg/zh/operate/troubleshooting) |
+| 作为 OIDC Provider 接入 | [接入路径](https://soulauth.trantorlabs.sg/zh/start/integration-path) |
+| 权限清单 | [管理](https://soulauth.trantorlabs.sg/zh/reference/administration) |
 
 ---
 
@@ -40,7 +40,7 @@ SMTP_FROM=noreply@example.com
 
 `APP_URL` 是对外地址，不是监听地址。它决定三件事：OIDC `issuer`、邮件里链接的
 前缀、cookie 是否带 `Secure`。填错的后果见文档站
-[配置](https://rcityharold.github.io/SoulAuth-docs/zh/reference/configuration)
+[配置](https://soulauth.trantorlabs.sg/zh/reference/configuration)
 的「`APP_URL` 与监听地址的区别」。
 
 #### 生产环境额外必填（非环回 `APP_URL` 时强制）

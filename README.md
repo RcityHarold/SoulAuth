@@ -7,7 +7,7 @@ changes.
 What it does differently: an AI actor gets an identity record and an Ed25519 key of its
 own, rather than a `user` row with a made-up email address on it.
 
-**Documentation: <https://rcityharold.github.io/SoulAuth-docs/>** — integration guides, the full API reference rendered from
+**Documentation: <https://soulauth.trantorlabs.sg/>** — integration guides, the full API reference rendered from
 the machine-readable contract, and the operations pages.
 
 > 中文版本见 [README.zh-CN.md](README.zh-CN.md)。
@@ -222,7 +222,7 @@ surprises people during incident response.
 ### Things that are deliberately not done
 
 - SoulAuth **does not terminate TLS**. Put it behind a reverse proxy; see
-  [Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment#reverse-proxy).
+  [Deployment](https://soulauth.trantorlabs.sg/operate/deployment#reverse-proxy).
 - It performs **no DDL**. Schema changes go through `schema.sql` by hand, so the
   application account never needs schema privileges.
 - Mail delivery failures are logged, not surfaced to the caller. Registration
@@ -290,8 +290,8 @@ Two consequences that cost debugging time when missed:
 
 Registration, the exact parameters a consumer needs, and three behaviours an
 integrator cannot discover without reading the source are documented under
-[Register a client](https://rcityharold.github.io/SoulAuth-docs/integrate/register-a-client) and
-[OIDC and clients](https://rcityharold.github.io/SoulAuth-docs/reference/oidc-and-clients).
+[Register a client](https://soulauth.trantorlabs.sg/integrate/register-a-client) and
+[OIDC and clients](https://soulauth.trantorlabs.sg/reference/oidc-and-clients).
 
 ---
 
@@ -304,8 +304,8 @@ providers.
 The full table and the production gates are in [DEPLOYMENT.md](DEPLOYMENT.md).
 Reverse-proxy and multi-replica notes, and a troubleshooting index organised by
 *symptom that points the wrong way*, are on the documentation site:
-[Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment) and
-[Troubleshooting](https://rcityharold.github.io/SoulAuth-docs/operate/troubleshooting).
+[Deployment](https://soulauth.trantorlabs.sg/operate/deployment) and
+[Troubleshooting](https://soulauth.trantorlabs.sg/operate/troubleshooting).
 
 ---
 
@@ -367,11 +367,11 @@ DEPLOYMENT.zh-CN.md
 
 | | |
 |---|---|
-| Running in five minutes | [Quickstart](https://rcityharold.github.io/SoulAuth-docs/start/quickstart) |
-| Choosing an integration | [Integration path](https://rcityharold.github.io/SoulAuth-docs/start/integration-path) |
-| Wiring an OIDC client | [Authorization Code flow](https://rcityharold.github.io/SoulAuth-docs/integrate/authorization-code-flow) |
-| Before you open it up | [Production checklist](https://rcityharold.github.io/SoulAuth-docs/operate/production-checklist) |
-| Every endpoint, parameter and error | [API reference](https://rcityharold.github.io/SoulAuth-docs/reference/api-conventions) |
+| Running in five minutes | [Quickstart](https://soulauth.trantorlabs.sg/start/quickstart) |
+| Choosing an integration | [Integration path](https://soulauth.trantorlabs.sg/start/integration-path) |
+| Wiring an OIDC client | [Authorization Code flow](https://soulauth.trantorlabs.sg/integrate/authorization-code-flow) |
+| Before you open it up | [Production checklist](https://soulauth.trantorlabs.sg/operate/production-checklist) |
+| Every endpoint, parameter and error | [API reference](https://soulauth.trantorlabs.sg/reference/api-conventions) |
 
 Deployment steps live in [DEPLOYMENT.md](DEPLOYMENT.md) — that file is what
 `tests/deployment_walkthrough.sh` executes on every push.

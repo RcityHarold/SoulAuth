@@ -6,7 +6,7 @@
 它跟别家的区别是：AI 主体有自己的身份记录和自己的 Ed25519 密钥，不是一行填了
 假邮箱的 `user`。
 
-**文档站：<https://rcityharold.github.io/SoulAuth-docs/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
+**文档站：<https://soulauth.trantorlabs.sg/zh/start/what-is-soulauth>** —— 接入指南、由机器可读契约渲染的
 完整 API 参考，以及运维那几页。
 
 > English version: [README.md](README.md)（主版本）
@@ -205,7 +205,7 @@ curl -X POST localhost:8080/api/auth/logout -H "Authorization: Bearer $TOKEN"
 ### 刻意没做的事
 
 - **不终结 TLS**。生产部署请放在反向代理之后，见文档站
-  [部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment#反向代理配置)。
+  [部署](https://soulauth.trantorlabs.sg/zh/operate/deployment#反向代理配置)。
 - **不执行任何 DDL**。表结构变更一律手工执行 `schema.sql`，
   这样应用账号永远不需要 schema 权限。
 - **发信失败只记日志，不阻断请求**。SMTP 配错时注册照样成功，
@@ -264,8 +264,8 @@ cargo build && ./tests/integration.sh   # 27 组 355 项断言
   而不是退回 public 客户端了事。
 
 注册命令、接入方需要的确切参数，以及**三条不读源码就不可能知道的行为**，
-都写在文档站的[注册客户端](https://rcityharold.github.io/SoulAuth-docs/zh/integrate/register-a-client)与
-[OIDC 与客户端](https://rcityharold.github.io/SoulAuth-docs/zh/reference/oidc-and-clients)。
+都写在文档站的[注册客户端](https://soulauth.trantorlabs.sg/zh/integrate/register-a-client)与
+[OIDC 与客户端](https://soulauth.trantorlabs.sg/zh/reference/oidc-and-clients)。
 
 ---
 
@@ -276,7 +276,7 @@ cargo build && ./tests/integration.sh   # 27 组 355 项断言
 
 完整清单与生产闸门在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md)。反向代理与
 多副本注意事项、以及一份按「症状指向错误方向」组织的故障排除索引，在文档站的
-[部署](https://rcityharold.github.io/SoulAuth-docs/zh/operate/deployment)与[故障排查](https://rcityharold.github.io/SoulAuth-docs/zh/operate/troubleshooting)。
+[部署](https://soulauth.trantorlabs.sg/zh/operate/deployment)与[故障排查](https://soulauth.trantorlabs.sg/zh/operate/troubleshooting)。
 
 ---
 
@@ -332,11 +332,11 @@ DEPLOYMENT.zh-CN.md
 
 | | |
 |---|---|
-| 五分钟跑起来 | [快速上手](https://rcityharold.github.io/SoulAuth-docs/zh/start/quickstart) |
-| 决定怎么接入 | [接入路径](https://rcityharold.github.io/SoulAuth-docs/zh/start/integration-path) |
-| 接一个 OIDC 客户端 | [授权码流程](https://rcityharold.github.io/SoulAuth-docs/zh/integrate/authorization-code-flow) |
-| 开放访问之前 | [生产清单](https://rcityharold.github.io/SoulAuth-docs/zh/operate/production-checklist) |
-| 每个端点、参数与错误 | [API 参考](https://rcityharold.github.io/SoulAuth-docs/zh/reference/api-conventions) |
+| 五分钟跑起来 | [快速上手](https://soulauth.trantorlabs.sg/zh/start/quickstart) |
+| 决定怎么接入 | [接入路径](https://soulauth.trantorlabs.sg/zh/start/integration-path) |
+| 接一个 OIDC 客户端 | [授权码流程](https://soulauth.trantorlabs.sg/zh/integrate/authorization-code-flow) |
+| 开放访问之前 | [生产清单](https://soulauth.trantorlabs.sg/zh/operate/production-checklist) |
+| 每个端点、参数与错误 | [API 参考](https://soulauth.trantorlabs.sg/zh/reference/api-conventions) |
 
 部署步骤在 [DEPLOYMENT.zh-CN.md](DEPLOYMENT.zh-CN.md) —— 它和英文主版本
 `DEPLOYMENT.md` 是同一份内容，后者正是

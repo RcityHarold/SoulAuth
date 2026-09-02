@@ -20,12 +20,12 @@ Everything else is on the documentation site, in more detail:
 
 | What you want | Where |
 |---|---|
-| Docker Compose / systemd / reverse proxy / upgrades | [Deployment](https://rcityharold.github.io/SoulAuth-docs/operate/deployment) |
-| What to change before going live | [Production checklist](https://rcityharold.github.io/SoulAuth-docs/operate/production-checklist) |
-| Backups, key rotation, incident response | [Operations and recovery](https://rcityharold.github.io/SoulAuth-docs/operate/operations-and-recovery) |
-| Troubleshooting (13 symptoms) | [Troubleshooting](https://rcityharold.github.io/SoulAuth-docs/operate/troubleshooting) |
-| Wiring it in as an OIDC provider | [Integration path](https://rcityharold.github.io/SoulAuth-docs/start/integration-path) |
-| The permission list | [Administration](https://rcityharold.github.io/SoulAuth-docs/reference/administration) |
+| Docker Compose / systemd / reverse proxy / upgrades | [Deployment](https://soulauth.trantorlabs.sg/operate/deployment) |
+| What to change before going live | [Production checklist](https://soulauth.trantorlabs.sg/operate/production-checklist) |
+| Backups, key rotation, incident response | [Operations and recovery](https://soulauth.trantorlabs.sg/operate/operations-and-recovery) |
+| Troubleshooting (13 symptoms) | [Troubleshooting](https://soulauth.trantorlabs.sg/operate/troubleshooting) |
+| Wiring it in as an OIDC provider | [Integration path](https://soulauth.trantorlabs.sg/start/integration-path) |
+| The permission list | [Administration](https://soulauth.trantorlabs.sg/reference/administration) |
 
 ---
 
@@ -43,7 +43,7 @@ SMTP_FROM=noreply@example.com
 `APP_URL` is the public address, not the listen address. It decides three things: the
 OIDC `issuer`, the prefix of links in outgoing mail, and whether cookies get `Secure`.
 What goes wrong when it's wrong is covered in
-[Configuration](https://rcityharold.github.io/SoulAuth-docs/reference/configuration),
+[Configuration](https://soulauth.trantorlabs.sg/reference/configuration),
 under "`APP_URL` is not the listen address".
 
 #### Also required in production (enforced when `APP_URL` is not loopback)
